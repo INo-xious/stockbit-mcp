@@ -1,9 +1,31 @@
+# Dependencies and generated output
 node_modules/
 dist/
+coverage/
+*.tsbuildinfo
+
+# Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Never commit secrets. Auth lives in the OS keychain; the file fallback lands here.
 .stockbit/
 *.token
+*.pem
 .env
 .env.*
+!.env.example
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local research and captured responses
+CODEX-BRIEF.md
+REFERENCE-REPOSITORY.md
+body.txt
