@@ -48,6 +48,28 @@ function looksLikeJwt(v: unknown): v is string {
   return typeof v === "string" && /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(v);
 }
 
+/**
+ * Only accept the main-session refresh token, which is issued on the exodus domain
+ * (e.g. /login/v6/social). Reject other token domains — notably the securities/e-IPO partner
+ * (`api-sekuritas.stockbit.com`, `/partner/`, `eipo`), which also expose a `refresh` field.
+ */
+export function tokenUrlAllowed(url: string): boolean {
+  if (/api-sekuritas\.stockbit\.com|eipo|\/partner\//i.test(url)) return false;
+  if (/wssocial\.stockbit\.com/i.test(url)) return true;
+  if (!/exodus\.stockbit\.com/i.test(url)) return false;
+
+  // For email/password accounts with phone verification, this final verification response issues
+  // the usable session token. No additional token response occurs after the logged-in page loads.
+  if (/\/login\/v\d+\/new-device\/prompt\/verify(?:[/?]|$)/i.test(url)) return true;
+  if (/verification|\/otp(?:[/?]|$)/i.test(url)) return false;
+
+  // Direct username/social logins issue the session on their final credential response.
+  return (
+    /\/login\/v\d+\/(?:username(?:\/browser)?|social)(?:[/?]|$)/i.test(url) ||
+    /\/auth\/v\d+\/login(?:[/?]|$)/i.test(url)
+  );
+}
+
 /** Find a `refresh`/`refresh_token` JWT anywhere in a parsed response body. */
 export function extractRefresh(body: unknown): string | null {
   const seen = new Set<object>();
@@ -56,6 +78,10 @@ export function extractRefresh(body: unknown): string | null {
     seen.add(o);
     for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
       if (/^refresh(_token)?$/i.test(k) && looksLikeJwt(v)) return v;
+      if (/^refresh(_token)?$/i.test(k) && v && typeof v === "object") {
+        const token = (v as Record<string, unknown>).token;
+        if (looksLikeJwt(token)) return token;
+      }
       const nested = walk(v);
       if (nested) return nested;
     }
@@ -91,7 +117,9 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
       `--user-data-dir=${profile}`,
       "--no-first-run",
       "--no-default-browser-check",
-      LOGIN_URL,
+      // Start blank so we can enable network interception BEFORE the login page loads
+      // (the token response fires early — we navigate ourselves once we're listening).
+      "about:blank",
     ],
     { stdio: "ignore" },
   );
@@ -118,8 +146,24 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
     await delay(250);
   }
 
+  const debug = process.env.STOCKBIT_DEBUG === "1";
+  const dbg = (...m: unknown[]) => {
+    if (debug) logStderr("[login:debug]", ...m);
+  };
+
   const cdp = await CDP.connect(wsUrl);
-  const trackedUrls = new Map<string, string>(); // `${sessionId}:${requestId}` -> url
+  // requestId -> { sid, url }. Track anything that might carry the token.
+  const tracked = new Map<string, { sid?: string; url: string }>();
+  const attached = new Set<string>();
+
+  const enableNetwork = (sid?: string) => {
+    if (sid && attached.has(sid)) return;
+    if (sid) attached.add(sid);
+    cdp.send("Network.enable", {}, sid).then(
+      () => dbg("Network.enable ok", sid ?? "(root)"),
+      (e) => dbg("Network.enable failed", String(e)),
+    );
+  };
 
   return new Promise<LoginResult>((resolve, reject) => {
     let done = false;
@@ -130,6 +174,7 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
+      dbg(`timeout. frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
       cleanup();
       reject(new Error("Login timed out — no session captured."));
     }, timeoutMs);
@@ -143,41 +188,86 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
       resolve(result);
     };
 
-    // Enable Network on every attached target (page/popup/OAuth window).
-    cdp.on("Target.attachedToTarget", (p) => {
-      const sid = (p as { sessionId?: string }).sessionId;
-      cdp.send("Network.enable", {}, sid).catch(() => {});
-    });
-
-    // Only inspect bodies of auth-relevant responses.
-    cdp.on("Network.responseReceived", (p, sid) => {
-      const url = (p as any).response?.url ?? "";
-      if (/\/login\/|\/auth\/|social|refresh/i.test(url)) {
-        trackedUrls.set(`${sid}:${(p as any).requestId}`, url);
+    const tryCapture = async (requestId: string, sid?: string) => {
+      const info = tracked.get(requestId);
+      if (!info) return;
+      if (!tokenUrlAllowed(info.url)) {
+        dbg("skipped non-main token source", info.url);
+        tracked.delete(requestId);
+        return;
       }
-    });
-
-    cdp.on("Network.loadingFinished", async (p, sid) => {
-      const key = `${sid}:${(p as any).requestId}`;
-      if (!trackedUrls.has(key)) return;
       try {
-        const res = await cdp.send("Network.getResponseBody", { requestId: (p as any).requestId }, sid);
+        const res = await cdp.send("Network.getResponseBody", { requestId }, sid);
         const text = res.base64Encoded ? Buffer.from(res.body, "base64").toString("utf8") : res.body;
         const json = JSON.parse(text);
         const refresh = extractRefresh(json);
+        dbg("checked body", info.url, "-> refresh found:", Boolean(refresh));
         if (refresh) {
           getStore().set(refresh);
           logStderr("Session captured. You can close the browser window.");
           finish({ captured: true, refresh });
         }
-      } catch {
-        /* body gone or not JSON — ignore */
+      } catch (e) {
+        dbg("getResponseBody failed", info.url, String(e));
+      }
+    };
+
+    // Enable Network on every attached target (page/popup/OAuth window).
+    cdp.on("Target.attachedToTarget", (p) => {
+      const sid = (p as { sessionId?: string }).sessionId;
+      const info = (p as any).targetInfo ?? {};
+      dbg("attached", info.type, info.url);
+      enableNetwork(sid);
+    });
+
+    // Track JSON responses and auth-relevant URLs; inspect their bodies for a refresh token.
+    cdp.on("Network.responseReceived", (p, sid) => {
+      const r = (p as any).response ?? {};
+      const url: string = r.url ?? "";
+      const mime: string = r.mimeType ?? "";
+      const authish = /\/login|\/auth|social|refresh|token|session/i.test(url);
+      if (mime.includes("json") || authish) {
+        tracked.set((p as any).requestId, { sid, url });
+        if (authish) dbg("candidate response", r.status, mime, url);
       }
     });
+
+    // Some flows deliver the token over a WebSocket (e.g. wssocial). Scan frame payloads too.
+    const scanWsFrame = (p: unknown) => {
+      const payload: string = (p as any).response?.payloadData ?? "";
+      if (!payload || !payload.includes("eyJ")) return;
+      let refresh: string | null = null;
+      try {
+        refresh = extractRefresh(JSON.parse(payload));
+      } catch {
+        const m = payload.match(/"refresh(?:_token)?"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[^"]+)"/i);
+        refresh = m?.[1] ?? null;
+      }
+      dbg("ws frame scanned -> refresh found:", Boolean(refresh));
+      if (refresh) {
+        getStore().set(refresh);
+        logStderr("Session captured (via socket). You can close the browser window.");
+        finish({ captured: true, refresh });
+      }
+    };
+    cdp.on("Network.webSocketFrameReceived", (p) => scanWsFrame(p));
+    cdp.on("Network.webSocketFrameSent", (p) => scanWsFrame(p));
+
+    // Try on both events — some XHR bodies are only retrievable at loadingFinished.
+    cdp.on("Network.loadingFinished", (p, sid) => void tryCapture((p as any).requestId, sid));
+    cdp.on("Network.responseReceived", (p, sid) => {
+      // Best-effort early attempt for auth URLs (body often ready already).
+      const url = (p as any).response?.url ?? "";
+      if (/\/login|\/auth|social/i.test(url)) void tryCapture((p as any).requestId, sid);
+    });
+
+    // Enable Network at the root connection too (covers non-flattened event delivery).
+    enableNetwork(undefined);
 
     // Attach to current + future targets, flattened onto this one connection.
     cdp
       .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+      .then(() => dbg("setAutoAttach ok"))
       .catch((e) => {
         if (!done) {
           done = true;
@@ -187,5 +277,37 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
         }
       });
     cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
+
+    // Explicitly attach to already-open tabs (autoAttach doesn't always cover pre-existing ones).
+    cdp
+      .send("Target.getTargets")
+      .then(async (res) => {
+        let navigated = false;
+        for (const t of (res?.targetInfos ?? []) as Array<{ targetId: string; type: string; url: string }>) {
+          if (t.type === "page") {
+            dbg("existing target", t.url);
+            try {
+              const attachedTarget = await cdp.send("Target.attachToTarget", {
+                targetId: t.targetId,
+                flatten: true,
+              });
+              const sid = attachedTarget?.sessionId as string | undefined;
+              if (!sid) continue;
+
+              // Await Network.enable before navigating so the login response cannot race capture.
+              await cdp.send("Network.enable", {}, sid);
+              attached.add(sid);
+              if (!navigated) {
+                navigated = true;
+                await cdp.send("Page.navigate", { url: LOGIN_URL }, sid);
+                dbg("navigated", LOGIN_URL);
+              }
+            } catch (e) {
+              dbg("initial target setup failed", String(e));
+            }
+          }
+        }
+      })
+      .catch((e) => dbg("getTargets failed", String(e)));
   });
 }

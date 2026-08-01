@@ -22,6 +22,8 @@ export class CDP {
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private handlers = new Map<string, EventHandler[]>();
+  /** Count of frames received — a quick liveness signal for diagnostics. */
+  messageCount = 0;
 
   private constructor(ws: WebSocketLike) {
     this.ws = ws;
@@ -35,14 +37,26 @@ export class CDP {
       ws.addEventListener("error", () => reject(new Error("CDP WebSocket error")), { once: true });
     });
     const cdp = new CDP(ws);
-    ws.addEventListener("message", (ev) => cdp.onMessage(String((ev as { data: unknown }).data)));
+    ws.addEventListener("message", (ev) => cdp.onMessage((ev as { data: unknown }).data));
     return cdp;
   }
 
-  private onMessage(data: string): void {
+  /** Normalize a WS frame (string | Buffer | ArrayBuffer) to text. */
+  private static toText(data: unknown): string {
+    if (typeof data === "string") return data;
+    if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+    if (ArrayBuffer.isView(data as ArrayBufferView)) {
+      const v = data as ArrayBufferView;
+      return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("utf8");
+    }
+    return String(data);
+  }
+
+  private onMessage(raw: unknown): void {
+    this.messageCount++;
     let msg: any;
     try {
-      msg = JSON.parse(data);
+      msg = JSON.parse(CDP.toText(raw));
     } catch {
       return;
     }
