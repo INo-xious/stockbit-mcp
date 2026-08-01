@@ -1,0 +1,36 @@
+{
+  "name": "stockbit-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for Stockbit (Indonesian market) — broker summary / bandarmology, quotes, movers, orderbook, fundamentals. Unofficial; uses your own session.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "stockbit-mcp": "dist/bin/stockbit-mcp.js",
+    "stockbit-auth": "dist/bin/stockbit-auth.js"
+  },
+  "exports": {
+    ".": "./dist/src/server.js",
+    "./core": "./dist/src/core/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/bin/stockbit-mcp.js",
+    "auth": "node dist/bin/stockbit-auth.js",
+    "test": "node --test --import tsx test/*.test.ts",
+    "dev:mcp": "node --import tsx bin/stockbit-mcp.ts",
+    "dev:auth": "node --import tsx bin/stockbit-auth.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
