@@ -41,6 +41,46 @@ test("parseRefresh falls back to JWT exp when no explicit expiry", () => {
   assert.equal(p.newRefresh, undefined);
 });
 
+test("parseRefresh handles nested token_data and ISO access expiry", () => {
+  const access = jwt(2000000000);
+  const result = parseRefresh({
+    data: {
+      data: {
+        login: {
+          token_data: {
+            access: { token: access, expired_at: "2026-08-02T18:28:27Z" },
+            refresh: { token: "NESTED-REFRESH", expired_at: "2026-08-08T18:28:27Z" },
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.access, access);
+  assert.equal(result.newRefresh, "NESTED-REFRESH");
+  assert.equal(result.expiresAt, Math.floor(Date.parse("2026-08-02T18:28:27Z") / 1000));
+});
+
+test("parseRefresh finds token objects through unknown response wrappers", () => {
+  const access = jwt(2000000000);
+  const result = parseRefresh({
+    data: {
+      result: {
+        session: {
+          credentials: {
+            access: { token: access, expired_at: "2026-08-03T18:28:27Z" },
+            refresh: { token: "WRAPPED-REFRESH" },
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.access, access);
+  assert.equal(result.newRefresh, "WRAPPED-REFRESH");
+  assert.equal(result.expiresAt, Math.floor(Date.parse("2026-08-03T18:28:27Z") / 1000));
+});
+
 test("refresh persists a ROTATED refresh token (or we lock ourselves out)", async () => {
   const store = getStore();
   store.set("OLD-REFRESH");
