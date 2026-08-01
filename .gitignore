@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+
+# Never commit secrets. Auth lives in the OS keychain; the file fallback lands here.
+.stockbit/
+*.token
+.env
+.env.*
