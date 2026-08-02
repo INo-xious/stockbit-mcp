@@ -11,7 +11,17 @@
 import { spawnSync } from "node:child_process";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { KEYCHAIN } from "../config.js";
 
@@ -32,6 +42,26 @@ function keychainAvailable(): boolean {
   return r.status === 0 || r.status === 1; // `security -h` exits non-zero but exists
 }
 
+/**
+ * Build the macOS Keychain write command.
+ *
+ * Do not pass `-T ""`: Apple documents that option as removing the default trusted creator,
+ * which makes every read/rotation trigger an access-control prompt. Omitting `-T` keeps the
+ * Keychain default: the application creating the item is trusted without granting `-A`
+ * (unrestricted access) to every application.
+ *
+ * The built-in `security` CLI requires the value as the `-w` argument for non-interactive use.
+ */
+export function keychainWriteArgs(token: string): string[] {
+  return [
+    "add-generic-password",
+    "-s", KEYCHAIN.service,
+    "-a", KEYCHAIN.account,
+    "-U",
+    "-w", token,
+  ];
+}
+
 const keychainStore: TokenStore = {
   backend: "keychain",
   get() {
@@ -45,19 +75,8 @@ const keychainStore: TokenStore = {
     return token.length ? token : null;
   },
   set(token: string) {
-    // -U updates if it already exists. Value passed via -w.
-    const r = spawnSync(
-      "security",
-      [
-        "add-generic-password",
-        "-s", KEYCHAIN.service,
-        "-a", KEYCHAIN.account,
-        "-w", token,
-        "-U",
-        "-T", "", // no app is pre-authorized; prompts on access
-      ],
-      { stdio: "ignore" },
-    );
+    // -U updates an existing item without resetting its trusted-application ACL.
+    const r = spawnSync("security", keychainWriteArgs(token), { stdio: "ignore" });
     if (r.status !== 0) throw new Error("Keychain write failed");
   },
   clear() {
@@ -78,6 +97,54 @@ function fileDir(): string {
 }
 function filePath(): string {
   return join(fileDir(), "refresh.enc");
+}
+
+/**
+ * Replace the credential file's contents atomically: write a fresh temp file in the same directory,
+ * flush it to disk, then rename over the target.
+ *
+ * This matters because the refresh token is the *sole* credential and refresh may rotate it — a
+ * truncating in-place write that is interrupted (crash, power loss, full disk) leaves a
+ * partial ciphertext that `get()` cannot decrypt, and there is no second copy to fall back to. The
+ * failure mode is a forced interactive re-login, which is exactly what the persisted token exists to
+ * avoid. `rename` within one filesystem is atomic, so a reader sees either the old token or the new
+ * one and never a half-written file.
+ *
+ * `fsync` before the rename orders the data ahead of the directory entry; the directory fsync after
+ * it makes the rename itself durable. Both are best-effort — some filesystems reject fsync on a
+ * directory handle, and failing the whole write over that would be worse than the risk.
+ *
+ * This is single-process atomicity only. Two processes rotating concurrently still race, with the
+ * last rename winning; cross-process lock coordination is deferred to M3, when the daemon makes a
+ * third writer actually exist.
+ */
+function writeFileAtomic(target: string, contents: Buffer): void {
+  const tmp = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  let fd: number | undefined;
+  try {
+    // Mode on the temp file, not chmod after: the secret must never exist as world-readable.
+    fd = openSync(tmp, "wx", 0o600);
+    writeSync(fd, contents);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, target);
+  } catch (err) {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+
+  try {
+    const dirFd = openSync(fileDir(), "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Directory fsync is unsupported on some platforms/filesystems; the rename still happened.
+  }
 }
 
 function fileKey(): Buffer {
@@ -107,18 +174,18 @@ const fileStore: TokenStore = {
     }
   },
   set(token: string) {
-    mkdirSync(fileDir(), { recursive: true });
-    const FILE_PATH = filePath();
+    mkdirSync(fileDir(), { recursive: true, mode: 0o700 });
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", fileKey(), iv);
     const data = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
-    writeFileSync(FILE_PATH, Buffer.concat([iv, tag, data]), { mode: 0o600 });
-    chmodSync(FILE_PATH, 0o600);
+    writeFileAtomic(filePath(), Buffer.concat([iv, tag, data]));
   },
   clear() {
     const FILE_PATH = filePath();
-    if (existsSync(FILE_PATH)) writeFileSync(FILE_PATH, Buffer.alloc(0), { mode: 0o600 });
+    // An empty file rather than an unlink, so `get()`'s decrypt failure path reports "no token"
+    // identically either way. Atomic for the same reason `set` is.
+    if (existsSync(FILE_PATH)) writeFileAtomic(FILE_PATH, Buffer.alloc(0));
   },
 };
 

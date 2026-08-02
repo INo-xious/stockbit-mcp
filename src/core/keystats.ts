@@ -9,21 +9,22 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 const Envelope = z.object({ data: z.unknown() }).passthrough();
 
 export async function getKeystats(symbol: string): Promise<unknown> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`keystats:${sym}`, CACHE.keystatsTtlMs, async () => {
-    const body = await getJson(`/keystats/${sym}`);
+    const body = await getJson("keystats", { segments: { symbol: sym } });
     return parseOr(Envelope, body, "keystats").data;
   });
 }
 
 export async function getRatios(symbol: string): Promise<unknown> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`ratios:${sym}`, CACHE.keystatsTtlMs, async () => {
-    const body = await getJson(`/keystats/ratio/v1/${sym}`);
+    const body = await getJson("keystatsRatio", { segments: { symbol: sym } });
     return parseOr(Envelope, body, "ratios").data;
   });
 }

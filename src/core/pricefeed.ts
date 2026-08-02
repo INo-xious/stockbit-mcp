@@ -8,6 +8,7 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 /* ------------------------------ intraday prices ------------------------------ */
 
@@ -24,11 +25,9 @@ export interface IntradayPrices {
 }
 
 export async function getIntradayPrices(symbol: string, interval = 1): Promise<IntradayPrices> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`intraday:${sym}:${interval}`, CACHE.quoteTtlMs, async () => {
-    const body = await getJson("/company-price-feed/prices/close", {
-      params: { symbol: sym, interval },
-    });
+    const body = await getJson("pricesClose", { params: { symbol: sym, interval } });
     const parsed = parseOr(CloseResponse, body, "intraday prices");
     const row = parsed.data[0];
     return { symbol: sym, interval, prices: (row?.prices ?? []).map(Number) };
@@ -59,9 +58,9 @@ export interface PerformancePoint {
 }
 
 export async function getPricePerformance(symbol: string): Promise<PerformancePoint[]> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`perf:${sym}`, CACHE.defaultTtlMs, async () => {
-    const body = await getJson(`/company-price-feed/price-performance/${sym}`);
+    const body = await getJson("pricePerformance", { segments: { symbol: sym } });
     const parsed = parseOr(PerfResponse, body, "price performance");
     return parsed.data.prices.map((p) => ({
       timeframe: p.timeframe,
@@ -79,9 +78,9 @@ export async function getPricePerformance(symbol: string): Promise<PerformancePo
 const OrderbookResponse = z.object({ data: z.unknown() }).passthrough();
 
 export async function getOrderbook(symbol: string): Promise<unknown> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`orderbook:${sym}`, CACHE.quoteTtlMs, async () => {
-    const body = await getJson(`/company-price-feed/v2/orderbook/companies/${sym}`);
+    const body = await getJson("orderbook", { segments: { symbol: sym } });
     return parseOr(OrderbookResponse, body, "orderbook").data;
   });
 }

@@ -22,12 +22,15 @@ export const HOSTS = {
  * *securities* token refresh (`POST {carina|trading}/auth/refresh` with a `{refresh_token}` body),
  * which this read-only MCP does not use.
  *
+ * The URL itself is not declared here: `loginRefresh` in `src/http/transport.ts` is the authority on
+ * every authenticated host/method/path, and a second copy of the path would be a second thing to
+ * keep in sync with the policy (ADR-0002).
+ *
  * Still unverified until a real refresh with a valid token is observed: the exact success-response
  * field names (where the new access token lives) and whether the refresh token rotates.
  * parseRefresh() handles those defensively.
  */
 export const AUTH = {
-  refreshUrl: `${HOSTS.exodus}/login/refresh`,
   /** Refresh the access token when it has this many seconds (or fewer) left. */
   expirySkewSeconds: 60,
 } as const;
