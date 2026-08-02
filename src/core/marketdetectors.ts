@@ -7,6 +7,7 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 export type TransactionType = "NET" | "BUY" | "SELL";
 export type MarketBoard = "REGULER" | "NEGOTIATED" | "CASH";
@@ -78,7 +79,7 @@ export interface BrokerSummary {
 const num = (s?: string): number => (s == null ? 0 : Number(s));
 
 export async function getBrokerSummary(opts: BrokerSummaryOptions): Promise<BrokerSummary> {
-  const symbol = opts.symbol.toUpperCase();
+  const symbol = normalizeSymbol(opts.symbol);
   const params = {
     transaction_type: `TRANSACTION_TYPE_${opts.transactionType ?? "NET"}`,
     market_board: `MARKET_BOARD_${opts.marketBoard ?? "REGULER"}`,
@@ -89,7 +90,7 @@ export async function getBrokerSummary(opts: BrokerSummaryOptions): Promise<Brok
   const key = `brokerSummary:${symbol}:${JSON.stringify(params)}`;
 
   return cached(key, CACHE.brokerSummaryTtlMs, async () => {
-    const body = await getJson(`/marketdetectors/${symbol}`, { params });
+    const body = await getJson("marketDetectors", { segments: { symbol }, params });
     const parsed = parseOr(Response, body, "broker summary");
     const bs = parsed.data.broker_summary;
 

@@ -1,15 +1,20 @@
 /**
- * HTTP client for the Stockbit exodus API. Responsibilities:
+ * Market-data read client. Responsibilities:
  *   - inject a fresh Bearer token (auth/session)
- *   - browser-shaped default headers
  *   - concurrency cap + min-spacing + exponential backoff on 429/5xx
  *   - on 401: refresh once and retry the request a single time
  *   - normalize errors via the grpc-gateway envelope mapper
  *   - never leak secrets (redaction is applied to all thrown errors)
+ *
+ * It does not construct the request. Host, method, path, headers, and redirect policy belong to
+ * `src/http/transport.ts` (ADR-0002); callers name a route from the closed table there rather than
+ * passing a path, and the `base` override this module used to accept is gone — it was a way to
+ * point a bearer-carrying request at an arbitrary origin.
  */
-import { HOSTS, RATE, defaultHeaders } from "../config.js";
+import { RATE } from "../config.js";
 import { ensureFresh, forceRefresh } from "../auth/session.js";
 import { mapHttpError, StockbitError } from "./errors.js";
+import { authenticatedRequest, type QueryParams, type RouteName, type Segments } from "./transport.js";
 
 /* --------------------------- tiny concurrency limiter --------------------------- */
 
@@ -41,58 +46,38 @@ function sleep(ms: number): Promise<void> {
 /* ---------------------------------- core GET ---------------------------------- */
 
 export interface GetOptions {
+  /** Values for the route's dynamic path segments. Validated by the transport. */
+  segments?: Segments;
   /** Query params; undefined/null values are dropped. */
-  params?: Record<string, string | number | boolean | undefined | null>;
-  /** Base host, defaults to exodus. */
-  base?: string;
-}
-
-function buildUrl(path: string, base: string, params?: GetOptions["params"]): string {
-  const url = new URL(path.replace(/^\//, ""), base.endsWith("/") ? base : base + "/");
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-  }
-  return url.toString();
-}
-
-async function rawFetch(url: string, token: string): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RATE.requestTimeoutMs);
-  try {
-    return await fetch(url, {
-      method: "GET",
-      headers: { ...defaultHeaders(), authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  params?: QueryParams;
 }
 
 /**
- * GET a JSON resource. Returns parsed body on 2xx; throws StockbitError otherwise.
- * Handles 401 (refresh+retry once) and 429/5xx (backoff up to RATE.maxRetries).
+ * GET a JSON resource from a declared route. Returns the parsed body on 2xx; throws StockbitError
+ * otherwise. Handles 401 (refresh+retry once) and 429/5xx (backoff up to RATE.maxRetries).
  */
-export async function getJson<T = unknown>(path: string, opts: GetOptions = {}): Promise<T> {
-  const base = opts.base ?? HOSTS.exodus;
-  const url = buildUrl(path, base, opts.params);
-
+export async function getJson<T = unknown>(route: RouteName, opts: GetOptions = {}): Promise<T> {
   await acquire();
   try {
     let refreshedOn401 = false;
     for (let attempt = 0; attempt <= RATE.maxRetries; attempt++) {
-      let token = await ensureFresh();
+      const token = await ensureFresh();
       let res: Response;
       try {
-        res = await rawFetch(url, token);
+        res = await authenticatedRequest(route, {
+          token,
+          segments: opts.segments,
+          params: opts.params,
+        });
       } catch (err) {
+        // A policy or validation rejection is our bug or the user's — never retried.
+        if (err instanceof StockbitError && err.kind === "invalid_param") throw err;
         // Network/abort — treat as upstream and back off.
         if (attempt < RATE.maxRetries) {
           await sleep(RATE.backoffBaseMs * 2 ** attempt);
           continue;
         }
+        if (err instanceof StockbitError) throw err;
         throw new StockbitError("upstream", `Network error: ${String(err)}`);
       }
 

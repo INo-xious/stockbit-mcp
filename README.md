@@ -38,6 +38,10 @@ node dist/bin/stockbit-auth.js login
 node dist/bin/stockbit-auth.js status   # check backend + expiry
 ```
 
+On macOS, the first login may ask once for permission to update the `stockbit-mcp` Keychain item.
+The server does not grant unrestricted Keychain access, and subsequent token rotations should not
+reset the item's access permissions.
+
 After this single login, the server auto-refreshes indefinitely — you won't log in again until the
 refresh token itself expires. The one interactive login is unavoidable (Stockbit's OAuth + reCAPTCHA
 require a human once); only the *token handling* is automated away.

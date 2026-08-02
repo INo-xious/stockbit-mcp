@@ -8,9 +8,10 @@
  * The code below handles rotation defensively: if the response carries a new refresh_token we
  * persist it immediately. If those assumptions change, adjust AUTH in config.ts + parseRefresh().
  */
-import { AUTH, HOSTS } from "../config.js";
+import { AUTH } from "../config.js";
 import { getStore } from "./store.js";
 import { StockbitError } from "../http/errors.js";
+import { authenticatedRequest } from "../http/transport.js";
 import { redact } from "../redact.js";
 
 interface AccessToken {
@@ -159,17 +160,12 @@ async function doRefresh(): Promise<AccessToken> {
 
   let res: Response;
   try {
-    // Contract: refresh token goes in the Authorization header; body is empty. See config.AUTH.
-    res = await fetch(AUTH.refreshUrl, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${refreshToken}`,
-        origin: HOSTS.web,
-        referer: `${HOSTS.web}/`,
-      },
-    });
+    // Contract: the refresh token goes in the Authorization header; body is empty. This is the sole
+    // permitted write (ADR-0002), and it goes through the transport as the declared `loginRefresh`
+    // route — not a direct `fetch`, which is how this call sat outside the boundary entirely.
+    res = await authenticatedRequest("loginRefresh", { token: refreshToken });
   } catch (err) {
+    if (err instanceof StockbitError) throw err;
     throw new StockbitError("upstream", `Refresh request failed: ${redact(String(err))}`);
   }
 

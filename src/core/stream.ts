@@ -7,6 +7,7 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr, StrOrNum } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 const Post = z
   .object({
@@ -31,9 +32,9 @@ export interface StreamPost {
 }
 
 export async function getSentimentStream(symbol: string, limit = 30): Promise<StreamPost[]> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`stream:${sym}`, CACHE.defaultTtlMs, async () => {
-    const body = await getJson(`/stream/v3/symbol/${sym}`);
+    const body = await getJson("streamSymbol", { segments: { symbol: sym } });
     const parsed = parseOr(Response, body, "sentiment stream");
     return parsed.data.stream.slice(0, limit).map((p) => ({
       id: p.stream_id,

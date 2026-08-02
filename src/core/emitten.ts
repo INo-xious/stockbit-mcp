@@ -9,6 +9,7 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr, StrOrNum } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 /* ----------------------------------- quote ----------------------------------- */
 
@@ -48,9 +49,9 @@ export interface Quote {
 }
 
 export async function getQuote(symbol: string): Promise<Quote> {
-  const sym = symbol.toUpperCase();
+  const sym = normalizeSymbol(symbol);
   return cached(`quote:${sym}`, CACHE.quoteTtlMs, async () => {
-    const body = await getJson(`/emitten/${sym}/info`);
+    const body = await getJson("emittenInfo", { segments: { symbol: sym } });
     const { data } = parseOr(QuoteResponse, body, "quote");
     return {
       symbol: sym,
@@ -77,7 +78,7 @@ const ListResponse = z.object({ data: z.array(z.record(z.unknown())) }).passthro
 
 export async function getTrending(): Promise<Array<Record<string, unknown>>> {
   return cached("trending", CACHE.defaultTtlMs, async () => {
-    const body = await getJson("/emitten/trending");
+    const body = await getJson("emittenTrending");
     return parseOr(ListResponse, body, "trending").data;
   });
 }
@@ -102,7 +103,7 @@ export interface Sector {
 
 export async function getSectors(): Promise<Sector[]> {
   return cached("sectors", CACHE.keystatsTtlMs, async () => {
-    const body = await getJson("/emitten/sectors");
+    const body = await getJson("emittenSectors");
     const parsed = parseOr(z.object({ data: z.array(SectorRow) }).passthrough(), body, "sectors");
     return parsed.data.map((s) => ({ id: s.id, name: s.name, alias: s.alias1 }));
   });
@@ -117,6 +118,6 @@ export async function getTopMovers(
   limit = 25,
 ): Promise<Array<Record<string, unknown>>> {
   // Not cached long: movers change during the session. Empty array after-hours is normal.
-  const body = await getJson(`/emitten/hotlist/${type}`, { params: { limit } });
+  const body = await getJson("emittenHotlist", { segments: { moverType: type }, params: { limit } });
   return parseOr(ListResponse, body, `hotlist ${type}`).data;
 }

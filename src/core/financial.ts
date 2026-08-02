@@ -8,6 +8,7 @@ import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { normalizeSymbol } from "../symbol.js";
 
 export interface FinancialOptions {
   symbol: string;
@@ -39,7 +40,7 @@ export interface Financials {
 }
 
 export async function getFinancials(opts: FinancialOptions): Promise<Financials> {
-  const sym = opts.symbol.toUpperCase();
+  const sym = normalizeSymbol(opts.symbol);
   const params = {
     symbol: sym,
     data_type: opts.dataType ?? 1,
@@ -48,7 +49,7 @@ export async function getFinancials(opts: FinancialOptions): Promise<Financials>
   };
   const key = `financials:${JSON.stringify(params)}`;
   return cached(key, CACHE.keystatsTtlMs, async () => {
-    const body = await getJson("/findata-view/company/financial", { params });
+    const body = await getJson("financial", { params });
     const { data } = parseOr(Response, body, "financials");
     // Drop html_report — it's a huge presentational blob unsuitable for tool output.
     return {
