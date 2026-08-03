@@ -1,93 +1,61 @@
 /**
- * One-time browser login capture. Launches the user's existing Chromium-family browser with a
- * temporary profile + remote debugging, points it at the Stockbit login page, and watches network
- * responses over CDP. When a login/refresh response carries a `refresh` JWT, it's stored — the user
- * only had to log in; they never see or handle a token.
+ * One-time browser login capture. Launches a Chromium-family browser with remote debugging, points
+ * it at the Stockbit login page, and watches network responses over CDP. When a login response
+ * carries a `refresh` JWT it is stored — the user only had to log in; they never see or handle a
+ * token.
  *
- * The initial interactive login (OAuth + reCAPTCHA) is unavoidable and done by the human. Everything
- * after — capture and all subsequent refreshes — is automatic.
+ * The interactive login itself (credentials, captcha, OTP) is done by the human and cannot be
+ * automated. Everything after — capture, storage, and all subsequent refreshes — is automatic.
+ *
+ * Two capture routes run at once, because neither alone is sufficient:
+ *
+ *   1. `Fetch` interception at the Response stage. The request is *paused* while we read its body,
+ *      so the body cannot be destroyed before we get it. This is the reliable route.
+ *   2. `Network` events + `Network.getResponseBody`. Kept as a fallback, since `Fetch` patterns are
+ *      URL-scoped and a token arriving somewhere unexpected would slip past them.
+ *
+ * Route 2 alone was the original implementation, and it loses the token whenever the owning target
+ * goes away before the body is read: `Network.getResponseBody` resolves against a target that must
+ * still exist. A login flow that finishes in a popup which then closes itself — the shape every
+ * OAuth provider uses — destroys the body on the way out. This was observed in practice against the
+ * new-device verification response, which failed with "No resource with given identifier found" and
+ * only succeeded on a lucky `loadingFinished` retry.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { removeDirWithRetry } from "./tempdir.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { CDP } from "./cdp.js";
 import { getStore } from "./store.js";
 import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
+import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
+import { findBrowser, findBrowsers } from "./browsers.js";
+
+// Re-exported so existing importers (and tests) keep their entry point while the rules themselves
+// live in the module both capture routes share.
+export { extractRefresh, tokenUrlAllowed } from "./capture.js";
+export { findBrowser, findBrowsers } from "./browsers.js";
 
 const LOGIN_URL = `${HOSTS.web}/login`;
 
-/** Locate an installed Chromium-family browser (Chrome/Edge/Brave/Chromium). */
-export function findBrowser(): string | null {
-  const byPlatform: Record<string, string[]> = {
-    darwin: [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    ],
-    win32: [
-      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    ],
-    linux: [
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/microsoft-edge",
-      "/usr/bin/brave-browser",
-    ],
-  };
-  return (byPlatform[process.platform] ?? byPlatform.linux).find(existsSync) ?? null;
-}
-
-function looksLikeJwt(v: unknown): v is string {
-  return typeof v === "string" && /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(v);
-}
-
 /**
- * Only accept the main-session refresh token, which is issued on the exodus domain
- * (e.g. /login/v6/social). Reject other token domains — notably the securities/e-IPO partner
- * (`api-sekuritas.stockbit.com`, `/partner/`, `eipo`), which also expose a `refresh` field.
+ * URL patterns handed to `Fetch.enable`. Deliberately narrow: every matching response is paused
+ * until we resume it, so a broad pattern would stall the whole page load behind our round-trips.
  */
-export function tokenUrlAllowed(url: string): boolean {
-  if (/api-sekuritas\.stockbit\.com|eipo|\/partner\//i.test(url)) return false;
-  if (/wssocial\.stockbit\.com/i.test(url)) return true;
-  if (!/exodus\.stockbit\.com/i.test(url)) return false;
+const FETCH_PATTERNS = ["*stockbit.com/login/*", "*stockbit.com/auth/*"];
 
-  // For email/password accounts with phone verification, this final verification response issues
-  // the usable session token. No additional token response occurs after the logged-in page loads.
-  if (/\/login\/v\d+\/new-device\/prompt\/verify(?:[/?]|$)/i.test(url)) return true;
-  if (/verification|\/otp(?:[/?]|$)/i.test(url)) return false;
+/** Ceiling on any single arming command. See `armSession` for why an unbounded await deadlocks. */
+const ARM_TIMEOUT_MS = 5_000;
 
-  // Direct username/social logins issue the session on their final credential response.
-  return (
-    /\/login\/v\d+\/(?:username(?:\/browser)?|social)(?:[/?]|$)/i.test(url) ||
-    /\/auth\/v\d+\/login(?:[/?]|$)/i.test(url)
-  );
-}
+/** Ceiling on browser startup, independent of how long the user then has to log in. */
+const BROWSER_START_TIMEOUT_MS = 30_000;
 
-/** Find a `refresh`/`refresh_token` JWT anywhere in a parsed response body. */
-export function extractRefresh(body: unknown): string | null {
-  const seen = new Set<object>();
-  const walk = (o: unknown): string | null => {
-    if (!o || typeof o !== "object" || seen.has(o)) return null;
-    seen.add(o);
-    for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
-      if (/^refresh(_token)?$/i.test(k) && looksLikeJwt(v)) return v;
-      if (/^refresh(_token)?$/i.test(k) && v && typeof v === "object") {
-        const token = (v as Record<string, unknown>).token;
-        if (looksLikeJwt(token)) return token;
-      }
-      const nested = walk(v);
-      if (nested) return nested;
-    }
-    return null;
-  };
-  return walk(body);
+/** Persistent profile, so a re-login does not mean re-entering password + OTP from scratch. */
+export function defaultProfileDir(): string {
+  return join(homedir(), ".stockbit", "browser-profile");
 }
 
 export interface LoginResult {
@@ -95,40 +63,126 @@ export interface LoginResult {
   refresh?: string;
 }
 
+export interface CaptureOptions {
+  /** How long the user has to complete login. */
+  timeoutMs?: number;
+  /** Page to open. */
+  startUrl?: string;
+  /** Which responses may carry a token. */
+  isTokenUrl?: (url: string) => boolean;
+  /** `Fetch.enable` URL patterns; must cover whatever `isTokenUrl` accepts. */
+  fetchPatterns?: string[];
+  /** Browser executable. Defaults to the best one discovered. */
+  browserPath?: string;
+  /** Profile directory. Pass `"fresh"` for a throwaway one. */
+  profileDir?: string | "fresh";
+  /** Extra command-line flags. */
+  extraArgs?: string[];
+  /** Persist the captured token. `false` for self-tests. */
+  persist?: boolean;
+  /** Suppress the user-facing "a browser opened" chatter. */
+  quiet?: boolean;
+}
+
 /**
  * Run the interactive capture. Resolves once a refresh token is seen (and stored), or rejects on
- * timeout / no browser. `timeoutMs` is how long the user has to complete login.
+ * timeout, browser exit, or the DevTools transport dropping.
  */
-export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<LoginResult> {
-  const bin = findBrowser();
+export async function captureViaBrowserLogin(
+  optionsOrTimeout: CaptureOptions | number = {},
+): Promise<LoginResult> {
+  const options: CaptureOptions =
+    typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : optionsOrTimeout;
+
+  const timeoutMs =
+    options.timeoutMs ?? (Number(process.env.STOCKBIT_LOGIN_TIMEOUT_MS) || 900_000);
+  const startUrl = options.startUrl ?? LOGIN_URL;
+  const isTokenUrl = options.isTokenUrl ?? tokenUrlAllowed;
+  const fetchPatterns = options.fetchPatterns ?? FETCH_PATTERNS;
+  const persist = options.persist !== false;
+
+  const bin = options.browserPath ?? findBrowser();
   if (!bin) {
+    const seen = findBrowsers();
+    const detail = seen.length
+      ? `Found ${seen.map((b) => b.name).join(", ")}, but none can be driven ` +
+        "(Firefox removed CDP support in v141)."
+      : "No browser found.";
     throw new Error(
-      "No Chromium-family browser found (Chrome/Edge/Brave/Chromium). " +
-        "Use `stockbit-auth bootstrap` to paste a refresh token instead.",
+      `${detail}\nEither install a Chromium-family browser (Chrome/Edge/Brave), point ` +
+        "STOCKBIT_BROWSER at one, or use `stockbit-auth import-har` to import a login from any browser.",
     );
   }
 
+  // A browser profile that has been logged into Stockbit holds session cookies and a Login Data
+  // store — a second copy of the credential this project guards. It is created owner-only, and the
+  // parent is corrected too: `mkdirSync(recursive)` applies the mode only to directories it
+  // actually creates, so a `~/.stockbit` that already exists keeps whatever mode it had.
+  let profile: string;
+  let profileIsDisposable = false;
+  if (options.profileDir === "fresh") {
+    profile = mkdtempSync(join(tmpdir(), "stockbit-login-"));
+    profileIsDisposable = true;
+  } else {
+    profile = options.profileDir ?? defaultProfileDir();
+    mkdirSync(profile, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      for (const dir of [dirname(profile), profile]) {
+        try {
+          chmodSync(dir, 0o700);
+        } catch {
+          /* best effort; a pre-existing dir we do not own is not ours to fix */
+        }
+      }
+    }
+  }
+
   const port = 9500 + Math.floor(Math.random() * 400);
-  const profile = mkdtempSync(join(tmpdir(), "stockbit-login-"));
   const child: ChildProcess = spawn(
     bin,
     [
       `--remote-debugging-port=${port}`,
+      // Chrome 136+ refuses remote debugging against the DEFAULT profile directory, so this flag
+      // is mandatory, not merely tidy.
       `--user-data-dir=${profile}`,
       "--no-first-run",
       "--no-default-browser-check",
-      // Start blank so we can enable network interception BEFORE the login page loads
-      // (the token response fires early — we navigate ourselves once we're listening).
+      // A fresh --user-data-dir still inherits browser-managed extensions, which open their own
+      // tabs (an OAuth prompt stole focus from the login page here) and bury the responses we watch.
+      "--disable-extensions",
+      "--disable-component-extensions-with-background-pages",
+      // The one window the user must find and type into; do not let it open behind others.
+      "--start-maximized",
+      "--new-window",
+      // Start blank so interception is live before the login page loads.
       "about:blank",
+      ...(options.extraArgs ?? []),
     ],
     { stdio: "ignore" },
   );
 
-  logStderr("A browser window opened. Log into Stockbit there — your session is captured automatically.");
+  if (!options.quiet) {
+    logStderr("A browser window opened. Log into Stockbit there — your session is captured automatically.");
+  }
 
-  // Wait for the DevTools endpoint to come up.
+  // Wait for the DevTools endpoint.
+  //
+  // The startup wait is bounded separately from the login window, and it watches the child. The
+  // most common Windows failure is launching against a profile that another window already has
+  // open: the new process hands off to the running instance and exits immediately, so the debugging
+  // port never opens. Polling on the login timeout alone turned that into a fifteen-minute silent
+  // hang with no window to look at.
+  let childExited = false;
+  child.once("exit", () => {
+    childExited = true;
+  });
+
   let wsUrl = "";
-  const deadline = Date.now() + timeoutMs;
+  const alreadyOpenHint =
+    "The browser exited immediately without opening a debugging port. This usually means a window " +
+    "is already open using this profile — close every window of that browser and retry, or use " +
+    "`--fresh-profile`.";
+  const deadline = Date.now() + Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS);
   for (;;) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/json/version`);
@@ -139,9 +193,14 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
     } catch {
       /* not up yet */
     }
+    if (childExited) throw new Error(alreadyOpenHint);
     if (Date.now() > deadline) {
       child.kill();
-      throw new Error("Browser did not start in time.");
+      throw new Error(
+        "Browser did not start in time (no debugging port after " +
+          `${Math.round(Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS) / 1000)}s). ` +
+          "If a window using this profile is already open, close it and retry.",
+      );
     }
     await delay(250);
   }
@@ -152,75 +211,202 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
   };
 
   const cdp = await CDP.connect(wsUrl);
-  // requestId -> { sid, url }. Track anything that might carry the token.
   const tracked = new Map<string, { sid?: string; url: string }>();
   const attached = new Set<string>();
 
-  const enableNetwork = (sid?: string) => {
-    if (sid && attached.has(sid)) return;
-    if (sid) attached.add(sid);
-    cdp.send("Network.enable", {}, sid).then(
-      () => dbg("Network.enable ok", sid ?? "(root)"),
-      (e) => dbg("Network.enable failed", String(e)),
-    );
-  };
-
   return new Promise<LoginResult>((resolve, reject) => {
     let done = false;
-    const cleanup = () => {
+
+    /**
+     * Tear down and, for a throwaway profile, delete it.
+     *
+     * Returns a promise the settlement path must await. Fire-and-forget does not work here: the CLI
+     * calls `process.exit` as soon as this function's promise settles, which kills the retry loop
+     * before Windows has released the browser's file handles — the profile then survives in %TEMP%
+     * holding live Stockbit session cookies. (Observed: a `--fresh-profile` run left its profile
+     * behind every time.)
+     */
+    const cleanup = async (): Promise<void> => {
       cdp.close();
       child.kill();
+      if (!profileIsDisposable) return;
+      if (!(await removeDirWithRetry(profile))) {
+        logStderr(
+          `Note: could not delete the temporary browser profile at ${profile} — it contains a ` +
+            "Stockbit session; please remove it.",
+        );
+      }
     };
+
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
       dbg(`timeout. frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
-      cleanup();
-      reject(new Error("Login timed out — no session captured."));
+      void cleanup().finally(() => reject(new Error("Login timed out — no session captured.")));
     }, timeoutMs);
-    (timer as { unref?: () => void }).unref?.();
+    // Deliberately NOT unref'd. The DevTools socket is the only other handle keeping this process
+    // alive; when the browser closes, an unref'd timer lets the loop drain with the promise still
+    // pending, and the process exits 0 — indistinguishable from a successful capture.
+
+    const fail = (message: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      dbg(`${message} frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
+      void cleanup().finally(() => reject(new Error(message)));
+    };
+
+    cdp.onClose(() =>
+      fail(
+        "The browser closed before a session was captured. Re-run `stockbit-auth login` and log in " +
+          "inside the new window it opens — logging into a different browser window is not observed.",
+      ),
+    );
+    child.on("exit", () =>
+      fail("The browser exited before a session was captured. Re-run `stockbit-auth login`."),
+    );
 
     const finish = (result: LoginResult) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      cleanup();
-      resolve(result);
+      // Settle only after cleanup, so the caller cannot exit the process mid-deletion.
+      void cleanup().finally(() => resolve(result));
     };
+
+    const accept = (refresh: string, via: string) => {
+      if (done) return;
+      // Persistence is separated from recognition because both callers sit inside a catch that
+      // logs "getResponseBody failed" at debug level. A store write that throws there — a locked
+      // Keychain, a denied access prompt, EPERM from an antivirus holding the temp file — would be
+      // swallowed, leaving `done` false and the capture running until it reported "no session
+      // captured" fifteen minutes later. That is the opposite of what happened, and it points
+      // diagnosis at interception instead of at the store.
+      if (persist) {
+        try {
+          getStore().set(refresh);
+        } catch (err) {
+          fail(
+            `Session was captured but could not be stored: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
+      }
+      if (!options.quiet) logStderr(`Session captured (${via}). You can close the browser window.`);
+      finish({ captured: true, refresh });
+    };
+
+    /**
+     * Bring a session fully online, then release it.
+     *
+     * Order matters and is the whole point: with `waitForDebuggerOnStart` the target is frozen
+     * before it runs a single byte of script, so enabling interception here cannot lose a response
+     * to a race. `Runtime.runIfWaitingForDebugger` MUST be called afterwards or the target stays
+     * frozen forever — a hung popup is a worse failure than a missed one.
+     */
+    const armSession = async (sid?: string) => {
+      if (sid && attached.has(sid)) return;
+      if (sid) attached.add(sid);
+      try {
+        // Every enable is bounded. A target frozen by waitForDebuggerOnStart dispatches these to
+        // its own suspended thread, so for worker-class targets (service workers, and the browser's
+        // internal `other` target) the reply cannot arrive until the resume below — which an
+        // unbounded await would be blocking. That circularity wedges the target for the whole login
+        // window. Bounding turns a permanent deadlock into a logged, harmless miss.
+        await cdp.send("Network.enable", {}, sid, ARM_TIMEOUT_MS).then(
+          () => dbg("Network.enable ok", sid ?? "(root)"),
+          (e) => dbg("Network.enable failed", String(e)),
+        );
+        await cdp
+          .send(
+            "Fetch.enable",
+            { patterns: fetchPatterns.map((urlPattern) => ({ urlPattern, requestStage: "Response" })) },
+            sid,
+            ARM_TIMEOUT_MS,
+          )
+          .then(
+            () => dbg("Fetch.enable ok", sid ?? "(root)"),
+            (e) => dbg("Fetch.enable failed", String(e)),
+          );
+        // Nested targets (a popup opening a popup) need their own auto-attach.
+        if (sid) {
+          await cdp
+            .send(
+              "Target.setAutoAttach",
+              { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
+              sid,
+              ARM_TIMEOUT_MS,
+            )
+            .catch(() => {});
+        }
+      } finally {
+        // The resume runs on every path, including a thrown enable. Skipping it leaves the target
+        // frozen forever, which is a worse failure than missing its traffic.
+        if (sid) {
+          await cdp.send("Runtime.runIfWaitingForDebugger", {}, sid, ARM_TIMEOUT_MS).catch(() => {});
+          dbg("resumed", sid);
+        }
+      }
+    };
+
+    /* ------------------------- route 1: Fetch (authoritative) ------------------------- */
+
+    cdp.on("Fetch.requestPaused", (p, sid) => {
+      const requestId = (p as any).requestId as string;
+      const url: string = (p as any).request?.url ?? "";
+      const status = (p as any).responseStatusCode;
+
+      const resume = async () => {
+        // The request is stalled until we answer. Any failure here must still release it, or the
+        // user's login hangs on a spinner forever.
+        try {
+          await cdp.send("Fetch.continueResponse", { requestId }, sid);
+        } catch {
+          await cdp.send("Fetch.continueRequest", { requestId }, sid).catch(() => {});
+        }
+      };
+
+      void (async () => {
+        try {
+          if (status === undefined || !isTokenUrl(url)) return;
+          const res = await cdp.send("Fetch.getResponseBody", { requestId }, sid);
+          const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
+          dbg("fetch-intercepted", status, url, "-> refresh found:", Boolean(refresh));
+          if (refresh) accept(refresh, "intercepted");
+        } catch (e) {
+          dbg("Fetch.getResponseBody failed", url, String(e));
+        } finally {
+          await resume();
+        }
+      })();
+    });
+
+    /* --------------------- route 2: Network events (fallback) --------------------- */
 
     const tryCapture = async (requestId: string, sid?: string) => {
       const info = tracked.get(requestId);
       if (!info) return;
-      if (!tokenUrlAllowed(info.url)) {
-        dbg("skipped non-main token source", info.url);
+      if (!isTokenUrl(info.url)) {
         tracked.delete(requestId);
         return;
       }
       try {
         const res = await cdp.send("Network.getResponseBody", { requestId }, sid);
-        const text = res.base64Encoded ? Buffer.from(res.body, "base64").toString("utf8") : res.body;
-        const json = JSON.parse(text);
-        const refresh = extractRefresh(json);
+        const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
         dbg("checked body", info.url, "-> refresh found:", Boolean(refresh));
-        if (refresh) {
-          getStore().set(refresh);
-          logStderr("Session captured. You can close the browser window.");
-          finish({ captured: true, refresh });
-        }
+        if (refresh) accept(refresh, "network");
       } catch (e) {
         dbg("getResponseBody failed", info.url, String(e));
       }
     };
 
-    // Enable Network on every attached target (page/popup/OAuth window).
     cdp.on("Target.attachedToTarget", (p) => {
       const sid = (p as { sessionId?: string }).sessionId;
       const info = (p as any).targetInfo ?? {};
       dbg("attached", info.type, info.url);
-      enableNetwork(sid);
+      void armSession(sid);
     });
 
-    // Track JSON responses and auth-relevant URLs; inspect their bodies for a refresh token.
     cdp.on("Network.responseReceived", (p, sid) => {
       const r = (p as any).response ?? {};
       const url: string = r.url ?? "";
@@ -228,83 +414,60 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
       const authish = /\/login|\/auth|social|refresh|token|session/i.test(url);
       if (mime.includes("json") || authish) {
         tracked.set((p as any).requestId, { sid, url });
-        if (authish) dbg("candidate response", r.status, mime, url);
+        if (authish) {
+          dbg("candidate response", r.status, mime, url);
+          void tryCapture((p as any).requestId, sid);
+        }
       }
     });
 
-    // Some flows deliver the token over a WebSocket (e.g. wssocial). Scan frame payloads too.
+    cdp.on("Network.loadingFinished", (p, sid) => void tryCapture((p as any).requestId, sid));
+
+    // Some flows deliver the token over a WebSocket (e.g. wssocial).
     const scanWsFrame = (p: unknown) => {
       const payload: string = (p as any).response?.payloadData ?? "";
       if (!payload || !payload.includes("eyJ")) return;
-      let refresh: string | null = null;
-      try {
-        refresh = extractRefresh(JSON.parse(payload));
-      } catch {
-        const m = payload.match(/"refresh(?:_token)?"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[^"]+)"/i);
-        refresh = m?.[1] ?? null;
-      }
+      const refresh = refreshFromRawBody(payload, false);
       dbg("ws frame scanned -> refresh found:", Boolean(refresh));
-      if (refresh) {
-        getStore().set(refresh);
-        logStderr("Session captured (via socket). You can close the browser window.");
-        finish({ captured: true, refresh });
-      }
+      if (refresh) accept(refresh, "socket");
     };
     cdp.on("Network.webSocketFrameReceived", (p) => scanWsFrame(p));
     cdp.on("Network.webSocketFrameSent", (p) => scanWsFrame(p));
 
-    // Try on both events — some XHR bodies are only retrievable at loadingFinished.
-    cdp.on("Network.loadingFinished", (p, sid) => void tryCapture((p as any).requestId, sid));
-    cdp.on("Network.responseReceived", (p, sid) => {
-      // Best-effort early attempt for auth URLs (body often ready already).
-      const url = (p as any).response?.url ?? "";
-      if (/\/login|\/auth|social/i.test(url)) void tryCapture((p as any).requestId, sid);
-    });
+    /* --------------------------------- bring-up --------------------------------- */
 
-    // Enable Network at the root connection too (covers non-flattened event delivery).
-    enableNetwork(undefined);
+    void armSession(undefined);
 
-    // Attach to current + future targets, flattened onto this one connection.
     cdp
-      .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+      .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
       .then(() => dbg("setAutoAttach ok"))
-      .catch((e) => {
-        if (!done) {
-          done = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(e as Error);
-        }
-      });
+      .catch((e) => fail(`Could not attach to browser targets: ${String(e)}`));
     cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
 
-    // Explicitly attach to already-open tabs (autoAttach doesn't always cover pre-existing ones).
+    // Explicitly attach to already-open tabs (auto-attach does not cover pre-existing ones).
     cdp
       .send("Target.getTargets")
       .then(async (res) => {
         let navigated = false;
         for (const t of (res?.targetInfos ?? []) as Array<{ targetId: string; type: string; url: string }>) {
-          if (t.type === "page") {
-            dbg("existing target", t.url);
-            try {
-              const attachedTarget = await cdp.send("Target.attachToTarget", {
-                targetId: t.targetId,
-                flatten: true,
-              });
-              const sid = attachedTarget?.sessionId as string | undefined;
-              if (!sid) continue;
-
-              // Await Network.enable before navigating so the login response cannot race capture.
-              await cdp.send("Network.enable", {}, sid);
-              attached.add(sid);
-              if (!navigated) {
-                navigated = true;
-                await cdp.send("Page.navigate", { url: LOGIN_URL }, sid);
-                dbg("navigated", LOGIN_URL);
-              }
-            } catch (e) {
-              dbg("initial target setup failed", String(e));
+          if (t.type !== "page") continue;
+          dbg("existing target", t.url);
+          try {
+            const attachedTarget = await cdp.send("Target.attachToTarget", {
+              targetId: t.targetId,
+              flatten: true,
+            });
+            const sid = attachedTarget?.sessionId as string | undefined;
+            if (!sid) continue;
+            // Await arming before navigating so the login response cannot race capture.
+            await armSession(sid);
+            if (!navigated) {
+              navigated = true;
+              await cdp.send("Page.navigate", { url: startUrl }, sid);
+              dbg("navigated", startUrl);
             }
+          } catch (e) {
+            dbg("initial target setup failed", String(e));
           }
         }
       })
