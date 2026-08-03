@@ -65,6 +65,11 @@ export const RATE = {
 export const CACHE = {
   quoteTtlMs: 3_000,
   brokerSummaryTtlMs: 60_000,
+  /**
+   * Broker summary for a date range that ended before today. Those sessions are closed and their
+   * numbers can no longer change, so the only reason to re-fetch is process restart.
+   */
+  brokerSummarySettledTtlMs: 6 * 60 * 60_000,
   keystatsTtlMs: 300_000,
   defaultTtlMs: 5_000,
 } as const;

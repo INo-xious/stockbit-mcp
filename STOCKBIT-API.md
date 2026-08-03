@@ -129,7 +129,46 @@ each `{accdist:"Big Acc"|…, amount, percent, vol}`.
 - `market_board`: `MARKET_BOARD_REGULER` ✓ · likely `_NEGOTIATED`, `_CASH`. **Use REGULER** for
   bandarmology (negotiated block trades distort accumulation signals).
 - `investor_type`: `INVESTOR_TYPE_ALL` ✓ · likely `_FOREIGN`, `_DOMESTIC`
-- `period`: `BROKER_SUMMARY_PERIOD_LATEST` ✓ · likely date-range variants
+- `period`: **only** `BROKER_SUMMARY_PERIOD_LATEST` ✓ and `_UNSPECIFIED` ✓ are accepted. There are
+  **no** date-range period variants — an earlier revision of this document speculated otherwise and
+  was wrong. Swept and rejected: `_CUSTOM`, `_RANGE`, `_DATE_RANGE`, `_CUSTOM_DATE`, `_TODAY`,
+  `_DAILY`, `_WEEKLY`, `_1D`, `_1W`, `_1M`, `_3M`, `_6M`, `_1Y`, `_YTD`, `_ALL`, and every bare form.
+
+#### Date ranges — `from` / `to` [CONFIRMED 2026-08-03, live]
+
+```
+GET /marketdetectors/{SYMBOL}?...&from=2026-07-28&to=2026-08-01     # NO period parameter
+```
+
+> ⚠️ **`period` and `from`/`to` are mutually exclusive, and violating that fails silently.** If
+> `period` is present the dates are ignored and the API returns **HTTP 200 with the latest session**.
+> A caller asking for last week receives today's numbers with no error. Omit `period` entirely when
+> sending dates.
+
+Verified behaviour:
+
+| Input | Result |
+|---|---|
+| `from`+`to`, `YYYY-MM-DD`, no `period` | ✅ real range; `data.from`/`data.to` echo it back |
+| `from`=`to` | ✅ that single session — the way to query one historical day |
+| `from` alone (or `to` alone) | ⚠️ **200, latest session** — the lone date is silently ignored |
+| `date_from`/`date_to`, `start_date`/`end_date`, `start`/`end` | ⚠️ **200, latest session** — names ignored |
+| `20260728` (compact) or `2026/07/27` (slashed) | ❌ `Please check your request` |
+| `from` > `to` | ❌ `The Start date must be earlier than the End date` |
+| future range | ✅ 200, empty broker arrays |
+| span | **no server limit found** — 7d, 30d, 90d, 180d, 365d, 730d and 1825d all served in one request |
+
+**Aggregation is server-side and is a true net.** For 2026-07-28→08-01 on BBRI, only 1 of the top 8
+brokers matched the sum of their daily *buy-side* rows, and the range value was consistently lower —
+the signature of a broker's buy days being netted against their sell days. The one exact match (BB)
+never appeared on the sell side. So there is **no need to loop day-by-day and no client-side
+weighting to do**: one request returns the aggregate.
+
+Rows in a range response carry `netbs_date` equal to the range **start**, not one row per day —
+there is no per-day breakdown in a ranged response.
+
+Non-trading days (weekends, holidays) return `200` with empty `brokers_buy`/`brokers_sell`. That is
+normal, not an error.
 
 ### 4b. Quote + resolver [CONFIRMED]
 ```

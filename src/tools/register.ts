@@ -12,12 +12,25 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "broker_summary",
-    "Broker summary for an IDX stock: which brokers net-bought/sold on the latest completed " +
-      "session, in lots and IDR value, with foreign/local/govt classification. This is the core " +
-      "bandarmology signal — TradingView has no equivalent. period=LATEST means the previous " +
-      "completed session.",
+    "Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with " +
+      "foreign/local/govt classification. This is the core bandarmology signal — TradingView has " +
+      "no equivalent.\n" +
+      "DATES: omit from/to for the latest completed session. Supply BOTH from and to (YYYY-MM-DD) " +
+      "for a historical window — the server aggregates net flow across it in one request, so a " +
+      "multi-month range is as cheap as one day. For a single past day pass the same date twice. " +
+      "Both ends are required; a half-specified range is rejected because the API would silently " +
+      "return the latest session instead.\n" +
+      "An empty result for a weekend or public holiday is expected, not an error.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`."),
+      to: z.string().optional().describe("Range end, YYYY-MM-DD (inclusive). Requires `from`."),
+      // Accepted because a caller may reasonably reach for these spellings. The API ignores both —
+      // it answers 200 with the latest session — so they are normalized onto from/to and never sent.
+      date_from: z.string().optional().describe("Alias for `from`."),
+      date_to: z.string().optional().describe("Alias for `to`."),
+      start_date: z.string().optional().describe("Alias for `from`."),
+      end_date: z.string().optional().describe("Alias for `to`."),
       limit: z.coerce.number().optional().describe("Max brokers per side (default 50; API default 25 truncates)"),
       transaction_type: z.enum(["NET", "BUY", "SELL"]).optional().describe("Default NET"),
       market_board: z.enum(["REGULER", "NEGOTIATED", "CASH"]).optional().describe("Default REGULER (use for bandarmology)"),
@@ -31,6 +44,12 @@ export function registerTools(server: McpServer): void {
           transactionType: a.transaction_type,
           marketBoard: a.market_board,
           investorType: a.investor_type,
+          from: a.from,
+          to: a.to,
+          date_from: a.date_from,
+          date_to: a.date_to,
+          start_date: a.start_date,
+          end_date: a.end_date,
         }),
       ),
   );

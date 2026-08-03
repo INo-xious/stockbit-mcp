@@ -104,7 +104,7 @@ Register with your MCP client (e.g. Claude Desktop `mcpServers`):
 
 | Tool | What it returns |
 |---|---|
-| `broker_summary` | Net buyers/sellers per broker last session (lots + IDR + foreign/local). The unique bandarmology signal. |
+| `broker_summary` | Net buyers/sellers per broker (lots + IDR + foreign/local). The unique bandarmology signal. Optional `from`/`to` (`YYYY-MM-DD`) query any historical day or window — the server aggregates net flow across it in a single request. |
 | `quote` | Last price + best bid/offer for a symbol |
 | `top_movers` | Top gainers / losers / most-active (empty when market closed) |
 | `trending` | Trending tickers |
