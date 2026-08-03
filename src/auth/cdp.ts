@@ -87,6 +87,15 @@ export class CDP {
     this.handlers.set(method, arr);
   }
 
+  /**
+   * Subscribe to the transport dropping. Closing the browser ends the DevTools socket, which
+   * otherwise removes the last thing holding the event loop open — the capture promise then never
+   * settles and the process exits 0 as if it had succeeded. Callers turn this into a real error.
+   */
+  onClose(handler: () => void): void {
+    this.ws.addEventListener("close", () => handler(), { once: true });
+  }
+
   close(): void {
     try {
       this.ws.close();

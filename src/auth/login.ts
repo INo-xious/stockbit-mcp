@@ -99,7 +99,9 @@ export interface LoginResult {
  * Run the interactive capture. Resolves once a refresh token is seen (and stored), or rejects on
  * timeout / no browser. `timeoutMs` is how long the user has to complete login.
  */
-export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<LoginResult> {
+export async function captureViaBrowserLogin(
+  timeoutMs = Number(process.env.STOCKBIT_LOGIN_TIMEOUT_MS) || 900_000,
+): Promise<LoginResult> {
   const bin = findBrowser();
   if (!bin) {
     throw new Error(
@@ -117,6 +119,14 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
       `--user-data-dir=${profile}`,
       "--no-first-run",
       "--no-default-browser-check",
+      // A fresh --user-data-dir still inherits browser-managed extensions, which open their own
+      // tabs (an OAuth prompt stole focus from the login page here) and bury the Stockbit
+      // responses we are watching for. Nothing in this flow needs them.
+      "--disable-extensions",
+      "--disable-component-extensions-with-background-pages",
+      // The one window the user must actually find and type into; do not let it open behind others.
+      "--start-maximized",
+      "--new-window",
       // Start blank so we can enable network interception BEFORE the login page loads
       // (the token response fires early — we navigate ourselves once we're listening).
       "about:blank",
@@ -178,7 +188,31 @@ export async function captureViaBrowserLogin(timeoutMs = 300_000): Promise<Login
       cleanup();
       reject(new Error("Login timed out — no session captured."));
     }, timeoutMs);
-    (timer as { unref?: () => void }).unref?.();
+    // Deliberately NOT unref'd. The DevTools socket is the only other handle keeping this process
+    // alive; when the browser closes, an unref'd timer lets the loop drain with the promise still
+    // pending, and the process exits 0 — indistinguishable from a successful capture.
+
+    const fail = (message: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      dbg(`${message} frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
+      cleanup();
+      reject(new Error(message));
+    };
+
+    // Closing the browser window before logging in is the common way this goes wrong; say so
+    // rather than exiting silently.
+    cdp.onClose(() =>
+      fail(
+        "The browser closed before a session was captured. Re-run `stockbit-auth login` and log in " +
+          "inside the new window it opens (a blank temporary profile) — logging into a different " +
+          "browser window is not observed.",
+      ),
+    );
+    child.on("exit", () =>
+      fail("The browser exited before a session was captured. Re-run `stockbit-auth login`."),
+    );
 
     const finish = (result: LoginResult) => {
       if (done) return;
