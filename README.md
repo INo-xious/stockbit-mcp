@@ -36,7 +36,18 @@ npm run build
 # session is captured automatically — no DevTools, no copy-paste.
 node dist/bin/stockbit-auth.js login
 node dist/bin/stockbit-auth.js status   # check backend + expiry
+node dist/bin/stockbit-auth.js doctor   # diagnose browsers + the capture path
 ```
+
+`doctor` checks every stage the login depends on and reports each separately, including a
+**self-test that runs the real capture against a local fixture serving its token from a
+self-closing popup** — no account, credentials, or open market required. See
+[`docs/TESTING-LOGIN.md`](./docs/TESTING-LOGIN.md).
+
+> ⚠️ **Google / Facebook login does not work on Stockbit's website** — in any browser, with or
+> without this tool. Their login page still loads `gapi.auth2`, the Google Sign-In platform Google
+> retired, and never migrated to Google Identity Services; the button opens a popup that renders
+> nothing. **Use username + password.** This is upstream of anything this project can reach.
 
 On macOS, the first login may ask once for permission to update the `stockbit-mcp` Keychain item.
 The server does not grant unrestricted Keychain access, and subsequent token rotations should not
@@ -46,8 +57,19 @@ After this single login, the server auto-refreshes indefinitely — you won't lo
 refresh token itself expires. The one interactive login is unavoidable (Stockbit's OAuth + reCAPTCHA
 require a human once); only the *token handling* is automated away.
 
-**Fallback** (`login` needs a Chromium-family browser). If you only have Safari/Firefox, or the
-OAuth flow snags, paste a refresh token manually instead — input is hidden:
+**Fallback — any browser.** `login` drives a Chromium-family browser over CDP. Firefox removed CDP
+in v141 and Safari exposes no reachable debugging protocol to third parties, so for those, log in
+however you like and import the network log instead:
+
+```bash
+node dist/bin/stockbit-auth.js import-har login.har --shred
+```
+
+Turn on **Preserve log** in DevTools before logging in, and export with the **download** button —
+Chrome's "Copy all as HAR" omits response bodies. A login HAR contains your password, cookies and
+the token in plain text, so `--shred` deletes it after import; the command warns you if you don't.
+
+Or paste a refresh token manually — input is hidden:
 
 ```bash
 node dist/bin/stockbit-auth.js bootstrap
@@ -109,7 +131,9 @@ touching the data layer.
 
 > **Refresh contract** (confirmed via source + live endpoint probe): the main/session token renews at
 > `POST {exodus}/login/refresh` with the refresh token in the `Authorization: Bearer` header and an
-> empty body (see `STOCKBIT-API.md` §3). The only thing still unverified — because it needs one real
-> refresh with a valid token — is the exact success-response field names and whether the refresh token
-> **rotates**. `src/auth/session.ts::parseRefresh` handles both defensively; no code change is expected,
-> but confirm on first bootstrap.
+> empty body (see `STOCKBIT-API.md` §3).
+>
+> **Rotation: CONFIRMED** against a live account (2026-08-03). Each refresh mints a **new** refresh
+> token with a fresh 7-day expiry, which `parseRefresh` + the store persist immediately. So the
+> single interactive login really is one-time *provided the server runs at least weekly* — the
+> expiry keeps sliding forward. Go idle past the window and a re-login is required.

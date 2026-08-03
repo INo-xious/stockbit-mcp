@@ -41,13 +41,20 @@ test("the credential file is replaced atomically and never left world-readable",
     [],
     "a temp file survived the write",
   );
-  assert.equal(statSync(target).mode & 0o777, 0o600, "the sole credential must be owner-only");
+  // POSIX permission bits do not exist on NTFS — Node reports 0o666 there no matter what mode was
+  // requested, so this assertion can only be made where the platform can honour it. On Windows the
+  // credential is protected by the profile directory's ACL plus AES-256-GCM at rest instead.
+  if (process.platform !== "win32") {
+    assert.equal(statSync(target).mode & 0o777, 0o600, "the sole credential must be owner-only");
+  }
 
   // A failed write must not destroy the token already there. The rename is the only moment the
   // target changes, so a failure before it leaves the previous value intact — which is the whole
   // reason this is not a truncating in-place write. Forced by making the directory unwritable, so
   // creating the temp file fails for real rather than being simulated.
-  if (process.getuid?.() !== 0) {
+  // Windows is excluded for the same reason as the mode assertion above: chmod cannot revoke write
+  // access on NTFS, so the "unwritable directory" this case depends on cannot be constructed.
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
     chmodSync(dir, 0o500);
     try {
       assert.throws(() => store.set("refresh-never-lands"), /EACCES|EPERM/);
