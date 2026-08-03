@@ -22,9 +22,10 @@
  * only succeeded on a lucky `loadingFinished` retry.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { removeDirWithRetry } from "./tempdir.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { CDP } from "./cdp.js";
 import { getStore } from "./store.js";
@@ -45,6 +46,12 @@ const LOGIN_URL = `${HOSTS.web}/login`;
  * until we resume it, so a broad pattern would stall the whole page load behind our round-trips.
  */
 const FETCH_PATTERNS = ["*stockbit.com/login/*", "*stockbit.com/auth/*"];
+
+/** Ceiling on any single arming command. See `armSession` for why an unbounded await deadlocks. */
+const ARM_TIMEOUT_MS = 5_000;
+
+/** Ceiling on browser startup, independent of how long the user then has to log in. */
+const BROWSER_START_TIMEOUT_MS = 30_000;
 
 /** Persistent profile, so a re-login does not mean re-entering password + OTP from scratch. */
 export function defaultProfileDir(): string {
@@ -107,12 +114,27 @@ export async function captureViaBrowserLogin(
     );
   }
 
+  // A browser profile that has been logged into Stockbit holds session cookies and a Login Data
+  // store — a second copy of the credential this project guards. It is created owner-only, and the
+  // parent is corrected too: `mkdirSync(recursive)` applies the mode only to directories it
+  // actually creates, so a `~/.stockbit` that already exists keeps whatever mode it had.
   let profile: string;
+  let profileIsDisposable = false;
   if (options.profileDir === "fresh") {
     profile = mkdtempSync(join(tmpdir(), "stockbit-login-"));
+    profileIsDisposable = true;
   } else {
     profile = options.profileDir ?? defaultProfileDir();
-    mkdirSync(profile, { recursive: true });
+    mkdirSync(profile, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      for (const dir of [dirname(profile), profile]) {
+        try {
+          chmodSync(dir, 0o700);
+        } catch {
+          /* best effort; a pre-existing dir we do not own is not ours to fix */
+        }
+      }
+    }
   }
 
   const port = 9500 + Math.floor(Math.random() * 400);
@@ -144,8 +166,23 @@ export async function captureViaBrowserLogin(
   }
 
   // Wait for the DevTools endpoint.
+  //
+  // The startup wait is bounded separately from the login window, and it watches the child. The
+  // most common Windows failure is launching against a profile that another window already has
+  // open: the new process hands off to the running instance and exits immediately, so the debugging
+  // port never opens. Polling on the login timeout alone turned that into a fifteen-minute silent
+  // hang with no window to look at.
+  let childExited = false;
+  child.once("exit", () => {
+    childExited = true;
+  });
+
   let wsUrl = "";
-  const deadline = Date.now() + timeoutMs;
+  const alreadyOpenHint =
+    "The browser exited immediately without opening a debugging port. This usually means a window " +
+    "is already open using this profile — close every window of that browser and retry, or use " +
+    "`--fresh-profile`.";
+  const deadline = Date.now() + Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS);
   for (;;) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/json/version`);
@@ -156,11 +193,13 @@ export async function captureViaBrowserLogin(
     } catch {
       /* not up yet */
     }
+    if (childExited) throw new Error(alreadyOpenHint);
     if (Date.now() > deadline) {
       child.kill();
       throw new Error(
-        "Browser did not start in time. If a window using this profile is already open, close it " +
-          "and retry — remote debugging cannot attach to an already-running instance.",
+        "Browser did not start in time (no debugging port after " +
+          `${Math.round(Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS) / 1000)}s). ` +
+          "If a window using this profile is already open, close it and retry.",
       );
     }
     await delay(250);
@@ -180,6 +219,13 @@ export async function captureViaBrowserLogin(
     const cleanup = () => {
       cdp.close();
       child.kill();
+      // A throwaway profile is disposable to us but not to an attacker: by now it holds Stockbit
+      // session cookies. Remove it rather than leaving it in %TEMP% indefinitely.
+      if (profileIsDisposable) {
+        void removeDirWithRetry(profile).then((ok) => {
+          if (!ok) logStderr(`Note: could not delete the temporary browser profile at ${profile}`);
+        });
+      }
     };
 
     const timer = setTimeout(() => {
@@ -222,7 +268,22 @@ export async function captureViaBrowserLogin(
 
     const accept = (refresh: string, via: string) => {
       if (done) return;
-      if (persist) getStore().set(refresh);
+      // Persistence is separated from recognition because both callers sit inside a catch that
+      // logs "getResponseBody failed" at debug level. A store write that throws there — a locked
+      // Keychain, a denied access prompt, EPERM from an antivirus holding the temp file — would be
+      // swallowed, leaving `done` false and the capture running until it reported "no session
+      // captured" fifteen minutes later. That is the opposite of what happened, and it points
+      // diagnosis at interception instead of at the store.
+      if (persist) {
+        try {
+          getStore().set(refresh);
+        } catch (err) {
+          fail(
+            `Session was captured but could not be stored: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
+      }
       if (!options.quiet) logStderr(`Session captured (${via}). You can close the browser window.`);
       finish({ captured: true, refresh });
     };
@@ -239,29 +300,44 @@ export async function captureViaBrowserLogin(
       if (sid && attached.has(sid)) return;
       if (sid) attached.add(sid);
       try {
-        await cdp.send("Network.enable", {}, sid);
-        dbg("Network.enable ok", sid ?? "(root)");
-      } catch (e) {
-        dbg("Network.enable failed", String(e));
-      }
-      try {
-        await cdp.send(
-          "Fetch.enable",
-          { patterns: fetchPatterns.map((urlPattern) => ({ urlPattern, requestStage: "Response" })) },
-          sid,
+        // Every enable is bounded. A target frozen by waitForDebuggerOnStart dispatches these to
+        // its own suspended thread, so for worker-class targets (service workers, and the browser's
+        // internal `other` target) the reply cannot arrive until the resume below — which an
+        // unbounded await would be blocking. That circularity wedges the target for the whole login
+        // window. Bounding turns a permanent deadlock into a logged, harmless miss.
+        await cdp.send("Network.enable", {}, sid, ARM_TIMEOUT_MS).then(
+          () => dbg("Network.enable ok", sid ?? "(root)"),
+          (e) => dbg("Network.enable failed", String(e)),
         );
-        dbg("Fetch.enable ok", sid ?? "(root)");
-      } catch (e) {
-        dbg("Fetch.enable failed", String(e));
-      }
-      // Nested targets (a popup opening a popup) need their own auto-attach.
-      if (sid) {
         await cdp
-          .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sid)
-          .catch(() => {});
-      }
-      if (sid) {
-        await cdp.send("Runtime.runIfWaitingForDebugger", {}, sid).catch(() => {});
+          .send(
+            "Fetch.enable",
+            { patterns: fetchPatterns.map((urlPattern) => ({ urlPattern, requestStage: "Response" })) },
+            sid,
+            ARM_TIMEOUT_MS,
+          )
+          .then(
+            () => dbg("Fetch.enable ok", sid ?? "(root)"),
+            (e) => dbg("Fetch.enable failed", String(e)),
+          );
+        // Nested targets (a popup opening a popup) need their own auto-attach.
+        if (sid) {
+          await cdp
+            .send(
+              "Target.setAutoAttach",
+              { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
+              sid,
+              ARM_TIMEOUT_MS,
+            )
+            .catch(() => {});
+        }
+      } finally {
+        // The resume runs on every path, including a thrown enable. Skipping it leaves the target
+        // frozen forever, which is a worse failure than missing its traffic.
+        if (sid) {
+          await cdp.send("Runtime.runIfWaitingForDebugger", {}, sid, ARM_TIMEOUT_MS).catch(() => {});
+          dbg("resumed", sid);
+        }
       }
     };
 
