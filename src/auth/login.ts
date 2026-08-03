@@ -216,15 +216,25 @@ export async function captureViaBrowserLogin(
 
   return new Promise<LoginResult>((resolve, reject) => {
     let done = false;
-    const cleanup = () => {
+
+    /**
+     * Tear down and, for a throwaway profile, delete it.
+     *
+     * Returns a promise the settlement path must await. Fire-and-forget does not work here: the CLI
+     * calls `process.exit` as soon as this function's promise settles, which kills the retry loop
+     * before Windows has released the browser's file handles — the profile then survives in %TEMP%
+     * holding live Stockbit session cookies. (Observed: a `--fresh-profile` run left its profile
+     * behind every time.)
+     */
+    const cleanup = async (): Promise<void> => {
       cdp.close();
       child.kill();
-      // A throwaway profile is disposable to us but not to an attacker: by now it holds Stockbit
-      // session cookies. Remove it rather than leaving it in %TEMP% indefinitely.
-      if (profileIsDisposable) {
-        void removeDirWithRetry(profile).then((ok) => {
-          if (!ok) logStderr(`Note: could not delete the temporary browser profile at ${profile}`);
-        });
+      if (!profileIsDisposable) return;
+      if (!(await removeDirWithRetry(profile))) {
+        logStderr(
+          `Note: could not delete the temporary browser profile at ${profile} — it contains a ` +
+            "Stockbit session; please remove it.",
+        );
       }
     };
 
@@ -232,8 +242,7 @@ export async function captureViaBrowserLogin(
       if (done) return;
       done = true;
       dbg(`timeout. frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
-      cleanup();
-      reject(new Error("Login timed out — no session captured."));
+      void cleanup().finally(() => reject(new Error("Login timed out — no session captured.")));
     }, timeoutMs);
     // Deliberately NOT unref'd. The DevTools socket is the only other handle keeping this process
     // alive; when the browser closes, an unref'd timer lets the loop drain with the promise still
@@ -244,8 +253,7 @@ export async function captureViaBrowserLogin(
       done = true;
       clearTimeout(timer);
       dbg(`${message} frames=${cdp.messageCount} attached=${attached.size} tracked=${tracked.size}`);
-      cleanup();
-      reject(new Error(message));
+      void cleanup().finally(() => reject(new Error(message)));
     };
 
     cdp.onClose(() =>
@@ -262,8 +270,8 @@ export async function captureViaBrowserLogin(
       if (done) return;
       done = true;
       clearTimeout(timer);
-      cleanup();
-      resolve(result);
+      // Settle only after cleanup, so the caller cannot exit the process mid-deletion.
+      void cleanup().finally(() => resolve(result));
     };
 
     const accept = (refresh: string, via: string) => {
