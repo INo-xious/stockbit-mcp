@@ -12,9 +12,10 @@
  */
 import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeDirWithRetry } from "./tempdir.js";
 import { browserVersion, findBrowsers, type BrowserInfo } from "./browsers.js";
 import { captureViaBrowserLogin } from "./login.js";
 import { getStore } from "./store.js";
@@ -121,10 +122,15 @@ export async function captureSelfTest(browserPath?: string): Promise<Check[]> {
     });
   } finally {
     fixture?.server.close();
-    try {
-      rmSync(profile, { recursive: true, force: true });
-    } catch {
-      /* best effort */
+    // The browser was killed a moment ago and Windows has not released its handles yet, so an
+    // immediate delete fails every time. Retry, and if it still fails say so — each leaked profile
+    // is ~14 MB, and silently shedding one per run is how a temp directory fills up unnoticed.
+    if (!(await removeDirWithRetry(profile))) {
+      checks.push({
+        name: "Temp cleanup",
+        status: "warn",
+        detail: `could not delete the self-test profile at ${profile} — safe to remove manually`,
+      });
     }
   }
   return checks;

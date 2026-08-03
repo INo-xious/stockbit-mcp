@@ -13,11 +13,12 @@
  */
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
 import { decodeJwt, forceRefresh, resetSession } from "../src/auth/session.js";
-import { captureViaBrowserLogin } from "../src/auth/login.js";
+import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
+import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
 import { logStderr } from "../src/redact.js";
@@ -151,9 +152,25 @@ function cmdStatus(): void {
   }
 }
 
-function cmdLogout(): void {
+async function cmdLogout(argv: string[]): Promise<void> {
   getStore().clear();
   logStderr("Cleared stored refresh token.");
+
+  // The persistent browser profile is a SECOND copy of the session: it holds Stockbit cookies and a
+  // Login Data store, so clearing only the token leaves an artifact that can still log straight back
+  // in. Logging out should mean logged out.
+  const profile = defaultProfileDir();
+  if (!existsSync(profile)) return;
+  if (argv.includes("--keep-profile")) {
+    logStderr(`Kept the browser profile at ${profile} (it still contains a logged-in session).`);
+    return;
+  }
+  logStderr(
+    (await removeDirWithRetry(profile))
+      ? "Removed the logged-in browser profile."
+      : `Could not remove the browser profile at ${profile} — delete it manually; it still ` +
+        "contains a logged-in Stockbit session.",
+  );
 }
 
 async function main(): Promise<void> {
@@ -176,7 +193,7 @@ async function main(): Promise<void> {
       cmdStatus();
       break;
     case "logout":
-      cmdLogout();
+      await cmdLogout(argv);
       break;
     default:
       logStderr("Usage: stockbit-auth <login|import-har|doctor|bootstrap|status|logout>");
@@ -186,7 +203,8 @@ async function main(): Promise<void> {
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");
       logStderr("  status      show store backend + token expiry");
-      logStderr("  logout      clear the stored refresh token");
+      logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
+      logStderr("              --keep-profile  keep the browser profile (still logged in)");
       process.exit(2);
   }
 }

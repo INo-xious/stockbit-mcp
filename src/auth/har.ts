@@ -110,8 +110,15 @@ export function scanHarFile(path: string): HarScanReport {
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    // Deliberately does not echo the file contents into the error.
-    throw new Error(`${path} is not valid JSON (${err instanceof Error ? err.message : "parse error"})`);
+    // The parser's own message is NOT interpolated. V8 quotes the offending source text in
+    // SyntaxError messages ("Unexpected token 'h', \"hunter2\"... is not valid JSON"), so echoing
+    // it would print a fragment of a file that holds the user's password and cookies — exactly what
+    // this module promises never to do. Only the character offset is safe to pass through.
+    const position = err instanceof Error ? /position (\d+)/.exec(err.message)?.[0] : undefined;
+    throw new Error(
+      `${path} is not valid JSON${position ? ` (at ${position})` : ""}. ` +
+        "Re-export it from the Network panel using the download button.",
+    );
   }
   return scanHar(parsed);
 }

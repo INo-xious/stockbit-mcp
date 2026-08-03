@@ -98,16 +98,29 @@ test("scanHarFile errors clearly on unreadable and non-JSON input", () => {
   assert.throws(() => scanHarFile(bad), /not valid JSON/);
 });
 
-test("a HAR error never echoes the file contents (it holds passwords and cookies)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "har-test-"));
-  const bad = join(dir, "secret.har");
-  writeFileSync(bad, `{"password":"hunter2","cookie":"SESSION=abc"`);
-  try {
-    scanHarFile(bad);
-    assert.fail("should have thrown");
-  } catch (err) {
-    const msg = String(err);
-    assert.ok(!msg.includes("hunter2"), "error leaked the file contents");
-    assert.ok(!msg.includes("SESSION=abc"), "error leaked a cookie");
-  }
-});
+// V8 produces two different SyntaxError shapes: input that STARTS with a valid JSON token fails
+// with a positional message that quotes nothing, while input that does not fails with
+// `Unexpected token 'h', "hunter2..." is not valid JSON` — which embeds the file's own bytes.
+// Testing only the first shape would pass while the leaking branch went unexercised, so both are
+// covered here.
+for (const [shape, contents] of [
+  ["truncated but JSON-shaped", `{"password":"hunter2","cookie":"SESSION=abc"`],
+  ["not JSON at all", `hunter2 SESSION=abc refresh_token=eyJhbGciOiJIUzI1NiJ9.payload.sig`],
+  ["an HTML error page", `<!doctype html><body>hunter2 SESSION=abc</body>`],
+] as const) {
+  test(`a HAR parse error never echoes file contents — ${shape}`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "har-test-"));
+    const bad = join(dir, "secret.har");
+    writeFileSync(bad, contents);
+    try {
+      scanHarFile(bad);
+      assert.fail("should have thrown");
+    } catch (err) {
+      const msg = `${String(err)} ${err instanceof Error ? (err.stack ?? "") : ""}`;
+      assert.ok(!msg.includes("hunter2"), `error leaked file contents: ${msg}`);
+      assert.ok(!msg.includes("SESSION=abc"), `error leaked a cookie: ${msg}`);
+      assert.ok(!msg.includes("eyJhbGciOiJIUzI1NiJ9"), `error leaked a token: ${msg}`);
+      assert.match(msg, /not valid JSON/);
+    }
+  });
+}

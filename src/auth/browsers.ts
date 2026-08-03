@@ -18,7 +18,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export type BrowserFamily = "chromium" | "firefox";
 
@@ -163,13 +163,37 @@ function fromRegistry(exe: string): string | null {
   return null;
 }
 
-/** Resolve an executable through PATH. */
+/**
+ * Resolve an executable through PATH, ourselves.
+ *
+ * Deliberately NOT `where`: on Windows it searches the **current directory before PATH**, so a
+ * `chrome.exe` sitting in whatever directory the user happened to run the command from would be
+ * selected as "the browser" and launched — with a debugging port open and the user about to type
+ * their brokerage password into it. Resolving PATH here lets us exclude the working directory
+ * outright, and it removes a subprocess from the hot path.
+ */
 function fromPath(exe: string): string | null {
-  const finder = process.platform === "win32" ? "where" : "which";
-  const r = spawnSync(finder, [exe], { encoding: "utf8", windowsHide: true });
-  if (r.status !== 0 || !r.stdout) return null;
-  const first = r.stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-  return first && existsSync(first) ? first : null;
+  const sep = process.platform === "win32" ? ";" : ":";
+  let cwd = "";
+  try {
+    cwd = resolve(process.cwd()).toLowerCase();
+  } catch {
+    /* cwd may not exist; then there is nothing to exclude */
+  }
+  for (const raw of (process.env.PATH ?? "").split(sep)) {
+    const dir = raw.trim().replace(/^"|"$/g, "");
+    if (!dir) continue;
+    let abs: string;
+    try {
+      abs = resolve(dir);
+    } catch {
+      continue;
+    }
+    if (abs.toLowerCase() === cwd) continue;
+    const candidate = join(abs, exe);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function resolveCandidate(c: Candidate): string | null {
@@ -205,14 +229,21 @@ export function findBrowsers(): BrowserInfo[] {
     found.push({ name: "STOCKBIT_BROWSER", path: override, family, supported: family === "chromium" });
   }
 
-  const seen = new Set();
+  // Dedup by path: the same executable is reachable through several routes (an override that also
+  // sits on PATH, Chrome resolving from both the registry and a known path), and listing it twice
+  // makes `doctor` claim two browsers where one exists. Case-insensitive because Windows and macOS
+  // paths are.
+  const seen = new Set(found.map((b) => b.path.toLowerCase()));
   for (const c of candidates()) {
     const path = resolveCandidate(c);
-    if (!path) continue;
+    if (!path || seen.has(path.toLowerCase())) continue;
+    seen.add(path.toLowerCase());
     found.push({ name: c.name, path, family: c.family, supported: c.family === "chromium" });
   }
 
-  return found;
+  // Drivable browsers first. Array.prototype.sort is stable, so preference order within each group
+  // (and the override's position at the head of its group) is preserved.
+  return found.sort((a, b) => Number(b.supported) - Number(a.supported));
 }
 
 /** Best drivable browser, or null. */

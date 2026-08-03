@@ -71,13 +71,46 @@ export class CDP {
     }
   }
 
-  /** Send a CDP command; resolves with its result. `sessionId` targets a flattened child session. */
-  send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<any> {
+  /**
+   * Send a CDP command; resolves with its result. `sessionId` targets a flattened child session.
+   *
+   * `timeoutMs` bounds the wait. Without it a command whose reply never arrives leaves its promise
+   * pending forever — there is no rejection on session detach, and a target frozen by
+   * `waitForDebuggerOnStart` will not answer commands dispatched to its own thread. An awaited
+   * send in that state deadlocks its caller permanently, so callers on a critical path must bound
+   * it rather than trust the peer to reply.
+   */
+  send(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+    timeoutMs?: number,
+  ): Promise<any> {
     const id = ++this.nextId;
     const payload: Record<string, unknown> = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
     this.ws.send(JSON.stringify(payload));
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      if (timeoutMs && timeoutMs > 0) {
+        const timer = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          reject(new Error(`CDP timeout after ${timeoutMs}ms: ${method}`));
+        }, timeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+        this.pending.set(id, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        return;
+      }
+      this.pending.set(id, { resolve, reject });
+    });
   }
 
   /** Subscribe to a CDP event (e.g. "Network.responseReceived"). */

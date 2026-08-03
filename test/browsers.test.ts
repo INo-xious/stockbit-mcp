@@ -76,18 +76,65 @@ test("a Firefox override is reported but marked unsupported (CDP removed in v141
   });
 });
 
-test("discovery returns no duplicate executables", () => {
-  const paths = findBrowsers().map((b) => b.path.toLowerCase());
-  assert.equal(new Set(paths).size, paths.length, "the same browser was listed twice");
+test("the same executable is never listed twice, even when discovery also finds the override", () => {
+  // Constructs the duplicate rather than hoping the host machine has one: point the override at a
+  // browser discovery will independently find, and assert it appears exactly once.
+  const discovered = findBrowsers().find((b) => b.supported);
+  if (!discovered) {
+    // No browser on this machine — the invariant still has to hold for the override alone.
+    const dir = mkdtempSync(join(tmpdir(), "browser-test-"));
+    const fake = join(dir, "chrome.exe");
+    writeFileSync(fake, "");
+    withEnv({ STOCKBIT_BROWSER: fake }, () => {
+      const paths = findBrowsers().map((b) => b.path.toLowerCase());
+      assert.equal(new Set(paths).size, paths.length);
+    });
+    return;
+  }
+  withEnv({ STOCKBIT_BROWSER: discovered.path }, () => {
+    const found = findBrowsers();
+    const matches = found.filter((b) => b.path.toLowerCase() === discovered.path.toLowerCase());
+    assert.equal(matches.length, 1, `${discovered.path} was listed ${matches.length} times`);
+    const paths = found.map((b) => b.path.toLowerCase());
+    assert.equal(new Set(paths).size, paths.length, "the same browser was listed twice");
+  });
 });
 
 test("drivable browsers sort ahead of unsupported ones", () => {
-  const found = findBrowsers();
-  const firstUnsupported = found.findIndex((b) => !b.supported);
-  if (firstUnsupported !== -1) {
+  // Guarantees an unsupported entry exists by supplying a Firefox override, so this cannot pass
+  // vacuously on a machine that happens to have only Chromium browsers.
+  const dir = mkdtempSync(join(tmpdir(), "browser-test-"));
+  const fake = join(dir, "firefox.exe");
+  writeFileSync(fake, "");
+  withEnv({ STOCKBIT_BROWSER: fake }, () => {
+    const found = findBrowsers();
+    assert.ok(
+      found.some((b) => !b.supported),
+      "the Firefox override should have produced an unsupported entry",
+    );
+    const firstUnsupported = found.findIndex((b) => !b.supported);
     assert.ok(
       found.slice(firstUnsupported).every((b) => !b.supported),
       "a supported browser was listed after an unsupported one",
     );
+  });
+});
+
+test("PATH lookup never selects an executable from the current directory", () => {
+  // Windows' `where` searches the CWD before PATH, so a chrome.exe dropped in whatever directory
+  // the command was run from would be launched with a debugging port open, for the user to type
+  // their brokerage password into. Discovery must not resolve from CWD at all.
+  const dir = mkdtempSync(join(tmpdir(), "browser-cwd-"));
+  for (const exe of ["chrome.exe", "msedge.exe", "chrome", "google-chrome", "firefox"]) {
+    writeFileSync(join(dir, exe), "");
+  }
+  const originalCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    const found = findBrowsers();
+    const fromCwd = found.filter((b) => b.path.toLowerCase().startsWith(dir.toLowerCase()));
+    assert.deepEqual(fromCwd, [], "discovery resolved a browser out of the working directory");
+  } finally {
+    process.chdir(originalCwd);
   }
 });
