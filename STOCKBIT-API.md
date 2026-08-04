@@ -395,8 +395,14 @@ GET /order-trade/broker/distribution
 Different service from `/marketdetectors` (`financial.order_trade.*`), and the **symbol is a query
 parameter, not a path segment**.
 
-> ⚠️ **`market_board` is NOT accepted here** — sending it returns `400 Your request is invalid`.
-> This differs from broker summary, where it is expected. Do not copy that builder.
+> ⚠️ **`market_board` uses a different VALUE prefix here: `MARKET_TYPE_`, not `MARKET_BOARD_`.**
+> Sending broker summary's `MARKET_BOARD_REGULER` returns `400 Your request is invalid` — an earlier
+> revision of this document misread that as "this endpoint takes no board at all". It does, and it
+> matters: for BRMS over 27 Jul–3 Aug 2026, `MARKET_TYPE_REGULER` gives a top buyer of **120.33B**
+> while `MARKET_TYPE_ALL` gives **978.15B**, because ALL folds in negotiated blocks.
+>
+> Accepted: `MARKET_TYPE_REGULER` (default, matches Stockbit's UI), `_ALL`, `_NEGO`, `_TUNAI`,
+> `_UNSPECIFIED` (behaves as REGULER). Rejected: `_NEGOTIATED`, `_CASH`.
 
 > ⚠️ **`period` and `from`/`to` are mutually exclusive**, same as broker summary. Stockbit's own
 > client picks one (`period ? {period} : {from,to}`) and never sends both.
@@ -421,7 +427,11 @@ Each entry is the flow matrix itself:
   "distribute_to": [ { "code": "BK", "type": "Asing", "amount": 77101438000 }, … ] }
 ```
 
-i.e. *broker AK accumulated Rp 445.5B, of which Rp 77.1B came from BK*. `broker_summary` gives the
+i.e. *broker AK accumulated Rp 445.5B, of which Rp 77.1B came from BK*. So `top_broker_buy[].detail`
+is a **buyer** and its `distribute_to` are the **sellers** it bought from; `top_broker_sell` is the
+mirror. **Verified against Stockbit's own UI** for BRMS 27 Jul–3 Aug 2026: top buyer XL 120.33B, and
+its counterparties CC 14.41B, AK 13.89B, ZP 11.84B, XL 11.03B, XC 7.22B, YP 7.10B, BB 4.67B — all
+identical. (Their UI labels a non-contiguous subset of ribbons, which can look like missing data.) `broker_summary` gives the
 net per broker; this gives the counterparties behind it.
 
 **Entitlement:** Stockbit requires a minimum total balance of **Rp 10,000,000** for this feature. In

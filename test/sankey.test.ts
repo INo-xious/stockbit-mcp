@@ -363,3 +363,44 @@ test("INVARIANT: top_targets actually caps how many counterparty nodes are drawn
     );
   }
 });
+
+/* ------------------------------ column roles ------------------------------ */
+
+test("the columns are labelled BUYER and SELLER so the direction is unambiguous", () => {
+  // Stockbit's own UI labels its two columns Buyer / Seller. Without that, a reader cannot tell
+  // whether the left column bought or sold, and the chart is easy to read backwards.
+  const buyers = renderSankey(brokers, { ...OPTS, side: "buyers" });
+  assert.ok(buyers.includes(">BUYER<"), "buyers view should label the source column BUYER");
+  assert.ok(buyers.includes(">SELLER<"), "buyers view should label the counterparty column SELLER");
+
+  const sellers = renderSankey(brokers, { ...OPTS, side: "sellers" });
+  assert.ok(sellers.includes(">SELLER<"));
+  assert.ok(sellers.includes(">BUYER<"));
+});
+
+test("the roles swap sides with `side`, they are not fixed to a column", () => {
+  const buyers = renderSankey(brokers, { ...OPTS, side: "buyers" });
+  const sellers = renderSankey(brokers, { ...OPTS, side: "sellers" });
+  // The source column is right-anchored; the counterparty column is left-anchored.
+  const sourceRole = (svg: string) =>
+    /text-anchor="end"[^>]*letter-spacing="0.6"[^>]*>([A-Z]+)</.exec(svg)?.[1];
+  assert.equal(sourceRole(buyers), "BUYER");
+  assert.equal(sourceRole(sellers), "SELLER");
+});
+
+test("buyer and seller are visually distinct colours in both themes", () => {
+  for (const name of ["dark", "light"] as const) {
+    assert.notEqual(THEMES[name].buyer, THEMES[name].seller, `${name} uses one colour for both roles`);
+  }
+});
+
+test("the subtitle states the direction of the flow, not just which side", () => {
+  assert.match(renderSankey(brokers, { ...OPTS, side: "buyers" }), /bought FROM/);
+  assert.match(renderSankey(brokers, { ...OPTS, side: "sellers" }), /sold TO/);
+});
+
+test("the market board is disclosed in the subtitle when supplied", () => {
+  // REGULER vs ALL changes the numbers by an order of magnitude, so the chart must say which it is.
+  const svg = renderSankey(brokers, { ...OPTS, board: "reguler board" });
+  assert.match(svg, /reguler board/);
+});

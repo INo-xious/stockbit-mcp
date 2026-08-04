@@ -64,6 +64,17 @@ export type DistributionDataType = "VALUE" | "VOLUME";
 export type DistributionInvestorType = "ALL" | "FOREIGN" | "DOMESTIC";
 
 /**
+ * Market boards this endpoint accepts.
+ *
+ * NOTE the value prefix is `MARKET_TYPE_`, not `MARKET_BOARD_` as broker summary uses — sending the
+ * summary's spelling here returns 400, which an earlier revision misread as "this endpoint does not
+ * take a board at all". It does, and it matters: REGULER (the default, matching Stockbit's own UI)
+ * gives BRMS a top buyer of 120.33B, while ALL gives 978.15B because it folds in negotiated blocks.
+ */
+export const DISTRIBUTION_BOARDS = ["REGULER", "ALL", "NEGO", "TUNAI"] as const;
+export type DistributionBoard = (typeof DISTRIBUTION_BOARDS)[number];
+
+/**
  * Preset windows the endpoint accepts. Mutually exclusive with `from`/`to` — see `buildParams`.
  * Taken from the `TB_PERIOD_*` enum in Stockbit's own bundle.
  */
@@ -87,6 +98,8 @@ export interface BrokerDistributionOptions extends DateRangeInput {
   investorType?: DistributionInvestorType;
   /** A preset window. Ignored if `from`/`to` are supplied. */
   period?: DistributionPeriod;
+  /** Default REGULER — negotiated block trades distort accumulation reads. */
+  marketBoard?: DistributionBoard;
 }
 
 /* --------------------------------- response --------------------------------- */
@@ -142,6 +155,7 @@ export interface DistributionBroker extends DistributionCounterparty {
 export interface BrokerDistribution {
   symbol: string;
   dataType: DistributionDataType;
+  marketBoard: DistributionBoard;
   /** Units of every `amount` below — spelled out so a reader never has to guess. */
   amountUnit: "IDR" | "lots";
   from?: string;
@@ -173,6 +187,7 @@ export function buildDistributionParams(
     symbol: normalizeSymbol(opts.symbol),
     data_type: `BROKER_DISTRIBUTION_DATA_TYPE_${opts.dataType ?? "VALUE"}`,
     investor_type: `INVESTOR_TYPE_${opts.investorType ?? "ALL"}`,
+    market_board: `MARKET_TYPE_${opts.marketBoard ?? "REGULER"}`,
   };
   if (range) return { ...base, from: range.from, to: range.to };
   return { ...base, period: `TB_PERIOD_${opts.period ?? "LAST_1_DAY"}` };
@@ -246,6 +261,7 @@ export async function getBrokerDistribution(
     return {
       symbol: params.symbol,
       dataType,
+      marketBoard: opts.marketBoard ?? "REGULER",
       amountUnit: dataType === "VALUE" ? "IDR" : "lots",
       from: d.start_date,
       to: d.end_date,

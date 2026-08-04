@@ -132,15 +132,29 @@ test("REGRESSION: a date range replaces period entirely — they are mutually ex
   }
 });
 
-test("REGRESSION: market_board is never sent — the endpoint 400s on it", () => {
-  // broker_summary requires market_board; this endpoint rejects it. Measured, and easy to
-  // "helpfully" re-add by copying the summary builder.
+test("REGRESSION: market_board uses the MARKET_TYPE_ prefix, never MARKET_BOARD_", () => {
+  // broker_summary sends MARKET_BOARD_REGULER; this endpoint answers 400 to that exact value and
+  // 200 to MARKET_TYPE_REGULER. Copying the summary builder therefore breaks it — and an earlier
+  // revision misread that 400 as "this endpoint takes no board", which silently defaulted the
+  // query and made the numbers unexplainable against Stockbit's own UI.
   for (const opts of [
     { symbol: "BBRI" },
     { symbol: "BBRI", from: "2026-07-28", to: "2026-08-01" },
     { symbol: "BBRI", dataType: "VOLUME" as const, investorType: "FOREIGN" as const },
   ]) {
-    assert.equal("market_board" in buildDistributionParams(opts), false);
+    const p = buildDistributionParams(opts);
+    assert.equal(p.market_board, "MARKET_TYPE_REGULER", "REGULER must be the default board");
+    assert.equal(
+      String(p.market_board).startsWith("MARKET_BOARD_"),
+      false,
+      "the broker_summary prefix is rejected by this endpoint",
+    );
+  }
+});
+
+test("every market board maps to the MARKET_TYPE_ spelling", () => {
+  for (const board of ["REGULER", "ALL", "NEGO", "TUNAI"] as const) {
+    assert.equal(buildDistributionParams({ symbol: "BBRI", marketBoard: board }).market_board, `MARKET_TYPE_${board}`);
   }
 });
 
@@ -166,7 +180,7 @@ test("an invalid symbol or half-specified range is rejected before any request",
 
 /* --------------------------------- wire + shape --------------------------------- */
 
-test("WIRE: the request carries the expected query and no market_board", async () => {
+test("WIRE: the request carries the expected query including the REGULER board", async () => {
   clearCache();
   seenUrls.length = 0;
   nextStatus = 200;
@@ -177,7 +191,7 @@ test("WIRE: the request carries the expected query and no market_board", async (
   assert.equal(q.get("to"), "2026-08-01");
   assert.equal(q.get("data_type"), "BROKER_DISTRIBUTION_DATA_TYPE_VALUE");
   assert.equal(q.has("period"), false);
-  assert.equal(q.has("market_board"), false);
+  assert.equal(q.get("market_board"), "MARKET_TYPE_REGULER");
 });
 
 test("the response is normalized into brokers and their counterparties", async () => {

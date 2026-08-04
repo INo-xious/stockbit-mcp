@@ -75,6 +75,10 @@ export function registerTools(server: McpServer): void {
       side: z.enum(["buyers", "sellers"]).optional().describe("Which side to chart. Default buyers."),
       data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns lots (1 lot = 100 shares)."),
       investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
+      market_board: z
+        .enum(core.DISTRIBUTION_BOARDS)
+        .optional()
+        .describe("Default REGULER, matching Stockbit's UI. ALL folds in negotiated blocks and changes the numbers a lot."),
       period: z
         .enum(core.DISTRIBUTION_PERIODS)
         .optional()
@@ -96,6 +100,7 @@ export function registerTools(server: McpServer): void {
           symbol: a.symbol,
           dataType: a.data_type,
           investorType: a.investor_type,
+          marketBoard: a.market_board,
           period: a.period,
           from: a.from,
           to: a.to,
@@ -115,6 +120,7 @@ export function registerTools(server: McpServer): void {
           topSources: a.top_sources,
           topTargets: a.top_targets,
           theme: a.theme,
+          board: `${d.marketBoard.toLowerCase()} board`,
         });
 
         // Always written, not only on request: the file is the durable artifact, and MCP clients
@@ -140,6 +146,7 @@ export function registerTools(server: McpServer): void {
               to: d.to,
               amountUnit: d.amountUnit,
               dataType: d.dataType,
+              marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
               savedTo,
             },

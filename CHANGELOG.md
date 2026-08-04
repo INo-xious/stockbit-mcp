@@ -8,6 +8,24 @@ from naming.
 
 ## Unreleased
 
+### Fixed — market board, and the diagram now names its columns
+
+**`market_board` was being omitted entirely.** An earlier probe sent broker summary's
+`MARKET_BOARD_REGULER`, got a 400, and concluded this endpoint takes no board. Wrong: the parameter
+is right, the value prefix is `MARKET_TYPE_`. The endpoint was therefore running on its default,
+which happens to be REGULER, so numbers were correct by luck rather than by request. Now sent
+explicitly, with `ALL` / `NEGO` / `TUNAI` exposed — and it matters: BRMS over 27 Jul–3 Aug 2026 has a
+top buyer of 120.33B on REGULER and 978.15B on ALL, because ALL folds in negotiated blocks.
+
+**The chart now labels its columns BUYER and SELLER**, coloured and swapping sides with `side`, and
+the subtitle states the direction ("who the top buyers bought FROM") plus the board. Previously the
+only hint was "top sellers → counterparties", which is easy to read backwards — and comparing a
+sellers-view chart against Stockbit's buyer-first UI looks like a data discrepancy when it is not.
+
+**Verified against Stockbit's own UI**, same stock and window: top buyer XL 120.33B and its seven
+largest counterparties match to the decimal. Their UI labels a non-contiguous subset of ribbons,
+which is what made it look like values were missing.
+
 ### Changed — `broker_distribution` always renders an SVG
 
 The diagram is no longer a separate tool. `broker_distribution` now renders the flow, writes the
