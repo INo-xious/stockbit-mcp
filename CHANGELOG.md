@@ -8,7 +8,17 @@ from naming.
 
 ## Unreleased
 
-### Added — `broker_distribution_chart`
+### Changed — `broker_distribution` always renders an SVG
+
+The diagram is no longer a separate tool. `broker_distribution` now renders the flow, writes the
+`.svg` (to `~/.stockbit/charts/` unless `save_path` says otherwise), returns it as an image, and
+reports the path in `savedTo`. It deliberately returns **no per-broker table** — the picture is the
+output, and `broker_summary` is where the figures live.
+
+The file is written on every call rather than on request, because MCP clients differ in whether they
+render an inline SVG; a caller whose client shows nothing still has a path to open. Filenames are
+deterministic (`SYMBOL-side-window-dataType.svg`) so repeating a query overwrites instead of piling
+up.
 
 Renders the broker-to-broker flow as an SVG Sankey: source brokers on the left, the counterparties
 they traded against on the right, ribbon thickness proportional to the amount, coloured by
