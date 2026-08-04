@@ -381,3 +381,51 @@ refresh token, not GUI attachment.
   is the authoritative endpoint catalog.
 - Prior context (why not TradingView, why not a scraper, the daemon analysis) is in
   `CODEX-BRIEF.md` and `REFERENCE-REPOSITORY.md` in this repo.
+
+### 4p. Broker Distribution — broker-to-broker flow matrix [CONFIRMED 2026-08-03, live]
+
+```
+GET /order-trade/broker/distribution
+    ?symbol=BBRI
+    &data_type=BROKER_DISTRIBUTION_DATA_TYPE_VALUE     # or _VOLUME
+    &investor_type=INVESTOR_TYPE_ALL                    # _FOREIGN | _DOMESTIC
+    &period=TB_PERIOD_LAST_7_DAYS                       # XOR from/to (see below)
+```
+
+Different service from `/marketdetectors` (`financial.order_trade.*`), and the **symbol is a query
+parameter, not a path segment**.
+
+> ⚠️ **`market_board` is NOT accepted here** — sending it returns `400 Your request is invalid`.
+> This differs from broker summary, where it is expected. Do not copy that builder.
+
+> ⚠️ **`period` and `from`/`to` are mutually exclusive**, same as broker summary. Stockbit's own
+> client picks one (`period ? {period} : {from,to}`) and never sends both.
+
+| Parameter | Values |
+|---|---|
+| `data_type` | `BROKER_DISTRIBUTION_DATA_TYPE_` + `VALUE` (IDR) \| `VOLUME` (shares) \| `UNSPECIFIED` |
+| `investor_type` | `INVESTOR_TYPE_` + `ALL` \| `FOREIGN` \| `DOMESTIC` |
+| `period` | `TB_PERIOD_` + `LAST_1_DAY`, `LAST_7_DAYS`, `LAST_1_MONTH`, `LAST_3_MONTHS`, `LAST_6_MONTHS`, `LAST_1_YEAR`, `PREVIOUS_DAY`, `PREVIOUS_MONTH`, `THIS_MONTH`, `YEAR_TO_DATE` |
+| `from` / `to` | `YYYY-MM-DD`, both required together |
+
+**Response:** `data.{date_info, start_date, end_date, by_value, by_volume}`. Each of `by_value` /
+`by_volume` holds `{top_broker_buy[], top_broker_sell[]}` (12 entries each observed). Only the block
+matching `data_type` is populated; the other comes back empty.
+
+Each entry is the flow matrix itself:
+
+```jsonc
+{ "detail":        { "code": "AK", "type": "Asing", "amount": 445525972000 },
+  "distribute_to": [ { "code": "BK", "type": "Asing", "amount": 77101438000 }, … ] }
+```
+
+i.e. *broker AK accumulated Rp 445.5B, of which Rp 77.1B came from BK*. `broker_summary` gives the
+net per broker; this gives the counterparties behind it.
+
+**Entitlement:** Stockbit requires a minimum total balance of **Rp 10,000,000** for this feature. In
+their web app the gate is **client-side** — the micro-frontend
+(`storage.stockbit.com/broker-distribution/*/static/remoteEntry.js`) takes an `isEligible` prop and,
+when false, renders a blurred `broker-distribution-not-eligible-overlay` over placeholder data and
+**never issues the request**. Whether the server independently refuses an ineligible account is
+**UNVERIFIED** — it could not be observed from an entitled account. Client code should therefore map
+a `403` to an entitlement message defensively rather than assume either behaviour.

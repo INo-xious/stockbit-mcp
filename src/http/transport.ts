@@ -86,6 +86,11 @@ export const ROUTES = {
 
   /* -- broker summary / bandarmology -- */
   marketDetectors: { method: "GET", template: "/marketdetectors/:symbol" },
+  /**
+   * Broker-to-broker flow matrix. Served by the order-trade service rather than marketdetectors,
+   * and it takes the symbol as a QUERY parameter, not a path segment — hence no `:symbol` here.
+   */
+  brokerDistribution: { method: "GET", template: "/order-trade/broker/distribution" },
 
   /* -- fundamentals -- */
   keystats: { method: "GET", template: "/keystats/:symbol" },

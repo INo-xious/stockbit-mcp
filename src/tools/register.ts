@@ -54,6 +54,49 @@ export function registerTools(server: McpServer): void {
       ),
   );
 
+  server.tool(
+    "broker_distribution",
+    "Broker-to-broker flow matrix for an IDX stock: for each top broker, WHICH brokers were on the " +
+      "other side of their trades and how much moved between them. broker_summary says how much a " +
+      "broker accumulated; this says who they accumulated it from.\n" +
+      "DATES: pass a `period` preset, or BOTH `from` and `to` (YYYY-MM-DD) for an explicit window. " +
+      "Supplying from/to overrides period. Both ends are required together.\n" +
+      "data_type=VALUE returns IDR amounts, VOLUME returns share counts; the response reports which " +
+      "in `amountUnit`.\n" +
+      "REQUIRES a Stockbit account with at least Rp 10,000,000 total balance — Stockbit gates this " +
+      "feature. If the account does not qualify the tool returns an error saying so.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns shares."),
+      investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
+      period: z
+        .enum(core.DISTRIBUTION_PERIODS)
+        .optional()
+        .describe("Preset window; default LAST_1_DAY. Ignored when from/to are given."),
+      from: z.string().optional().describe("Window start, YYYY-MM-DD. Requires `to`."),
+      to: z.string().optional().describe("Window end, YYYY-MM-DD (inclusive). Requires `from`."),
+      date_from: z.string().optional().describe("Alias for `from`."),
+      date_to: z.string().optional().describe("Alias for `to`."),
+      start_date: z.string().optional().describe("Alias for `from`."),
+      end_date: z.string().optional().describe("Alias for `to`."),
+    },
+    async (a) =>
+      runTool(() =>
+        core.getBrokerDistribution({
+          symbol: a.symbol,
+          dataType: a.data_type,
+          investorType: a.investor_type,
+          period: a.period,
+          from: a.from,
+          to: a.to,
+          date_from: a.date_from,
+          date_to: a.date_to,
+          start_date: a.start_date,
+          end_date: a.end_date,
+        }),
+      ),
+  );
+
   /* ---------------------------------- quotes ---------------------------------- */
 
   server.tool(

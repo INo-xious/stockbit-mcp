@@ -8,6 +8,36 @@ from naming.
 
 ## Unreleased
 
+### Added — `broker_distribution` (broker-to-broker flow matrix)
+
+New tool. Where `broker_summary` reports *how much* each broker net-bought or net-sold,
+`broker_distribution` reports *who was on the other side*: for each top broker, the counterparties
+and the amount that moved between them.
+
+```jsonc
+{ "detail":        { "code": "AK", "type": "Asing", "amount": 445525972000 },
+  "distribute_to": [ { "code": "BK", "amount": 77101438000 }, … ] }
+// AK accumulated Rp 445.5B, of which Rp 77.1B came from BK
+```
+
+Served by a different backend service (`/order-trade/broker/distribution`) which takes the symbol as
+a **query parameter**, not a path segment. Accepts either a `period` preset (`TB_PERIOD_*`) or an
+explicit `from`/`to` window, reusing the date validation added for `broker_summary`.
+
+> ⚠️ **`market_board` is rejected by this endpoint (400)** — unlike `broker_summary`, where it is
+> expected. Copying the summary parameter builder breaks it. There is a regression test.
+
+> ⚠️ **`period` and `from`/`to` are mutually exclusive here too**, and built as separate return
+> shapes for the same reason as `broker_summary`.
+
+**Entitlement.** Stockbit gates this feature behind a minimum account balance of **Rp 10,000,000**.
+In their web app the gate is enforced **client-side** — the micro-frontend receives an `isEligible`
+prop and, when false, renders a blurred overlay over placeholder data and never issues the request.
+Whether the server independently refuses an ineligible account is **unverified**: it could not be
+observed from an entitled account. The ineligible path is therefore handled defensively — an HTTP
+403 is reported as the balance requirement (naming the amount), while 401 remains a genuine auth
+failure and is never blamed on the balance. Both mappings are asserted by test.
+
 ### Added — `broker_summary` date ranges
 
 `broker_summary` accepts an optional `from`/`to` window (`YYYY-MM-DD`). `from == to` queries a
