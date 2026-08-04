@@ -5,7 +5,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "../core/index.js";
-import { runTool } from "./_format.js";
+import { runImageTool, runTool } from "./_format.js";
+import { renderSankey } from "../render/sankey.js";
+import { writeSvg } from "../render/write.js";
 
 export function registerTools(server: McpServer): void {
   /* ------------------------------ broker / bandar ------------------------------ */
@@ -95,6 +97,86 @@ export function registerTools(server: McpServer): void {
           end_date: a.end_date,
         }),
       ),
+  );
+
+  server.tool(
+    "broker_distribution_chart",
+    "Render the broker-to-broker flow from `broker_distribution` as a picture (SVG): source brokers " +
+      "on the left, the counterparties they traded against on the right, ribbon thickness " +
+      "proportional to the amount that moved, coloured by Asing/Lokal/Pemerintah.\n" +
+      "Takes the same arguments as broker_distribution. Returns the image plus a text summary of the " +
+      "same numbers. Pass `save_path` to also write the .svg to disk (open it in any browser).\n" +
+      "REQUIRES the same Rp 10,000,000 Stockbit balance as broker_distribution.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      side: z.enum(["buyers", "sellers"]).optional().describe("Which side to chart. Default buyers."),
+      data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns lots."),
+      investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
+      period: z.enum(core.DISTRIBUTION_PERIODS).optional().describe("Preset window; default LAST_1_DAY."),
+      from: z.string().optional().describe("Window start, YYYY-MM-DD. Requires `to`."),
+      to: z.string().optional().describe("Window end, YYYY-MM-DD. Requires `from`."),
+      date_from: z.string().optional().describe("Alias for `from`."),
+      date_to: z.string().optional().describe("Alias for `to`."),
+      start_date: z.string().optional().describe("Alias for `from`."),
+      end_date: z.string().optional().describe("Alias for `to`."),
+      top_sources: z.coerce.number().optional().describe("Source brokers to draw (default 8)"),
+      top_targets: z.coerce.number().optional().describe("Counterparties to draw; the rest merge into an 'others' band (default 12)"),
+      theme: z.enum(["dark", "light"]).optional().describe("Palette. Default dark."),
+      save_path: z.string().optional().describe("Optional path to also write the .svg file to"),
+    },
+    async (a) =>
+      runImageTool(async () => {
+        const d = await core.getBrokerDistribution({
+          symbol: a.symbol,
+          dataType: a.data_type,
+          investorType: a.investor_type,
+          period: a.period,
+          from: a.from,
+          to: a.to,
+          date_from: a.date_from,
+          date_to: a.date_to,
+          start_date: a.start_date,
+          end_date: a.end_date,
+        });
+        const side = a.side ?? "buyers";
+        const brokers = side === "buyers" ? d.topBuyers : d.topSellers;
+        const svg = renderSankey(brokers, {
+          symbol: d.symbol,
+          unit: d.amountUnit,
+          from: d.from,
+          to: d.to,
+          side,
+          topSources: a.top_sources,
+          topTargets: a.top_targets,
+          theme: a.theme,
+        });
+
+        let savedTo: string | undefined;
+        if (a.save_path) savedTo = writeSvg(a.save_path, svg);
+
+        return {
+          base64: Buffer.from(svg, "utf8").toString("base64"),
+          mimeType: "image/svg+xml",
+          summary: {
+            success: true,
+            data: {
+              symbol: d.symbol,
+              side,
+              from: d.from,
+              to: d.to,
+              amountUnit: d.amountUnit,
+              savedTo,
+              brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
+              brokers: brokers.slice(0, a.top_sources ?? 8).map((b) => ({
+                code: b.code,
+                investorType: b.investorType,
+                amount: b.amount,
+                counterparties: b.distributedWith.length,
+              })),
+            },
+          },
+        };
+      }),
   );
 
   /* ---------------------------------- quotes ---------------------------------- */

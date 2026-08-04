@@ -8,6 +8,28 @@ from naming.
 
 ## Unreleased
 
+### Added — `broker_distribution_chart`
+
+Renders the broker-to-broker flow as an SVG Sankey: source brokers on the left, the counterparties
+they traded against on the right, ribbon thickness proportional to the amount, coloured by
+Asing/Lokal/Pemerintah. Dark theme by default, `light` available. Returned as an MCP image content
+block plus a text summary, with an optional `save_path`.
+
+**No new dependencies.** A raster renderer would mean a native build and a platform matrix; the SVG
+is built as a string, so this costs nothing at install time and scales losslessly.
+
+**Escaping is a security control here.** Broker codes come from the API and are interpolated into
+markup a browser executes, so every value goes through `esc()`, with tests firing `</text><script>`
+payloads through both the broker code and the symbol.
+
+**Node sizes are derived from the ribbons that are actually drawn.** An earlier revision sized target
+nodes from one population while routing ribbons from another; the two disagreed, so ribbons
+overflowed their bar and ran off the bottom of the canvas across the legend, counterparties ranked
+just past the per-source cap received no ribbon at all, and when nothing was globally folded a
+source's tail was discarded in silence. Deriving bars from ribbons makes that unrepresentable — a
+node height IS the sum of what lands on it — and four invariant tests pin it (nothing off-canvas,
+nothing silently dropped, no node without an incoming ribbon, and asking for more never charts less).
+
 ### Added — `broker_distribution` (broker-to-broker flow matrix)
 
 New tool. Where `broker_summary` reports *how much* each broker net-bought or net-sold,
