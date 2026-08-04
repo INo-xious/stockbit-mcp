@@ -283,15 +283,43 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
     targetEntries.push({ code: othersLabel, investorType: undefined, total: othersTotal });
   }
 
+  /*
+   * Feed each counterparty's unexplained remainder from a synthetic "other buyers" source.
+   *
+   * A counterparty's bar is its TRUE total, but the drawn buyers usually account for only part of
+   * it — 23-44% on a typical stock. Leaving the rest unattached made every bar read as two
+   * disconnected pieces with the ribbons touching only the top one. Giving the remainder an actual
+   * source closes the bars, mirrors the "+N others" band already used on the counterparty side, and
+   * keeps every ribbon meaning the same thing: an amount that moved between two parties.
+   */
+  const OTHER_SOURCES = sources.length;
+  let otherSourceTotal = 0;
+  for (const t of targetEntries) {
+    const explained = finalTotals.get(t.code === othersLabel ? OTHERS : t.code)?.total ?? 0;
+    const remainder = t.total - explained;
+    if (remainder > 0.5) {
+      drawn.push({ src: OTHER_SOURCES, target: t.code === othersLabel ? OTHERS : t.code, amount: remainder });
+      otherSourceTotal += remainder;
+    }
+  }
+
   /** Per-source sum of drawn flow — the denominator that makes ribbons fill their source bar. */
   const srcFlowSum = new Map<number, number>();
   for (const d of drawn) srcFlowSum.set(d.src, (srcFlowSum.get(d.src) ?? 0) + d.amount);
 
-  const srcTotal = sources.reduce((s, b) => s + Math.abs(b.amount), 0) || 1;
+  const sourceEntries: Array<{ code: string; investorType?: string; total: number }> = sources.map((b) => ({
+    code: b.code,
+    investorType: b.investorType,
+    total: Math.abs(b.amount),
+  }));
+  if (otherSourceTotal > 0.5) {
+    sourceEntries.push({ code: "other buyers", investorType: undefined, total: otherSourceTotal });
+  }
+  const srcTotal = sourceEntries.reduce((s, b) => s + b.total, 0) || 1;
   const tgtTotal = targetEntries.reduce((s, t) => s + t.total, 0) || 1;
 
   // Height is driven by the busier column so neither is cramped.
-  const rows = Math.max(sources.length, targetEntries.length);
+  const rows = Math.max(sourceEntries.length, targetEntries.length);
   const bodyH = Math.max(220, rows * 42);
   const H = HEADER + bodyH + FOOTER;
 
@@ -306,13 +334,13 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
     });
   };
 
-  const srcPos = stack(sources.map((s) => ({ total: s.amount })), srcTotal);
+  const srcPos = stack(sourceEntries, srcTotal);
   const tgtPos = stack(targetEntries, tgtTotal);
 
-  const srcNodes: Node[] = sources.map((s, i) => ({
+  const srcNodes: Node[] = sourceEntries.map((s, i) => ({
     code: s.code,
     investorType: s.investorType,
-    total: Math.abs(s.amount),
+    total: s.total,
     ...srcPos[i],
   }));
   const tgtNodes: Node[] = targetEntries.map((t, i) => ({
@@ -364,37 +392,18 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
   }
 
   /* --------------------------------- nodes --------------------------------- */
-  const nodeMarkup = (n: Node, x: number, anchorRight: boolean, explained = 1): string => {
+  const nodeMarkup = (n: Node, x: number, anchorRight: boolean): string => {
     const c = colorFor(n.investorType, th);
     const labelX = anchorRight ? x - 10 : x + 10;
     const anchor = anchorRight ? "end" : "start";
     const mid = n.y + n.h / 2;
     const rectX = x - (anchorRight ? 0 : 10);
 
-    /*
-     * A counterparty's bar is its TOTAL, but the ribbons only carry the flow from the buyers drawn.
-     * Rendering one solid bar therefore leaves blank space under the ribbons that reads as a
-     * rendering fault rather than as meaning.
-     *
-     * So the bar is drawn twice: the whole total dimmed, and the explained portion at full strength
-     * on top. The lighter section is then visibly "sold to someone not shown" instead of a gap, and
-     * the hover title says so in numbers.
-     */
-    const covered = Math.max(0, Math.min(1, explained));
-    const coveredH = n.h * covered;
-    const title =
-      covered >= 0.999
-        ? `${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)}`
-        : `${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)} total · ${esc(humanAmount(n.total * covered))} from the brokers shown`;
-
+    // One solid bar. Every bar is fully fed — a counterparty's unexplained remainder arrives from
+    // the synthetic "other buyers" source — so there is no partial state left to shade.
     const parts = [
-      `<rect x="${rectX}" y="${n.y.toFixed(1)}" width="10" height="${n.h.toFixed(1)}" rx="2" fill="${c}" fill-opacity="${covered >= 0.999 ? 1 : 0.3}"><title>${title}</title></rect>`,
+      `<rect x="${rectX}" y="${n.y.toFixed(1)}" width="10" height="${n.h.toFixed(1)}" rx="2" fill="${c}"><title>${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)}</title></rect>`,
     ];
-    if (covered < 0.999 && coveredH > 0.5) {
-      parts.push(
-        `<rect x="${rectX}" y="${n.y.toFixed(1)}" width="10" height="${coveredH.toFixed(1)}" rx="2" fill="${c}"><title>${title}</title></rect>`,
-      );
-    }
     const TWO_LINE_MIN = 26;
     const ONE_LINE_MIN = 11;
     if (n.h >= TWO_LINE_MIN) {
@@ -428,7 +437,7 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
     header(title, range, sideLabel, opts.unit, W, th, { left: leftRole, right: rightRole, xL: xL - 10, xR, y: HEADER - 14 }, opts.board),
     `<g>${ribbons.join("")}</g>`,
     `<g>${srcNodes.map((n) => nodeMarkup(n, xL - 10, true)).join("")}</g>`,
-    `<g>${tgtNodes.map((n) => nodeMarkup(n, xR, false, (finalTotals.get(n.code === othersLabel ? OTHERS : n.code)?.total ?? n.total) / (n.total || 1))).join("")}</g>`,
+    `<g>${tgtNodes.map((n) => nodeMarkup(n, xR, false)).join("")}</g>`,
     legend,
     `<text x="${W - PAD}" y="${HEADER + bodyH + 20}" text-anchor="end" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}" opacity="0.75">Unofficial Stockbit data · not financial advice</text>`,
     `</svg>`,

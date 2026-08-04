@@ -8,19 +8,19 @@ from naming.
 
 ## Unreleased
 
-### Fixed — the blank space under counterparty ribbons now reads as meaning
+### Fixed — counterparty bars are now fully connected
 
-Sizing a counterparty bar by its true total left visible blank space beneath the ribbons, because
-the ribbons only carry flow from the buyers drawn (typically 25–45% of the bar). Correct data, but it
-looked like a rendering fault.
+A counterparty's bar is its TRUE total, but the drawn buyers explain only part of it — 23–44% on a
+typical stock. The remainder had nothing attached to it, so every bar read as two disconnected
+pieces with the ribbons touching only the top one.
 
-The bar is now drawn twice — the full total dimmed, the explained portion at full strength on top —
-so the lighter section means "sold to brokers not shown" rather than looking broken. The hover title
-spells it out: `XL: 615.57B IDR total · 374.54B from the brokers shown`. A fully-explained bar keeps
-a single solid rect and the plain title, so nothing is dimmed without cause.
+The remainder is now fed by a synthetic **"other buyers"** source in the left column, mirroring the
+"+N others" band already used on the counterparty side. Every bar is fully connected, every ribbon
+still means the same thing (an amount that moved between two parties), and the totals reconcile on
+both sides. Shading the shortfall was tried first and rejected: two tones on one bar read as two
+bars, which is the confusion it was meant to remove.
 
-The solid portion is exactly the stacked ribbon height by construction (both are
-`drawn / total × barHeight`), so the tones cannot drift apart.
+No synthetic source is created when nothing is missing.
 
 ### Fixed — counterparty bars showed a partial sum; the chart is now buyer→seller only
 

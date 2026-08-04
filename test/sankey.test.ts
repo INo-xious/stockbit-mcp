@@ -402,41 +402,57 @@ test("the market board is disclosed in the subtitle when supplied", () => {
 /* --------------------- seller bars show the TRUE total --------------------- */
 
 test("a counterparty bar shows its true total, not just the flow from the buyers drawn", () => {
-  // Measured on TPIA: XL's bar read 374.54B when its real selling total was 615.57B — 61%. The
-  // partial sum is a plausible-looking number that is simply wrong, which is the worst kind.
+  // Measured on TPIA: XL's bar read 374.54B when its real selling total was 615.57B — 61%. A
+  // plausible-looking number that quietly understates is the worst kind of wrong.
   const src: FlowBroker[] = [
     { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
   ];
   const withTruth = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 250]]) });
-  // Partly explained: the title states the total AND how much of it the drawn buyers account for,
-  // so the lighter part of the bar is legible rather than looking like a gap.
-  assert.ok(
-    withTruth.includes("<title>XL: 250 IDR total · 100 from the brokers shown</title>"),
-    "the title should state the total and the explained portion",
-  );
+  assert.ok(withTruth.includes("<title>XL: 250 IDR</title>"), "the bar carries the true total");
 
   const without = renderSankey(src, OPTS);
-  assert.ok(without.includes("<title>XL: 100 IDR</title>"), "fully explained bars keep the plain title");
+  assert.ok(without.includes("<title>XL: 100 IDR</title>"), "without truth it falls back to drawn flow");
 });
 
-test("a partly-explained bar is drawn in two tones, not left as blank space", () => {
-  // Blank space under the ribbons reads as a rendering fault. The full total is drawn dimmed and
-  // the explained portion at full strength on top, so the remainder means "sold to someone not
-  // shown" instead of looking broken.
+test("the unexplained remainder is fed by an 'other buyers' source, so no bar is left part-full", () => {
+  // A counterparty's bar is its TRUE total, but the drawn buyers explain only 23-44% of it in
+  // practice. Leaving the rest unattached made every bar read as two disconnected pieces with the
+  // ribbons touching only the top one. The remainder now has a real source.
   const src: FlowBroker[] = [
     { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
   ];
   const svg = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 250]]) });
-  const dim = [...svg.matchAll(/<rect[^>]*fill-opacity="0.3"[^>]*>/g)];
-  assert.ok(dim.length >= 1, "the unexplained remainder should be a dimmed bar");
+  assert.match(svg, /other buyers/, "the remainder needs a visible source");
+  assert.ok(svg.includes("<title>other buyers: 150 IDR</title>"), "and it should carry the shortfall");
 
-  // …and a fully explained bar gets exactly one solid rect, no dimming.
-  const full = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 100]]) });
-  assert.equal(
-    [...full.matchAll(/<rect[^>]*fill-opacity="0.3"[^>]*>/g)].length,
-    0,
-    "a fully explained bar must not be dimmed",
-  );
+  // Two ribbons now land on XL: 100 from AA and 150 from the synthetic source.
+  const intoXl = svg
+    .split("<title>")
+    .filter((t) => t.includes("→ XL: "))
+    .map((t) => Number(t.split("→ XL: ")[1].split(" ")[0]));
+  assert.deepEqual(intoXl.sort((a, b) => a - b), [100, 150]);
+});
+
+test("a fully-explained chart invents no 'other buyers' source", () => {
+  const src: FlowBroker[] = [
+    { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
+  ];
+  const svg = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 100]]) });
+  assert.equal(svg.includes("other buyers"), false, "nothing is missing, so nothing should be added");
+});
+
+test("no bar is ever shaded — every bar is fully fed", () => {
+  const src: FlowBroker[] = [
+    { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
+  ];
+  for (const total of [100, 250, 1]) {
+    const svg = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", total]]) });
+    assert.equal(
+      svg.includes('fill-opacity="0.3"'),
+      false,
+      `partial shading reappeared for total=${total}`,
+    );
+  }
 });
 
 test("a true total below the drawn flow cannot shrink the bar under its ribbons", () => {
