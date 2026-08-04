@@ -20,6 +20,11 @@ and the amount that moved between them.
 // AK accumulated Rp 445.5B, of which Rp 77.1B came from BK
 ```
 
+`data_type=VALUE` returns IDR; `data_type=VOLUME` returns **lots** (1 lot = 100 shares), matching the
+convention broker summary uses. The unit was verified arithmetically, not assumed — value/volume
+lands on the right per-share price only after dividing by 100, so labelling it "shares" would have
+understated every quantity by 100x.
+
 Served by a different backend service (`/order-trade/broker/distribution`) which takes the symbol as
 a **query parameter**, not a path segment. Accepts either a `period` preset (`TB_PERIOD_*`) or an
 explicit `from`/`to` window, reusing the date validation added for `broker_summary`.
@@ -35,8 +40,12 @@ In their web app the gate is enforced **client-side** — the micro-frontend rec
 prop and, when false, renders a blurred overlay over placeholder data and never issues the request.
 Whether the server independently refuses an ineligible account is **unverified**: it could not be
 observed from an entitled account. The ineligible path is therefore handled defensively — an HTTP
-403 is reported as the balance requirement (naming the amount), while 401 remains a genuine auth
-failure and is never blamed on the balance. Both mappings are asserted by test.
+403 names the balance gate as the **most likely** cause while preserving the server's own message and
+`error_type`, and 401 remains a genuine auth failure that is never blamed on the balance. Asserting
+the balance outright would have been wrong: this project's config already documents that these
+routes "400s/403s ... without browser-shaped Origin/Referer", so a Cloudflare or header 403 would
+have told the user to deposit Rp 10,000,000 to fix something money cannot fix — with the real error
+text destroyed. Both mappings are asserted by test.
 
 ### Added — `broker_summary` date ranges
 

@@ -61,13 +61,13 @@ export function registerTools(server: McpServer): void {
       "broker accumulated; this says who they accumulated it from.\n" +
       "DATES: pass a `period` preset, or BOTH `from` and `to` (YYYY-MM-DD) for an explicit window. " +
       "Supplying from/to overrides period. Both ends are required together.\n" +
-      "data_type=VALUE returns IDR amounts, VOLUME returns share counts; the response reports which " +
-      "in `amountUnit`.\n" +
+      "data_type=VALUE returns IDR amounts, VOLUME returns LOTS (1 lot = 100 shares on IDX); the " +
+      "response states which in `amountUnit`.\n" +
       "REQUIRES a Stockbit account with at least Rp 10,000,000 total balance — Stockbit gates this " +
       "feature. If the account does not qualify the tool returns an error saying so.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
-      data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns shares."),
+      data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns lots (1 lot = 100 shares)."),
       investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
       period: z
         .enum(core.DISTRIBUTION_PERIODS)

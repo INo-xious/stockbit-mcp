@@ -105,7 +105,7 @@ Register with your MCP client (e.g. Claude Desktop `mcpServers`):
 | Tool | What it returns |
 |---|---|
 | `broker_summary` | Net buyers/sellers per broker (lots + IDR + foreign/local). The unique bandarmology signal. Optional `from`/`to` (`YYYY-MM-DD`) query any historical day or window — the server aggregates net flow across it in a single request. |
-| `broker_distribution` | Broker-to-broker flow matrix: for each top broker, WHICH brokers were on the other side and how much moved. Requires a Stockbit balance of Rp 10,000,000. |
+| `broker_distribution` | Broker-to-broker flow matrix: for each top broker, WHICH brokers were on the other side and how much moved (IDR, or lots via `data_type=VOLUME`). Requires a Stockbit balance of Rp 10,000,000. |
 | `quote` | Last price + best bid/offer for a symbol |
 | `top_movers` | Top gainers / losers / most-active (empty when market closed) |
 | `trending` | Trending tickers |

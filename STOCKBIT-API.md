@@ -412,6 +412,8 @@ parameter, not a path segment**.
 `by_volume` holds `{top_broker_buy[], top_broker_sell[]}` (12 entries each observed). Only the block
 matching `data_type` is populated; the other comes back empty.
 
+**Units VERIFIED arithmetically.** `VOLUME` amounts are **lots, not shares** — matching the `blot`/`slot` convention in 4a. Check: value/volume for the top BBRI and TLKM brokers gives ~296,000 and ~260,000, absurd per share but correct per lot (2,964 and 2,609 IDR, against last prices ~3,020 and ~2,600).
+
 Each entry is the flow matrix itself:
 
 ```jsonc
@@ -427,5 +429,6 @@ their web app the gate is **client-side** — the micro-frontend
 (`storage.stockbit.com/broker-distribution/*/static/remoteEntry.js`) takes an `isEligible` prop and,
 when false, renders a blurred `broker-distribution-not-eligible-overlay` over placeholder data and
 **never issues the request**. Whether the server independently refuses an ineligible account is
-**UNVERIFIED** — it could not be observed from an entitled account. Client code should therefore map
-a `403` to an entitlement message defensively rather than assume either behaviour.
+**UNVERIFIED** — it could not be observed from an entitled account. Client code should therefore treat a `403` as *probably* the entitlement gate while preserving the
+server's own message — these routes also 403 on missing browser-shaped headers (see §3), so
+asserting the balance outright misdiagnoses a WAF block as an empty wallet.

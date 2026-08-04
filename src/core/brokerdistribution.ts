@@ -36,10 +36,28 @@ import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput
 /** Stockbit's minimum total balance for this feature, in IDR. */
 export const REQUIRED_BALANCE_IDR = 10_000_000;
 
+/**
+ * What to say when the server returns 403.
+ *
+ * Phrased as the *likely* cause rather than a verdict, and it never replaces what the server said.
+ * An earlier version asserted the balance gate outright and discarded the upstream body — which
+ * meant a Cloudflare block or a revoked session told the user to deposit Rp 10,000,000 to fix a
+ * problem that money cannot fix, with the real error text gone. This project's own config notes
+ * that these routes "400s/403s ... without browser-shaped Origin/Referer", so a non-entitlement 403
+ * is not hypothetical; it is the one actually seen.
+ */
 export const ENTITLEMENT_MESSAGE =
-  "Your Stockbit account does not have access to Broker Distribution. Stockbit gates this feature " +
-  `behind a minimum total balance of Rp ${REQUIRED_BALANCE_IDR.toLocaleString("en-US")}. ` +
-  "Top up to that level in the Stockbit app to unlock it. All other tools are unaffected.";
+  "Stockbit refused this request (HTTP 403). The most likely cause is Broker Distribution's " +
+  `entitlement gate: Stockbit requires a minimum total balance of Rp ${REQUIRED_BALANCE_IDR.toLocaleString("en-US")} ` +
+  "for this feature, and accounts below it have no access. If your balance already exceeds that, " +
+  "the session may need re-authenticating (`stockbit-auth login`), or the request was blocked " +
+  "upstream — this API also answers 403 when expected browser headers are missing.";
+
+/** Append whatever the server actually said, so the real cause is never destroyed. */
+export function describeForbidden(upstream?: string): string {
+  const said = upstream?.trim();
+  return said && said !== "HTTP 403" ? `${ENTITLEMENT_MESSAGE}\nServer said: ${said}` : ENTITLEMENT_MESSAGE;
+}
 
 /** VALUE returns IDR amounts; VOLUME returns share counts. The other block comes back empty. */
 export type DistributionDataType = "VALUE" | "VOLUME";
@@ -125,7 +143,7 @@ export interface BrokerDistribution {
   symbol: string;
   dataType: DistributionDataType;
   /** Units of every `amount` below — spelled out so a reader never has to guess. */
-  amountUnit: "IDR" | "shares";
+  amountUnit: "IDR" | "lots";
   from?: string;
   to?: string;
   asOf?: string;
@@ -160,6 +178,21 @@ export function buildDistributionParams(
   return { ...base, period: `TB_PERIOD_${opts.period ?? "LAST_1_DAY"}` };
 }
 
+function ttlFor(range: DateRange | undefined, now: Date): number {
+  // A window that closed before today is immutable; anything touching today is still being written.
+  return range && isSettledRange(range, now)
+    ? CACHE.brokerSummarySettledTtlMs
+    : CACHE.brokerSummaryTtlMs;
+}
+
+/** Cache lifetime for a given request. Exported so both branches can be asserted directly. */
+export function brokerDistributionTtlFor(
+  opts: BrokerDistributionOptions,
+  now: Date = new Date(),
+): number {
+  return ttlFor(normalizeDateRange(opts), now);
+}
+
 const mapParty = (p: z.output<typeof Party>): DistributionCounterparty => ({
   code: p.code,
   investorType: p.type,
@@ -178,8 +211,11 @@ export async function getBrokerDistribution(
   const range = normalizeDateRange(opts);
   const params = buildDistributionParams(opts, range);
   const dataType = opts.dataType ?? "VALUE";
+  // The key is derived from the full param set, so VALUE vs VOLUME, a different investor_type, and
+  // a different window are all distinct entries. Collapsing any of them would serve one query's
+  // data in answer to another.
   const key = `brokerDistribution:${JSON.stringify(params)}`;
-  const ttl = range && isSettledRange(range) ? CACHE.brokerSummarySettledTtlMs : CACHE.brokerSummaryTtlMs;
+  const ttl = ttlFor(range, new Date());
 
   return cached(key, ttl, async () => {
     let body: unknown;
@@ -187,7 +223,13 @@ export async function getBrokerDistribution(
       body = await getJson("brokerDistribution", { params });
     } catch (err) {
       if (err instanceof StockbitError && err.status === 403) {
-        throw new StockbitError("auth", ENTITLEMENT_MESSAGE, { status: 403 });
+        // Augment, never replace: errorType and details are what a reader needs when the cause is
+        // NOT the balance gate.
+        throw new StockbitError("auth", describeForbidden(err.message), {
+          status: 403,
+          errorType: err.errorType,
+          details: err.details,
+        });
       }
       throw err;
     }
@@ -204,7 +246,7 @@ export async function getBrokerDistribution(
     return {
       symbol: params.symbol,
       dataType,
-      amountUnit: dataType === "VALUE" ? "IDR" : "shares",
+      amountUnit: dataType === "VALUE" ? "IDR" : "lots",
       from: d.start_date,
       to: d.end_date,
       asOf: d.date_info,
