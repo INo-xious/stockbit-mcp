@@ -364,17 +364,37 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
   }
 
   /* --------------------------------- nodes --------------------------------- */
-  const nodeMarkup = (n: Node, x: number, anchorRight: boolean): string => {
+  const nodeMarkup = (n: Node, x: number, anchorRight: boolean, explained = 1): string => {
     const c = colorFor(n.investorType, th);
     const labelX = anchorRight ? x - 10 : x + 10;
     const anchor = anchorRight ? "end" : "start";
     const mid = n.y + n.h / 2;
-    // Label density is driven by the node's own height. A thin node cannot carry two lines of text
-    // without colliding with its neighbours, and overlapping labels are worse than absent ones —
-    // the amount is still reachable from the hover title on the bar.
+    const rectX = x - (anchorRight ? 0 : 10);
+
+    /*
+     * A counterparty's bar is its TOTAL, but the ribbons only carry the flow from the buyers drawn.
+     * Rendering one solid bar therefore leaves blank space under the ribbons that reads as a
+     * rendering fault rather than as meaning.
+     *
+     * So the bar is drawn twice: the whole total dimmed, and the explained portion at full strength
+     * on top. The lighter section is then visibly "sold to someone not shown" instead of a gap, and
+     * the hover title says so in numbers.
+     */
+    const covered = Math.max(0, Math.min(1, explained));
+    const coveredH = n.h * covered;
+    const title =
+      covered >= 0.999
+        ? `${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)}`
+        : `${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)} total · ${esc(humanAmount(n.total * covered))} from the brokers shown`;
+
     const parts = [
-      `<rect x="${x - (anchorRight ? 0 : 10)}" y="${n.y.toFixed(1)}" width="10" height="${n.h.toFixed(1)}" rx="2" fill="${c}"><title>${esc(n.code)}: ${esc(humanAmount(n.total))} ${esc(opts.unit)}</title></rect>`,
+      `<rect x="${rectX}" y="${n.y.toFixed(1)}" width="10" height="${n.h.toFixed(1)}" rx="2" fill="${c}" fill-opacity="${covered >= 0.999 ? 1 : 0.3}"><title>${title}</title></rect>`,
     ];
+    if (covered < 0.999 && coveredH > 0.5) {
+      parts.push(
+        `<rect x="${rectX}" y="${n.y.toFixed(1)}" width="10" height="${coveredH.toFixed(1)}" rx="2" fill="${c}"><title>${title}</title></rect>`,
+      );
+    }
     const TWO_LINE_MIN = 26;
     const ONE_LINE_MIN = 11;
     if (n.h >= TWO_LINE_MIN) {
@@ -408,7 +428,7 @@ export function renderSankey(brokers: FlowBroker[], opts: SankeyOptions): string
     header(title, range, sideLabel, opts.unit, W, th, { left: leftRole, right: rightRole, xL: xL - 10, xR, y: HEADER - 14 }, opts.board),
     `<g>${ribbons.join("")}</g>`,
     `<g>${srcNodes.map((n) => nodeMarkup(n, xL - 10, true)).join("")}</g>`,
-    `<g>${tgtNodes.map((n) => nodeMarkup(n, xR, false)).join("")}</g>`,
+    `<g>${tgtNodes.map((n) => nodeMarkup(n, xR, false, (finalTotals.get(n.code === othersLabel ? OTHERS : n.code)?.total ?? n.total) / (n.total || 1))).join("")}</g>`,
     legend,
     `<text x="${W - PAD}" y="${HEADER + bodyH + 20}" text-anchor="end" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}" opacity="0.75">Unofficial Stockbit data · not financial advice</text>`,
     `</svg>`,

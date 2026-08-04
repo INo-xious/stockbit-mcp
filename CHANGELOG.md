@@ -8,6 +8,20 @@ from naming.
 
 ## Unreleased
 
+### Fixed — the blank space under counterparty ribbons now reads as meaning
+
+Sizing a counterparty bar by its true total left visible blank space beneath the ribbons, because
+the ribbons only carry flow from the buyers drawn (typically 25–45% of the bar). Correct data, but it
+looked like a rendering fault.
+
+The bar is now drawn twice — the full total dimmed, the explained portion at full strength on top —
+so the lighter section means "sold to brokers not shown" rather than looking broken. The hover title
+spells it out: `XL: 615.57B IDR total · 374.54B from the brokers shown`. A fully-explained bar keeps
+a single solid rect and the plain title, so nothing is dimmed without cause.
+
+The solid portion is exactly the stacked ribbon height by construction (both are
+`drawn / total × barHeight`), so the tones cannot drift apart.
+
 ### Fixed — counterparty bars showed a partial sum; the chart is now buyer→seller only
 
 **A seller's bar was labelled with only the flow from the buyers drawn**, not that seller's actual
