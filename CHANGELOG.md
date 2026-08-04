@@ -8,6 +8,21 @@ from naming.
 
 ## Unreleased
 
+### Fixed — counterparty bars showed a partial sum; the chart is now buyer→seller only
+
+**A seller's bar was labelled with only the flow from the buyers drawn**, not that seller's actual
+total. Measured on TPIA over 27 Jul–3 Aug 2026, XL's bar read **374.54B against a real total of
+615.57B** — 61% — and a thinner broker read 16%. That is the worst kind of wrong: a plausible number
+that quietly understates. Bars now carry the counterparty's true total from `top_broker_sell`, so a
+partly-filled bar means the buyers shown explain only part of what that broker sold — which is
+information, not a rendering fault. A `max(drawn, true)` guard keeps ribbons inside their bar if the
+two ever disagree.
+
+**The `side` option is gone.** The chart is always laid out BUYER → SELLER, matching Stockbit's own
+Broker Distribution. Rendering the mirror view invited exactly the confusion it caused: a
+sellers-first chart compared against Stockbit's buyers-first UI looks like a data discrepancy when
+the underlying numbers are identical.
+
 ### Fixed — market board, and the diagram now names its columns
 
 **`market_board` was being omitted entirely.** An earlier probe sent broker summary's

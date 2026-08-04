@@ -58,7 +58,10 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "broker_distribution",
-    "Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram: for each top " +
+    "Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out " +
+      "BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers on the left, " +
+      "the sellers they bought from on the right. Each seller's bar is that seller's TOTAL, so a " +
+      "partly-filled bar means the buyers shown account for only part of what it sold. For each top " +
       "broker, WHICH brokers were on the other side of their trades and how much moved between " +
       "them. broker_summary says how much a broker accumulated; this shows who they accumulated " +
       "it from.\n" +
@@ -72,7 +75,6 @@ export function registerTools(server: McpServer): void {
       "An empty diagram on a weekend or public holiday is expected, not an error.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
-      side: z.enum(["buyers", "sellers"]).optional().describe("Which side to chart. Default buyers."),
       data_type: z.enum(["VALUE", "VOLUME"]).optional().describe("Default VALUE (IDR). VOLUME returns lots (1 lot = 100 shares)."),
       investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
       market_board: z
@@ -109,14 +111,17 @@ export function registerTools(server: McpServer): void {
           start_date: a.start_date,
           end_date: a.end_date,
         });
-        const side = a.side ?? "buyers";
-        const brokers = side === "buyers" ? d.topBuyers : d.topSellers;
+        // Always buyers -> sellers, matching Stockbit. Each seller's bar is its TRUE total, so
+        // the picture states the seller's whole position rather than only the slice the drawn
+        // buyers account for.
+        const brokers = d.topBuyers;
+        const sellerTotals = new Map(d.topSellers.map((s) => [s.code, s.amount]));
         const svg = renderSankey(brokers, {
           symbol: d.symbol,
           unit: d.amountUnit,
           from: d.from,
           to: d.to,
-          side,
+          targetTotals: sellerTotals,
           topSources: a.top_sources,
           topTargets: a.top_targets,
           theme: a.theme,
@@ -128,7 +133,7 @@ export function registerTools(server: McpServer): void {
         // has a path to open.
         const savedTo = writeSvg(
           a.save_path ??
-            defaultChartPath({ symbol: d.symbol, side, from: d.from, to: d.to, dataType: d.dataType }),
+            defaultChartPath({ symbol: d.symbol, side: "buy-to-sell", from: d.from, to: d.to, dataType: d.dataType }),
           svg,
         );
 
@@ -141,7 +146,7 @@ export function registerTools(server: McpServer): void {
             success: true,
             data: {
               symbol: d.symbol,
-              side,
+              direction: "buyers bought from sellers",
               from: d.from,
               to: d.to,
               amountUnit: d.amountUnit,

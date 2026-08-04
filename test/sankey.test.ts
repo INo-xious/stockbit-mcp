@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { THEMES, colorFor, esc, humanAmount, renderSankey, type FlowBroker } from "../src/render/sankey.ts";
 import { writeSvg } from "../src/render/write.ts";
 
-const OPTS = { symbol: "BBRI", unit: "IDR", from: "2026-07-28", to: "2026-08-01", side: "buyers" as const };
+const OPTS = { symbol: "BBRI", unit: "IDR", from: "2026-07-28", to: "2026-08-01" };
 
 const brokers: FlowBroker[] = [
   {
@@ -368,24 +368,19 @@ test("INVARIANT: top_targets actually caps how many counterparty nodes are drawn
 
 test("the columns are labelled BUYER and SELLER so the direction is unambiguous", () => {
   // Stockbit's own UI labels its two columns Buyer / Seller. Without that, a reader cannot tell
-  // whether the left column bought or sold, and the chart is easy to read backwards.
-  const buyers = renderSankey(brokers, { ...OPTS, side: "buyers" });
-  assert.ok(buyers.includes(">BUYER<"), "buyers view should label the source column BUYER");
-  assert.ok(buyers.includes(">SELLER<"), "buyers view should label the counterparty column SELLER");
-
-  const sellers = renderSankey(brokers, { ...OPTS, side: "sellers" });
-  assert.ok(sellers.includes(">SELLER<"));
-  assert.ok(sellers.includes(">BUYER<"));
+  // which side bought, and the chart is easy to read backwards.
+  const svg = renderSankey(brokers, OPTS);
+  assert.ok(svg.includes(">BUYER<"), "the source column must be labelled BUYER");
+  assert.ok(svg.includes(">SELLER<"), "the counterparty column must be labelled SELLER");
 });
 
-test("the roles swap sides with `side`, they are not fixed to a column", () => {
-  const buyers = renderSankey(brokers, { ...OPTS, side: "buyers" });
-  const sellers = renderSankey(brokers, { ...OPTS, side: "sellers" });
-  // The source column is right-anchored; the counterparty column is left-anchored.
-  const sourceRole = (svg: string) =>
-    /text-anchor="end"[^>]*letter-spacing="0.6"[^>]*>([A-Z]+)</.exec(svg)?.[1];
-  assert.equal(sourceRole(buyers), "BUYER");
-  assert.equal(sourceRole(sellers), "SELLER");
+test("the layout is always buyer -> seller, with no way to flip it", () => {
+  // One canonical direction, matching Stockbit, so a reader never has to work out which way a
+  // given chart runs. The source column is right-anchored, the counterparty column left-anchored.
+  const svg = renderSankey(brokers, OPTS);
+  const sourceRole = /text-anchor="end"[^>]*letter-spacing="0.6"[^>]*>([A-Z]+)</.exec(svg)?.[1];
+  assert.equal(sourceRole, "BUYER", "the left column is always the buyer");
+  assert.match(svg, /bought FROM/);
 });
 
 test("buyer and seller are visually distinct colours in both themes", () => {
@@ -394,13 +389,40 @@ test("buyer and seller are visually distinct colours in both themes", () => {
   }
 });
 
-test("the subtitle states the direction of the flow, not just which side", () => {
-  assert.match(renderSankey(brokers, { ...OPTS, side: "buyers" }), /bought FROM/);
-  assert.match(renderSankey(brokers, { ...OPTS, side: "sellers" }), /sold TO/);
+test("the subtitle states the direction of the flow", () => {
+  assert.match(renderSankey(brokers, OPTS), /who the top buyers bought FROM/);
 });
 
 test("the market board is disclosed in the subtitle when supplied", () => {
   // REGULER vs ALL changes the numbers by an order of magnitude, so the chart must say which it is.
   const svg = renderSankey(brokers, { ...OPTS, board: "reguler board" });
   assert.match(svg, /reguler board/);
+});
+
+/* --------------------- seller bars show the TRUE total --------------------- */
+
+test("a counterparty bar shows its true total, not just the flow from the buyers drawn", () => {
+  // Measured on TPIA: XL's bar read 374.54B when its real selling total was 615.57B — 61%. The
+  // partial sum is a plausible-looking number that is simply wrong, which is the worst kind.
+  const src: FlowBroker[] = [
+    { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
+  ];
+  const withTruth = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 250]]) });
+  assert.ok(withTruth.includes("<title>XL: 250 IDR</title>"), "bar should carry the true total");
+
+  const without = renderSankey(src, OPTS);
+  assert.ok(without.includes("<title>XL: 100 IDR</title>"), "without truth it falls back to drawn flow");
+});
+
+test("a true total below the drawn flow cannot shrink the bar under its ribbons", () => {
+  // The max() guard: if the two ever disagree the wrong way, ribbons must still fit. This is the
+  // overflow class the earlier layout shipped with.
+  const src: FlowBroker[] = [
+    { code: "AA", investorType: "Asing", amount: 100, distributedWith: [{ code: "XL", amount: 100 }] },
+  ];
+  const svg = renderSankey(src, { ...OPTS, targetTotals: new Map([["XL", 1]]) });
+  const H = Number(/height="(\d+)"/.exec(svg)?.[1] ?? 0);
+  for (const m of svg.matchAll(/<path d="M [\d.]+ [\d.]+ C [^"]*L [\d.]+ ([\d.]+)/g)) {
+    assert.ok(Number(m[1]) <= H, "a ribbon overflowed after the true total was applied");
+  }
 });
