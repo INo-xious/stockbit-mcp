@@ -119,6 +119,15 @@ export const ROUTES = {
   chartbitTemplates: { method: "GET", template: "/chartbit/template" },
   chartbitVersion: { method: "GET", template: "/chartbit/version" },
   /**
+   * What the account is entitled to, per feature. A READ.
+   *
+   * This is the authority on whether a paywall is the reason something does not work. The project
+   * has already made the mistake of *inferring* a gate once — every 403 blamed on the Rp 10,000,000
+   * broker-distribution balance requirement — so when Stockbit will simply answer the question, ask
+   * it instead of guessing. `?features=PAYWALL_FEATURE_CHARTBIT&company=BBRI`.
+   */
+  paywallEligibility: { method: "GET", template: "/paywall/eligibility/check" },
+  /**
    * Save a NAMED chart layout. The second write, under ADR-0003 as amended.
    *
    * The per-symbol layout route it accompanies is a server-side stub — it accepts every valid body

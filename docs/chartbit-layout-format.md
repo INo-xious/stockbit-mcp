@@ -129,7 +129,45 @@ origins that module lists.
 mechanisms accept and discard. That is a property of Stockbit's server, not of the payload, the
 host, the key, or the encoding — each of which was eliminated separately above.
 
-### Why: Chartbit is a paid feature
+### It is NOT a paywall — the account is eligible
+
+An earlier revision of this document concluded that Chartbit is a paid feature and that saves from a
+non-Pro account are discarded. **That was wrong, and it is left here as a correction rather than
+deleted**, because the mistake is instructive: it was inferred from the paywall UI in the page
+bundle instead of asked of the server.
+
+Stockbit exposes the question directly:
+
+```
+GET /paywall/eligibility/check?features=PAYWALL_FEATURE_CHARTBIT&company=BBRI
+→ {"features":[{"feature":"PAYWALL_FEATURE_CHARTBIT","is_eligible":true}],
+   "company":{"company":"BBRI","is_eligible":true}}
+```
+
+`is_eligible: true`, on the same account for which broker distribution — itself behind a Rp
+10,000,000 balance gate — works. `PAYWALL_FEATURE_KEYSTATS` and `PAYWALL_FEATURE_FINANCIALS` also
+return eligible.
+
+This is the second time this project has reached for a gate as an explanation; the first was blaming
+every 403 on the balance requirement. Same lesson: when the server will answer, ask it rather than
+reading the UI's intentions. The route is declared as `paywallEligibility` so the question is cheap
+to ask next time.
+
+### What it appears to be instead: saving is not wired up
+
+The page chunk `pages/symbol/[symbol]/chartbit-*.js` contains **no save wiring at all** — no
+`save_load_adapter`, no `auto_save_delay`, no `onAutoSaveNeeded`, no `saveLayout` call site. The API
+function exists in the client module and nothing calls it.
+
+Server-side the pair behaves like a stub, and drawing a trendline in Stockbit's own UI and saving it
+does not persist either. The client's axios instance was checked too, in case a header was missing:
+it sets only `Accept: application/json`, an optional `User-Agent`, and the bearer — nothing this
+project does not already send.
+
+So chart-layout saving looks retired on both sides. Stated as an observation about behaviour, not a
+diagnosis of someone else's backend.
+
+### The original (incorrect) paywall reasoning, kept for the record
 
 The chart page chunk (`_next/static/chunks/pages/symbol/[symbol]/chartbit-*.js`) gates itself on the
 account's Pro status:

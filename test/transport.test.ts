@@ -58,6 +58,7 @@ test("the permitted request set is exactly this list", () => {
     // Broker Distribution. Served by the order-trade service and takes its symbol as a query
     // parameter rather than a path segment, so there is no `:symbol` here.
     "GET /order-trade/broker/distribution",
+    "GET /paywall/eligibility/check",
     "GET /stream/v3/symbol/:symbol",
     "GET /user-setting/configurations",
     "POST /chartbit/:symbol/layout",
