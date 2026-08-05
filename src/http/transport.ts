@@ -81,6 +81,11 @@ export const ROUTES = {
 
   /* -- price feed -- */
   pricesClose: { method: "GET", template: "/company-price-feed/prices/close" },
+  /**
+   * Daily OHLCV. Returns exactly 12 rows per page and ignores every widening parameter, so a long
+   * series costs many upstream calls — see `src/core/bars.ts` for how the walk is bounded.
+   */
+  historicalSummary: { method: "GET", template: "/company-price-feed/historical/summary/:symbol" },
   pricePerformance: { method: "GET", template: "/company-price-feed/price-performance/:symbol" },
   orderbook: { method: "GET", template: "/company-price-feed/v2/orderbook/companies/:symbol" },
 

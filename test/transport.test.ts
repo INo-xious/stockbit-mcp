@@ -37,6 +37,7 @@ test("the permitted request set is exactly this list", () => {
   // Locked deliberately: adding a route must show up as a change to this assertion, so a new
   // authenticated request shape cannot land without a reviewer seeing it.
   assert.deepEqual(permittedRequests(), [
+    "GET /company-price-feed/historical/summary/:symbol",
     "GET /company-price-feed/price-performance/:symbol",
     "GET /company-price-feed/prices/close",
     "GET /company-price-feed/v2/orderbook/companies/:symbol",

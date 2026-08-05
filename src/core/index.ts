@@ -3,6 +3,8 @@ export * from "./marketdetectors.js";
 export * from "./brokerdistribution.js";
 export * from "./emitten.js";
 export * from "./pricefeed.js";
+export * from "./bars.js";
+export * from "./indicators.js";
 export * from "./keystats.js";
 export * from "./stream.js";
 export * from "./financial.js";
