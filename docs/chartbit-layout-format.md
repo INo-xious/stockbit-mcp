@@ -129,6 +129,35 @@ origins that module lists.
 mechanisms accept and discard. That is a property of Stockbit's server, not of the payload, the
 host, the key, or the encoding — each of which was eliminated separately above.
 
+### Why: Chartbit is a paid feature
+
+The chart page chunk (`_next/static/chunks/pages/symbol/[symbol]/chartbit-*.js`) gates itself on the
+account's Pro status:
+
+```js
+{ isPro: a.company.isPro, isRenewal, isLoading, getStatus, addCounter }
+…
+var b = p.qU.CHARTBIT;               // PAYWALL_FEATURE_CHARTBIT
+f({ key: o.P.company, feature: b, company: a });
+g({ feature: b, company: a });       // addCounter — a usage counter for non-subscribers
+```
+
+The same enum carries `PAYWALL_FEATURE_KEYSTATS`, `PAYWALL_FEATURE_ANALYSIS`,
+`PAYWALL_FEATURE_FINANCIALS` and `PAYWALL_FEATURE_FUNDACHART`, and the chunk ships the paywall copy
+*"Berlangganan mulai dari Rp15 ribu/hari untuk nikmati semua fitur tanpa batas."*
+
+Notably the page chunk contains **no save wiring at all** — no `save_load_adapter`,
+`auto_save_delay`, `onAutoSaveNeeded` or `saveLayout` call site. A non-Pro account is served the
+chart with a usage counter and no save path, which is consistent with the server accepting a save
+and discarding it.
+
+This is the same shape as the Rp 10,000,000 balance gate on broker distribution, and it is treated
+the same way in `src/core/layoutwrite.ts`: name the likely cause, and say plainly that it is an
+inference. Stockbit returns no entitlement error on this path — a 200 with no effect — so asserting
+it as fact would repeat the mistake of blaming every 403 on the balance gate.
+
+**What would confirm it:** a Pro subscription, or a network trace of a save from a Pro account.
+
 ## Where the chart configuration actually lives
 
 `GET /user-setting/configurations?user_setting_type=1` → `content` is **base64 of a ZIP containing a

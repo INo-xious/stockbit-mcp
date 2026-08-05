@@ -136,6 +136,28 @@ async function readLayoutBytes(symbol: string): Promise<string> {
   return getRawChartLayout(symbol);
 }
 
+/**
+ * What to tell a caller when Stockbit accepts a save and stores nothing.
+ *
+ * Named rather than vague, because "it didn't work" sends someone debugging their payload for an
+ * afternoon. Chartbit is a **paid feature**: the chart page gates itself on `company.isPro` against
+ * `PAYWALL_FEATURE_CHARTBIT`, alongside the same enum's KEYSTATS, ANALYSIS, FINANCIALS and
+ * FUNDACHART entries, and offers a subscription "from Rp15 ribu/hari". A non-Pro account is served
+ * the chart with a usage counter, and its saves are accepted with HTTP 200 and discarded.
+ *
+ * This is the same shape as the Rp 10,000,000 balance gate on broker distribution, and it gets the
+ * same treatment: name the likely cause, and say plainly that it is a guess about someone else's
+ * server rather than something observed in a response. Stockbit returns no entitlement error to
+ * distinguish "not subscribed" from "endpoint retired", so overclaiming here would be the same
+ * mistake as blaming every 403 on the balance gate.
+ */
+const NOT_PERSISTED_REASON = (symbol: string): string =>
+  `Stockbit accepted the write for ${symbol} and the layout read back unchanged, so it was not stored. ` +
+  `Nothing was altered — the account still holds exactly what it did before. ` +
+  `Most likely cause: Chartbit is a Pro feature (the chart page gates on PAYWALL_FEATURE_CHARTBIT) ` +
+  `and saves from a non-subscribed account are accepted and discarded. The server returns no ` +
+  `entitlement error, so that is inference, not something it told us.`;
+
 /** Drop cached reads of this symbol's layout, so a later tool call cannot serve the pre-write state. */
 function invalidateLayout(symbol: string): void {
   invalidateCache(`chartlayout:${symbol}`);
@@ -382,9 +404,7 @@ async function performSave({ symbol, content, at }: SaveContext): Promise<SaveRe
       verified: false,
       rolledBack: true,
       rollbackVerified: true,
-      outcomeUnknown:
-        `Stockbit accepted the write for ${symbol} but the layout read back unchanged, so it was not stored. ` +
-        `Nothing was altered — the account still holds exactly what it did before.`,
+      outcomeUnknown: NOT_PERSISTED_REASON(symbol),
       logged, at,
     };
   }
@@ -441,6 +461,8 @@ export interface TemplateSaveResult {
   replacedExisting: boolean;
   logged: boolean;
   at: string;
+  /** Why it did not stick, when it did not. */
+  notPersistedReason?: string;
 }
 
 /** The saved named layouts on the account. */
@@ -499,7 +521,10 @@ export async function saveChartTemplate(options: {
     bytesBefore: before.length, bytesAfter: after.length, replacedExisting,
   });
 
-  return { name, before, after, verified, replacedExisting, logged, at };
+  return {
+    name, before, after, verified, replacedExisting, logged, at,
+    notPersistedReason: verified ? undefined : NOT_PERSISTED_REASON(`template "${name}"`),
+  };
 }
 
 /** Literals that would be rewritten on save, for a caller that wants to check before committing. */
