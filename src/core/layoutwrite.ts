@@ -40,7 +40,8 @@ import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { postJson } from "../http/client.js";
+import { z } from "zod";
+import { getJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { getRawChartLayout } from "./layout.js";
@@ -421,6 +422,84 @@ async function performSave({ symbol, content, at }: SaveContext): Promise<SaveRe
     logged,
     at,
   };
+}
+
+/* ------------------------------- named layouts (templates) ------------------------------- */
+
+const TemplateList = z
+  .object({ data: z.array(z.object({ name: z.string().optional() }).passthrough()).nullable().optional() })
+  .passthrough();
+
+export interface TemplateSaveResult {
+  name: string;
+  /** Names already present before the save. */
+  before: string[];
+  after: string[];
+  /** True when the name appears in the list read back afterwards. */
+  verified: boolean;
+  /** True when a template of this name already existed — the save REPLACES it. */
+  replacedExisting: boolean;
+  logged: boolean;
+  at: string;
+}
+
+/** The saved named layouts on the account. */
+export async function listChartTemplates(): Promise<string[]> {
+  const body = await getJson("chartbitTemplates");
+  const parsed = TemplateList.safeParse(body);
+  if (!parsed.success) return [];
+  return (parsed.data.data ?? []).map((t) => t.name ?? "").filter(Boolean);
+}
+
+/**
+ * Save a layout under a name.
+ *
+ * Additive rather than destructive, which changes the safety story: there is no slot being
+ * overwritten, so no snapshot-and-rollback is needed. What IS needed is telling the user when a name
+ * already exists, because saving over it replaces that template — so `replacedExisting` is read
+ * before the write and reported.
+ *
+ * Note the payload differs from the per-symbol route: Stockbit's client sends
+ * `{name, content: JSON.stringify(layout)}` here WITHOUT the series-id substitution it applies to
+ * `saveLayout`. Reproduced faithfully rather than unified, because the server is the authority on
+ * which form it expects.
+ */
+export async function saveChartTemplate(options: {
+  name: string;
+  layout: unknown;
+  confirm: boolean;
+}): Promise<TemplateSaveResult> {
+  const at = new Date().toISOString();
+  const name = options.name.trim();
+
+  if (options.confirm !== true) {
+    throw new StockbitError(
+      "invalid_param",
+      `Refusing to save a chart template without confirm: true. This writes a named layout to the Stockbit account.`,
+    );
+  }
+  if (!name) throw new StockbitError("invalid_param", "A template needs a name");
+  if (!isPlausibleLayout(options.layout)) {
+    throw new StockbitError(
+      "invalid_param",
+      "This does not look like a Chartbit layout (expected charts[0].panes[0]). Refusing to send it.",
+    );
+  }
+
+  const before = await listChartTemplates();
+  const replacedExisting = before.includes(name);
+
+  await postJson("chartbitSaveTemplate", { body: { name, content: JSON.stringify(options.layout) } });
+
+  const after = await listChartTemplates();
+  const verified = after.includes(name);
+  const logged = logMutation({
+    at, symbol: `template:${name}`,
+    outcome: verified ? "template-saved" : "template-not-persisted",
+    bytesBefore: before.length, bytesAfter: after.length, replacedExisting,
+  });
+
+  return { name, before, after, verified, replacedExisting, logged, at };
 }
 
 /** Literals that would be rewritten on save, for a caller that wants to check before committing. */

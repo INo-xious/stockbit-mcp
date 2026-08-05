@@ -61,34 +61,41 @@ test("the permitted request set is exactly this list", () => {
     "GET /stream/v3/symbol/:symbol",
     "GET /user-setting/configurations",
     "POST /chartbit/:symbol/layout",
+    "POST /chartbit/template",
     "POST /login/refresh",
   ]);
 });
 
-test("the permitted writes are exactly these two", () => {
-  // This assertion is the tripwire. Until ADR-0003 it read `["loginRefresh"]`, and editing it was
-  // the deliberate act that let a mutation into the project — which is what it is for. A THIRD
-  // non-GET route needs the same argument made again, in a new ADR, not a quiet edit here.
+test("the permitted writes are exactly these three", () => {
+  // This assertion is the tripwire. Before ADR-0003 it read `["loginRefresh"]`, and editing it is
+  // the deliberate act that lets a mutation into the project — which is what it is for. A write
+  // beyond session refresh and chart persistence needs the argument made again, not a quiet edit.
   const writes = Object.entries(ROUTES).filter(([, route]) => route.method !== "GET");
   assert.deepEqual(
     writes.map(([name]) => name).sort(),
-    ["chartbitSaveLayout", "loginRefresh"],
+    ["chartbitSaveLayout", "chartbitSaveTemplate", "loginRefresh"],
     "a new non-GET route is a change of posture, not a feature (ADR-0002, ADR-0003)",
   );
   assert.equal(buildUrl("loginRefresh"), `${AUTHENTICATED_ORIGIN}/login/refresh`);
   assert.equal(buildUrl("chartbitSaveLayout", { symbol: "BBRI" }), `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`);
+  assert.equal(buildUrl("chartbitSaveTemplate"), `${AUTHENTICATED_ORIGIN}/chartbit/template`);
 });
 
-test("only the session refresh mutates anything outside the user's chart", () => {
-  // The narrower property that survived ADR-0003: the write we added touches ONE thing, a chart
-  // layout. Nothing here may post to a portfolio, an order, a watchlist or a profile.
+test("every write touches ONLY the session or the user's chart", () => {
+  // The property that survived ADR-0003: mutation is confined to chart persistence. Nothing here
+  // may post to a portfolio, an order, a watchlist, a profile, or the settings blob.
+  const allowed = ["/login/refresh", "/chartbit/:symbol/layout", "/chartbit/template"];
   for (const [name, route] of Object.entries(ROUTES)) {
     if (route.method === "GET") continue;
     assert.ok(
-      route.template === "/login/refresh" || /^\/chartbit\/:symbol\/layout$/.test(route.template),
+      allowed.includes(route.template),
       `${name} (${route.method} ${route.template}) mutates something no ADR has approved`,
     );
   }
+  // The settings blob holds the user's real chart configuration and is READ-ONLY here.
+  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), false);
+  // Deleting a named layout destroys it; only creating one was approved.
+  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false);
 });
 
 test("every declared route builds a URL the policy accepts", () => {
@@ -124,8 +131,8 @@ test("the ONLY writable Chartbit path is the layout, and only by POST", () => {
   // The template LIST is readable; writing or deleting a template would mutate account data and has
   // no ADR behind it. Same for the settings blob, which holds the user's real chart configuration.
   assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/chartbit/template`), true);
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/template`), false);
-  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false);
+  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/template`), true, "creating a named layout is approved");
+  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false, "deleting one is not");
   assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), true);
   assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), false);
 });

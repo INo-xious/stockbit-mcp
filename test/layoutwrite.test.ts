@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/index.ts";
-import { mutationLogPath, saveChartLayout, inspectPayload } from "../src/core/layoutwrite.ts";
+import { mutationLogPath, saveChartLayout, saveChartTemplate, inspectPayload } from "../src/core/layoutwrite.ts";
 import { buildLayout, normalizeSeriesIds } from "../src/core/layoutcodec.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -39,6 +39,10 @@ let onWrite: (() => void) | null = null;
 /** Fails only the Nth layout READ, to drive the unverifiable path. */
 let failReadOnCall: number | null = null;
 let readCount = 0;
+/** The fake account's named layouts. */
+let templates: string[] = [];
+/** Makes the template save a no-op, the way Stockbit's really behaves. */
+let templateSaveIgnored = false;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -75,6 +79,17 @@ before(() => {
       return json({ data: { layout: stored[symbol] ?? "" } });
     }
 
+    if (u.includes("/chartbit/template")) {
+      if (method === "POST") {
+        if (!templateSaveIgnored) {
+          const name = String((body as { name?: string })?.name ?? "");
+          if (name && !templates.includes(name)) templates.push(name);
+        }
+        return json({ message: "saved" });
+      }
+      return json({ data: templates.map((name) => ({ name })) });
+    }
+
     if (u.includes("/chartbit/initial/")) return json({ data: { name: "BBRI", exchange: "IDX" } });
     return json({ message: "unexpected" }, 404);
   }) as typeof fetch;
@@ -91,6 +106,8 @@ beforeEach(() => {
   onWrite = null;
   writeCount = 0;
   readCount = 0;
+  templates = [];
+  templateSaveIgnored = false;
   clearCache();
 });
 
@@ -504,6 +521,62 @@ test("the tool never claims 'nothing was left changed' unless the restore was co
   assert.equal(res.data.rollbackVerified, false);
   assert.equal(/Nothing was left changed/.test(res.data.message), false, "an unconfirmed restore must not read as safe");
   assert.match(res.data.message, /could NOT be confirmed|uncertain/);
+});
+
+/* ---------------------------------- named layouts ---------------------------------- */
+
+test("a template save requires confirm and a plausible layout", async () => {
+  await assert.rejects(
+    () => saveChartTemplate({ name: "x", layout: LAYOUT, confirm: false }),
+    (err: unknown) => err instanceof StockbitError && /confirm: true/.test(err.message),
+  );
+  await assert.rejects(
+    () => saveChartTemplate({ name: "  ", layout: LAYOUT, confirm: true }),
+    /needs a name/,
+  );
+  await assert.rejects(
+    () => saveChartTemplate({ name: "x", layout: { nope: 1 }, confirm: true }),
+    /does not look like a Chartbit layout/,
+  );
+  assert.equal(calls.filter((c) => c.method === "POST" && c.url.includes("/template")).length, 0);
+});
+
+test("a template save is verified by reading the list back", async () => {
+  templates = [];
+  const result = await saveChartTemplate({ name: "AI Analysis", layout: LAYOUT, confirm: true });
+  assert.equal(result.verified, true);
+  assert.deepEqual(result.before, []);
+  assert.deepEqual(result.after, ["AI Analysis"]);
+  assert.equal(result.replacedExisting, false);
+  assert.equal(logLines().at(-1)?.outcome, "template-saved");
+});
+
+test("saving over an existing name is REPORTED as a replacement", async () => {
+  // The one destructive thing an additive endpoint can still do.
+  templates = ["AI Analysis"];
+  const result = await saveChartTemplate({ name: "AI Analysis", layout: LAYOUT, confirm: true });
+  assert.equal(result.replacedExisting, true, "the user must be told their template was overwritten");
+});
+
+test("a template the server silently drops is reported as not persisted", async () => {
+  // Observed live: Stockbit accepts the POST and the list comes back unchanged.
+  templates = [];
+  templateSaveIgnored = true;
+  const result = await saveChartTemplate({ name: "AI Analysis", layout: LAYOUT, confirm: true });
+  assert.equal(result.verified, false, "an unverified save must not read as success");
+  assert.deepEqual(result.after, []);
+  assert.equal(logLines().at(-1)?.outcome, "template-not-persisted");
+});
+
+test("the template payload is raw JSON — NOT series-id normalised like the layout route", async () => {
+  // Stockbit's own client differs between the two endpoints; the server is the authority on which
+  // form each expects, so this is reproduced rather than unified.
+  templates = [];
+  await saveChartTemplate({ name: "AI Analysis", layout: LAYOUT, confirm: true });
+  const post = calls.find((c) => c.method === "POST" && c.url.includes("/template"))!;
+  const sent = post.body as { name: string; content: string };
+  assert.equal(sent.name, "AI Analysis");
+  assert.equal(sent.content, JSON.stringify(LAYOUT));
 });
 
 /* -------------------------------------- inspection -------------------------------------- */

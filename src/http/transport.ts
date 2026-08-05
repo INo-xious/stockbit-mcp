@@ -118,6 +118,15 @@ export const ROUTES = {
    */
   chartbitTemplates: { method: "GET", template: "/chartbit/template" },
   chartbitVersion: { method: "GET", template: "/chartbit/version" },
+  /**
+   * Save a NAMED chart layout. The second write, under ADR-0003 as amended.
+   *
+   * The per-symbol layout route it accompanies is a server-side stub — it accepts every valid body
+   * and stores nothing. This is the other mechanism Stockbit's own client uses for the same job, and
+   * it is **additive**: it creates a named layout rather than replacing a slot, so the destructive
+   * failure the layout route's apparatus was built around does not exist here.
+   */
+  chartbitSaveTemplate: { method: "POST", template: "/chartbit/template" },
   userSettings: { method: "GET", template: "/user-setting/configurations" },
   // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
   // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back

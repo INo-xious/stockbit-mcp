@@ -13,6 +13,24 @@ ADR-0002 says a Chartbit write increment "must reintroduce the apparatus above a
 a feature flag; it is a change of posture, and it supersedes this ADR." This is that increment,
 written before it is enabled so the decision can be judged rather than discovered in a diff.
 
+## Amendment: scope is chart persistence, not one URL
+
+The instruction was "enable the write", meaning *let drawing save to my account*. The route named
+below was **my** choice of mechanism, and it turned out to be a server-side stub — it accepts every
+valid body and stores nothing (see `docs/chartbit-layout-format.md` for the twelve probes that
+establish that).
+
+So the approved scope is read as **chart persistence**, and `POST /chartbit/template` — Stockbit's
+own named-layout save, and the only other mechanism for the same job — is covered by it. It is
+additive rather than destructive: it creates a named layout instead of replacing a slot, so it is
+strictly lower-risk than the route already approved.
+
+What this amendment does NOT cover, and what still needs the argument made again: deleting a
+template, writing the user-settings blob, or any mutation outside chart persistence. `DELETE
+/chartbit/template/{name}` is deliberately absent for that reason — creating a named layout was
+approved, destroying one was not. `test/transport.test.ts` enumerates the three permitted writes and
+asserts nothing else mutates.
+
 ## What is being proposed
 
 One route: `POST {exodus}/chartbit/{symbol}/layout`, body `{ content }`, where `content` is the
