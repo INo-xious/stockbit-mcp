@@ -27,8 +27,29 @@ import { addRule, loadRules, newRuleId, removeRule, updateRule } from "../alerts
 import { StockbitError } from "../http/errors.js";
 import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
 import { normalizeSymbol } from "../symbol.js";
+import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
+import { runWorkflow, validateWorkflow } from "../workflows/run.js";
 
 export function registerTools(server: McpServer): void {
+  /**
+   * Every tool handler registered below, so `workflow_run` can call them.
+   *
+   * Captured by intercepting `server.tool` rather than by maintaining a second table: a hand-kept
+   * list would drift the first time a tool was renamed, and the workflow would fail at run time
+   * naming a tool that no longer exists. The interception is undone at the end of this function so
+   * nothing outside it sees a patched server.
+   */
+  const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
+  const realTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
+    const name = args[0] as string;
+    const handler = args[args.length - 1];
+    if (typeof handler === "function") {
+      handlers.set(name, handler as (a: Record<string, unknown>) => Promise<unknown>);
+    }
+    return realTool(...args);
+  };
+
   /* ------------------------------ broker / bandar ------------------------------ */
 
   server.tool(
@@ -897,4 +918,96 @@ export function registerTools(server: McpServer): void {
     },
     async (a) => runTool(() => core.getSentimentStream(a.symbol, a.limit ?? 30)),
   );
+
+  /* --------------------------------- workflows --------------------------------- */
+  // Registered last, so every handler above is already captured.
+
+  /**
+   * Call a registered tool the way the MCP client would, and hand back the JSON it returned.
+   *
+   * Going through the real handler rather than re-implementing the call is the point: a workflow
+   * that reconstructed a tool's logic would be a second implementation to keep in step, and the
+   * first divergence would be invisible.
+   */
+  async function invokeTool(tool: string, args: Record<string, unknown>): Promise<unknown> {
+    const handler = handlers.get(tool);
+    if (!handler) throw new Error(`Unknown tool ${JSON.stringify(tool)}`);
+    // Drop keys whose template resolved to nothing, so an absent optional input stays absent
+    // rather than arriving as an explicit undefined that a schema may treat differently.
+    const cleaned = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ""));
+    const raw = (await handler(cleaned)) as { content?: Array<{ type: string; text?: string }> };
+
+    const text = raw?.content?.find((c) => c.type === "text")?.text;
+    if (!text) return raw;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return text; // a tool that returned prose, not JSON
+    }
+    // A tool reports failure in its payload rather than by throwing; the workflow engine decides
+    // what a failure means, so surface it as one.
+    const asRecord = parsed as { success?: boolean; error?: string };
+    if (asRecord && asRecord.success === false) {
+      throw new Error(asRecord.error ?? `${tool} failed`);
+    }
+    return parsed;
+  }
+
+  server.tool(
+    "workflow_list",
+    "List the saved multi-step workflows and what each one needs.\n" +
+      "A workflow runs several tools in one call, always the same way — use it when the user wants " +
+      "a routine (a full look at one stock, a morning sweep, a bandarmology check) rather than a " +
+      "single reading.",
+    {},
+    async () =>
+      runTool(async () => ({
+        count: BUILTIN_WORKFLOWS.length,
+        workflows: BUILTIN_WORKFLOWS.map((w) => ({
+          name: w.name,
+          description: w.description,
+          inputs: w.inputs,
+          steps: w.steps.map((s) => ({ id: s.id, tool: s.tool, describe: s.describe, fansOut: Boolean(s.forEach) })),
+        })),
+      })),
+  );
+
+  server.tool(
+    "workflow_run",
+    "Run a saved workflow by name — several tools in one call, the same way every time.\n" +
+      "Returns each step's output in order, with the time it took. A step that fails ABORTS the run " +
+      "and the result names which step and why, unless that step is marked optional (its error is " +
+      "recorded and the run continues). A capped fan-out reports how many items it skipped, so a " +
+      "partial sweep never reads as a complete one.\n" +
+      "Use `workflow_list` first to see names and required inputs.",
+    {
+      name: z.string().describe("Workflow name from workflow_list, e.g. deep_dive"),
+      input: z
+        .record(z.unknown())
+        .optional()
+        .describe("Inputs for the workflow, e.g. { \"symbol\": \"BBRI\" }"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const workflow = findWorkflow(a.name);
+        if (!workflow) {
+          throw new StockbitError(
+            "invalid_param",
+            `No workflow named ${JSON.stringify(a.name)}. Available: ${BUILTIN_WORKFLOWS.map((w) => w.name).join(", ")}`,
+          );
+        }
+        // Fails before running half the recipe if a step names a tool that no longer exists.
+        validateWorkflow(workflow, new Set(handlers.keys()));
+
+        const started = Date.now();
+        const run = await runWorkflow(workflow, (a.input ?? {}) as Record<string, unknown>, invokeTool, () =>
+          Date.now(),
+        );
+        return { ...run, description: workflow.description, totalMs: Date.now() - started };
+      }),
+  );
+
+  // Undo the interception: nothing outside this function should see a patched server.
+  (server as unknown as { tool: unknown }).tool = realTool;
 }

@@ -40,9 +40,11 @@
     },
     {
       "name": "Workflow automation",
-      "state": "not-started",
-      "detail": "Saved multi-step recipes (scan → analyse → chart → alert) invocable as one call. Depends on the alert daemon for the scheduled variants.",
-      "tools": []
+      "state": "done",
+      "detail": "Five saved recipes — deep_dive, morning_scan, bandar_watch, alert_sweep, pine_handoff — each running several tools in one call, the same way every time. Declarative steps only: no eval, a closed template vocabulary, capped fan-out that reports what it skipped, and a failing step that aborts and names itself unless marked optional.",
+      "tools": ["workflow_list", "workflow_run"],
+      "verified": "Live: deep_dive on BBRI ran all four steps green in 3.7s (quote, technicals, chart, broker distribution).",
+      "blocker": "Scheduled/unattended runs still need the alert daemon; on-demand runs are complete."
     },
     {
       "name": "UI automation on graphics",
@@ -79,13 +81,18 @@
     },
     {
       "check": "Broker distribution against live data",
-      "result": "pending",
-      "evidence": "Previously matched Stockbit screenshots; not re-run since the session was restored."
+      "result": "pass",
+      "evidence": "BBRI 2026-08-05, REGULER board, IDR: 8 brokers charted, returned in 156ms as part of the deep_dive workflow."
+    },
+    {
+      "check": "Workflows run end to end on live data",
+      "result": "pass",
+      "evidence": "deep_dive on BBRI: quote 388ms, technicals 2542ms, chart 630ms, brokers 156ms — no step failed."
     }
   ],
   "blockers": [
-    "Chartbit writes: drawing into your saved Stockbit layout changes the project's read-only posture. Needs your explicit decision.",
-    "Alert delivery: a background daemon needs a design for how it reaches you (and ADR-0002 sketches this as a separate increment)."
+    "Chartbit writes: drawing into your saved Stockbit layout changes the project's read-only posture. Needs your explicit decision — this is the last thing standing between 'Drawing' and done.",
+    "Alert delivery: a background daemon needs a design for how it reaches you. It is also what unblocks scheduled (unattended) workflow runs; on-demand workflows are already complete."
   ],
   "notes": [
     "The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.",
