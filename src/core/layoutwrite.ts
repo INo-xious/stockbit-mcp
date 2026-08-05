@@ -365,6 +365,29 @@ async function performSave({ symbol, content, at }: SaveContext): Promise<SaveRe
     };
   }
 
+  // Nothing to undo when the account already holds the snapshot. Two ways that happens: the write
+  // was silently not persisted (Stockbit answers 200 and stores nothing in some cases), or it was
+  // rejected after the fact. Sending a "restore" here would be a pointless write — and when `before`
+  // is empty it is a guaranteed failure, because the server rejects an empty `content` outright
+  // ("Silahkan Periksa permintaan"). Observed live: it reported rollback-failed and warned that the
+  // account might be in an unexpected state, when the account was exactly as the user left it.
+  if (after === before) {
+    const logged = logMutation({
+      at, symbol, outcome: "not-persisted", snapshotPath, bytesBefore: before.length, bytesAfter: after.length,
+    });
+    return {
+      symbol, snapshotPath,
+      bytesBefore: before.length, bytesAfter: after.length,
+      verified: false,
+      rolledBack: true,
+      rollbackVerified: true,
+      outcomeUnknown:
+        `Stockbit accepted the write for ${symbol} but the layout read back unchanged, so it was not stored. ` +
+        `Nothing was altered — the account still holds exactly what it did before.`,
+      logged, at,
+    };
+  }
+
   let rollbackFailed: string | undefined;
   let rollbackVerified = false;
   try {

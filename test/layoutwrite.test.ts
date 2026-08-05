@@ -427,6 +427,35 @@ test("a write is never retried blindly on a server error", async () => {
   assert.equal(posts().length, 1, `expected exactly one attempt, saw ${posts().length}`);
 });
 
+test("a write the server ACKNOWLEDGES but does not store reports 'not stored', not a failed rollback", async () => {
+  // Observed live against Stockbit: POST /chartbit/BBRI/layout answers 200 "Retrieved Save Layout"
+  // and stores nothing. The old code then tried to "restore" the empty previous layout, which the
+  // server rejects outright ("Silahkan Periksa permintaan"), and reported that the account might be
+  // in an unexpected state — when it was exactly as the user left it.
+  mutateOnWrite = () => ""; // accepted, but nothing persisted
+
+  const result = await saveChartLayout({ symbol: "BBRI", layout: LAYOUT, confirm: true });
+
+  assert.equal(result.verified, false);
+  assert.equal(result.rolledBack, true);
+  assert.equal(result.rollbackVerified, true, "the account already holds the snapshot");
+  assert.equal(result.rollbackFailed, undefined, "there was nothing to fail at");
+  assert.match(result.outcomeUnknown ?? "", /not stored|Nothing was altered/);
+  assert.equal(posts().length, 1, "no pointless restore write");
+  assert.equal(logLines().at(-1)?.outcome, "not-persisted");
+});
+
+test("no restore is sent when the account already matches the snapshot", async () => {
+  const previous = normalizeSeriesIds(JSON.stringify(buildLayout({ theme: "light" })));
+  stored.BBRI = previous;
+  mutateOnWrite = () => previous; // the write is ignored; the old layout survives
+
+  const result = await saveChartLayout({ symbol: "BBRI", layout: LAYOUT, confirm: true });
+  assert.equal(posts().length, 1);
+  assert.equal(stored.BBRI, previous, "the user's layout is untouched");
+  assert.equal(result.rollbackVerified, true);
+});
+
 /* ------------------------------ the tool the user reaches ------------------------------ */
 
 /** Register the real tools and hand back the handler map, so these tests exercise production wiring. */
