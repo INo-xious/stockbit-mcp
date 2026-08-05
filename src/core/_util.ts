@@ -27,6 +27,19 @@ export function clearCache(): void {
   cacheMap.clear();
 }
 
+/**
+ * Drop the entries whose key starts with `prefix`.
+ *
+ * Exists so a write can invalidate exactly what it changed. `clearCache()` empties the whole map —
+ * every symbol's quotes, keystats, ratios and broker summaries — which is fine in a test and
+ * needlessly destructive when one layout was saved.
+ */
+export function invalidateCache(prefix: string): void {
+  for (const key of cacheMap.keys()) {
+    if (key.startsWith(prefix)) cacheMap.delete(key);
+  }
+}
+
 /* ------------------------------- schema guard ------------------------------- */
 
 /**

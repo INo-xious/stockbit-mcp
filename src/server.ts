@@ -9,7 +9,7 @@ export function createServer(): McpServer {
       version: "0.1.0",
     },
     {
-      instructions: `Stockbit MCP — read-only Indonesian (IDX) market data. Unofficial; uses your own session.
+      instructions: `Stockbit MCP — Indonesian (IDX) market data. Unofficial; uses your own session.
 
 TOOL SELECTION:
 - broker_summary  → who accumulated/distributed a stock last session (bandarmology). Unique to Stockbit.
@@ -26,7 +26,9 @@ TOOL SELECTION:
 NOTES:
 - Symbols are IDX tickers (BBRI, TLKM, …). IHSG is the composite index.
 - Prices/values are IDR. Broker net values can be negative (net seller).
-- All data is read-only; this server cannot place or modify orders.`,
+- Every tool here READS, with one exception: chart_layout_save writes the user's saved chart layout
+  and requires confirm: true. Ask the user before setting it, naming the symbol whose chart will be
+  replaced. This server cannot place, modify or cancel an order, and has no portfolio access.`,
     },
   );
 

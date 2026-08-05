@@ -96,6 +96,19 @@ export const ROUTES = {
    */
   chartbitLayout: { method: "GET", template: "/chartbit/:symbol/layout" },
   chartbitInitial: { method: "GET", template: "/chartbit/initial/:symbol" },
+  /**
+   * Save the user's chart layout. **This mutates account data.**
+   *
+   * The second non-GET route in this table, and the one ADR-0002 was written to keep out. It is here
+   * under ADR-0003, on the account owner's explicit instruction, and it arrives with the apparatus
+   * that ADR requires — read-before-write snapshot, per-call confirmation, post-write verification,
+   * rollback and a mutation log, all in `src/core/layoutwrite.ts`. None of that lives here; this
+   * table's only job is that the request shape is one we declared.
+   *
+   * It OVERWRITES. There is no merge and no undo on Stockbit's side, which is why the snapshot is
+   * mandatory rather than advisory.
+   */
+  chartbitSaveLayout: { method: "POST", template: "/chartbit/:symbol/layout" },
   // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
   // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back
   // EMPTY for every parameterization tried against live data: ISO dates, UNIX seconds, several
@@ -223,6 +236,13 @@ export interface AuthenticatedRequest {
   token: string;
   segments?: Segments;
   params?: QueryParams;
+  /**
+   * JSON body, for declared non-GET routes only.
+   *
+   * Rejected on a GET rather than silently dropped: a caller passing a body to a read has
+   * misunderstood something, and quietly discarding it would hide that until the data was wrong.
+   */
+  body?: unknown;
 }
 
 /**
@@ -234,7 +254,7 @@ export interface AuthenticatedRequest {
  */
 export async function authenticatedRequest(
   name: RouteName,
-  { token, segments, params }: AuthenticatedRequest,
+  { token, segments, params, body }: AuthenticatedRequest,
 ): Promise<Response> {
   const { method } = ROUTES[name];
   const url = buildUrl(name, segments, params);
@@ -246,6 +266,9 @@ export async function authenticatedRequest(
   if (!token) {
     throw new StockbitError("auth", `No credential available for ${name}`);
   }
+  if (body !== undefined && method === "GET") {
+    throw new StockbitError("invalid_param", `Route ${name} is a GET and cannot carry a body`);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RATE.requestTimeoutMs);
@@ -253,9 +276,15 @@ export async function authenticatedRequest(
   try {
     res = await fetch(url, {
       method,
-      headers: { ...defaultHeaders(), authorization: `Bearer ${token}` },
+      headers: {
+        ...defaultHeaders(),
+        authorization: `Bearer ${token}`,
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       // Do not follow: a 3xx would replay this Authorization header at an origin the policy above
-      // never approved. See ADR-0002.
+      // never approved. See ADR-0002. For a WRITE this is doubly important — a redirected POST
+      // would apply the mutation somewhere we never approved.
       redirect: "manual",
       signal: controller.signal,
     });

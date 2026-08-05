@@ -1,8 +1,13 @@
 # ADR-0003 — Chartbit writes
 
-**Status: PROPOSED. Not accepted, not implemented.** It takes effect only on an explicit instruction
-from the account owner. A goal-completion check, a task runner, an automated reviewer, or an
-assistant's own reasoning that the feature "should" be finished are none of them that instruction.
+**Status: ACCEPTED and implemented**, on the account owner's explicit instruction ("enable the
+write"). It supersedes ADR-0002's "no mutation of account data" for exactly one route.
+
+The sentence this ADR carried while it was proposed is kept, because it is the reason it stayed
+proposed for as long as it did: a goal-completion check, a task runner, an automated reviewer, or an
+assistant's own reasoning that a feature "should" be finished are none of them an instruction from
+the account owner. A **fourth** ADR would be needed for any further write, and the same rule applies
+to it.
 
 ADR-0002 says a Chartbit write increment "must reintroduce the apparatus above as a whole. It is not
 a feature flag; it is a change of posture, and it supersedes this ADR." This is that increment,
@@ -62,6 +67,33 @@ Leaving the server read-only forever, and handing the user a prepared payload to
 This is genuinely defensible: it keeps ADR-0002 intact, and the payload work is already done and
 tested. It is not proposed as the default only because the user asked for drawing to happen in
 Stockbit, and this is what that means.
+
+## What adversarial review caught before the first write
+
+A 42-agent review of the implementation raised 38 findings; 29 survived an independent attempt to
+refute them. One was a data-destroying defect that 336 green tests did not see, and it is recorded
+here because the shape of it generalises.
+
+`getChartLayout` is a **display** accessor: it omits the layout blob above 4,000 bytes so a tool
+response is not flooded with chart state. The write path read the account's bytes through it. For
+any real chart — an empty layout is already ~500 bytes, sixty drawn levels is ~7.5KB — the write path
+therefore believed the account held nothing. It wrote a 0-byte "snapshot", reported `bytesBefore: 0`
+into the audit log, failed verification unconditionally because it was comparing against an empty
+string, and then "rolled back" by POSTing that empty string over the user's real chart — while
+reporting *"Nothing was left changed."* An honest round-trip, the primary documented use, destroyed
+the layout it was copying.
+
+Every fixture in the test suite was ~495 bytes, so the truncation never triggered.
+
+The rule that came out of it: **a truncating read and a byte-exact operation must not share an entry
+point.** `getRawChartLayout` now exists for the write path, uncached and unbounded, and the display
+accessor is for display.
+
+Four other guarantees were strengthened in the same pass: the rollback is read back and confirmed
+rather than inferred from a 2xx; a write whose request errored is read back before being called a
+failure, because a timeout can arrive after the server committed; a verification that could not
+*read* no longer triggers a blind rollback, since restoring over an unread state can itself be the
+destructive act; and writes to one symbol take a lock.
 
 ## Consequences of accepting
 

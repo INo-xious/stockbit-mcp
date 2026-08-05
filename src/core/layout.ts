@@ -73,6 +73,25 @@ export interface ChartLayout {
 const MAX_RAW = 4000;
 
 /**
+ * The stored layout string, complete and uncached.
+ *
+ * `getChartLayout` is a *display* accessor: it omits `raw` above `MAX_RAW` so a tool response is not
+ * flooded with chart state, and it caches so three questions about a symbol cost one round trip.
+ * Both of those are wrong for a caller that needs the actual bytes.
+ *
+ * This exists because reading the bytes through the display accessor was a real, catastrophic bug:
+ * the write path took `raw ?? ""`, so for any layout over 4000 bytes it believed the account held
+ * nothing — snapshotting an empty file, failing verification unconditionally, and then "restoring"
+ * the empty string over the user's real chart while reporting that nothing had changed. A truncating
+ * read and a byte-exact operation must not share an entry point.
+ */
+export async function getRawChartLayout(symbolInput: string): Promise<string> {
+  const symbol = normalizeSymbol(symbolInput);
+  const body = await getJson("chartbitLayout", { segments: { symbol } });
+  return parseOr(LayoutResponse, body, "chart layout").data.layout ?? "";
+}
+
+/**
  * Read a symbol's saved chart layout plus its chart metadata.
  *
  * Cached briefly: a layout changes only when the user saves one, and an assistant asking about

@@ -1,6 +1,10 @@
 /**
  * MCP tool registration. Each tool is a thin wrapper over `core/`, mapped to a confirmed endpoint
- * (see STOCKBIT-API.md §4). Read-only by construction — no order/write tools exist here.
+ * (see STOCKBIT-API.md §4).
+ *
+ * Read-only with ONE exception: `chart_layout_save` writes the user's chart layout, under ADR-0003
+ * and with the apparatus in `src/core/layoutwrite.ts`. No order or portfolio tool exists here, and
+ * the transport's route table is what enforces that rather than this comment.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -929,9 +933,66 @@ export function registerTools(server: McpServer): void {
       "3,200 changes what is worth saying about 3,200.\n" +
       "`hasLayout: false` means nothing has been drawn and saved for that symbol — that is a normal " +
       "answer, not an error.\n" +
-      "This is READ-ONLY. This server cannot write, move or delete anything on a Stockbit chart.",
+      "This tool only reads. `chart_layout_save` is the one tool that can modify a chart, and it " +
+      "requires explicit confirmation. Nothing here can place or modify an order.",
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
     async (a) => runTool(() => core.getChartLayout(a.symbol)),
+  );
+
+  server.tool(
+    "chart_layout_save",
+    "WRITE the user's saved chart layout on Stockbit. This is the ONLY tool here that modifies the " +
+      "account, and it OVERWRITES — Stockbit does not merge, version, or offer an undo.\n" +
+      "Requires `confirm: true` on every call. Do NOT set it on the user's behalf: ask them, in " +
+      "plain words, naming the symbol whose chart will be replaced, and pass it only after they " +
+      "agree to that specific write.\n" +
+      "Before writing it snapshots the current layout to disk, and after writing it reads back and " +
+      "compares. If they differ it restores the snapshot and reports that it did. Every attempt is " +
+      "appended to a mutation log.\n" +
+      "SCOPE: this persists a layout you obtained from `chart_layout` (optionally modified). It " +
+      "cannot compose new drawings — the TradingView line-tool schema is not known, so do not claim " +
+      "to the user that it drew anything.\n" +
+      "`verified: false` means the account may not hold what you intended; read `rolledBack` and " +
+      "tell the user plainly rather than reporting success.",
+    {
+      symbol: z.string().describe("IDX ticker whose chart layout will be REPLACED"),
+      layout: z.unknown().describe("The layout object to persist, normally from chart_layout"),
+      confirm: z.boolean().describe("Must be true. The user must have agreed to this specific write."),
+      allow_lossy: z
+        .boolean()
+        .optional()
+        .describe("Accept Stockbit's series-id substitution rewriting content that is not an id. Default false."),
+    },
+    async (a) =>
+      runTool(async () => {
+        const result = await core.saveChartLayout({
+          symbol: a.symbol,
+          layout: a.layout,
+          confirm: a.confirm,
+          allowLossy: a.allow_lossy,
+        });
+        // Each branch says what is actually known. "Restored" is only claimed when the restore was
+        // read back and confirmed; anything less says so, because a caller relaying this to the user
+        // will repeat whatever confidence it finds here.
+        const message = result.outcomeUnknown
+          ? result.outcomeUnknown
+          : result.verified
+            ? `${result.symbol}'s chart layout was replaced and verified (${result.bytesBefore} bytes before, ${result.bytesAfter} after). Previous layout saved to ${result.snapshotPath}.`
+            : result.rollbackFailed
+              ? `The write to ${result.symbol} did not verify AND the rollback failed (${result.rollbackFailed}). ` +
+                `The account may be in an unexpected state — the previous layout is at ${result.snapshotPath}.`
+              : result.rollbackVerified
+                ? `The write to ${result.symbol} did not verify. The previous layout was restored and confirmed byte-for-byte. Nothing was left changed.`
+                : `The write to ${result.symbol} did not verify. A restore was sent but could NOT be confirmed by reading it back, ` +
+                  `so the account's state is uncertain — the previous layout is at ${result.snapshotPath}.`;
+
+        return {
+          ...result,
+          mutationLog: result.logged ? core.mutationLogPath() : undefined,
+          auditGap: result.logged ? undefined : "The mutation could not be written to the audit log.",
+          message,
+        };
+      }),
   );
 
   /* --------------------------------- workflows --------------------------------- */

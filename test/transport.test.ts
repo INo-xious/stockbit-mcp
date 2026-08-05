@@ -57,18 +57,35 @@ test("the permitted request set is exactly this list", () => {
     // parameter rather than a path segment, so there is no `:symbol` here.
     "GET /order-trade/broker/distribution",
     "GET /stream/v3/symbol/:symbol",
+    "POST /chartbit/:symbol/layout",
     "POST /login/refresh",
   ]);
 });
 
-test("POST /login/refresh is the only permitted write", () => {
+test("the permitted writes are exactly these two", () => {
+  // This assertion is the tripwire. Until ADR-0003 it read `["loginRefresh"]`, and editing it was
+  // the deliberate act that let a mutation into the project — which is what it is for. A THIRD
+  // non-GET route needs the same argument made again, in a new ADR, not a quiet edit here.
   const writes = Object.entries(ROUTES).filter(([, route]) => route.method !== "GET");
   assert.deepEqual(
-    writes.map(([name]) => name),
-    ["loginRefresh"],
-    "a second non-GET route is a change of posture, not a feature (ADR-0002)",
+    writes.map(([name]) => name).sort(),
+    ["chartbitSaveLayout", "loginRefresh"],
+    "a new non-GET route is a change of posture, not a feature (ADR-0002, ADR-0003)",
   );
   assert.equal(buildUrl("loginRefresh"), `${AUTHENTICATED_ORIGIN}/login/refresh`);
+  assert.equal(buildUrl("chartbitSaveLayout", { symbol: "BBRI" }), `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`);
+});
+
+test("only the session refresh mutates anything outside the user's chart", () => {
+  // The narrower property that survived ADR-0003: the write we added touches ONE thing, a chart
+  // layout. Nothing here may post to a portfolio, an order, a watchlist or a profile.
+  for (const [name, route] of Object.entries(ROUTES)) {
+    if (route.method === "GET") continue;
+    assert.ok(
+      route.template === "/login/refresh" || /^\/chartbit\/:symbol\/layout$/.test(route.template),
+      `${name} (${route.method} ${route.template}) mutates something no ADR has approved`,
+    );
+  }
 });
 
 test("every declared route builds a URL the policy accepts", () => {
@@ -82,28 +99,58 @@ test("every declared route builds a URL the policy accepts", () => {
   }
 });
 
-test("Chartbit is readable and NOT writable", () => {
-  // ADR-0002 draws its line at mutation, not at the path prefix: reading the user's own markup is
-  // in scope and writing it is the posture change. So the assertion is not "nothing under
-  // /chartbit" — it is that every declared Chartbit route is a GET.
-  const chartbit = Object.entries(ROUTES).filter(([, r]) => r.template.startsWith("/chartbit/"));
-  assert.ok(chartbit.length > 0, "the Chartbit reads should be declared");
-  for (const [name, route] of chartbit) {
-    assert.equal(route.method, "GET", `${name} writes to Chartbit — that supersedes ADR-0002`);
-  }
-});
+test("the ONLY writable Chartbit path is the layout, and only by POST", () => {
+  // ADR-0003 opened exactly one door. Everything around it stays shut, including verbs on the very
+  // path we now POST to — DELETE on a layout would destroy it rather than replace it.
+  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`), true);
 
-test("no Chartbit WRITE is reachable, whatever the method", () => {
-  // The declared reads must not make the write paths reachable as a side effect. A POST to the very
-  // path we GET is the case that matters: it would overwrite the user's saved chart.
-  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
-    for (const path of ["/chartbit/BBRI/layout", "/chartbit/initial/BBRI", "/chartbit/layouts", "/chartbit/BBRI/drawings"]) {
+  for (const method of ["PUT", "PATCH", "DELETE"]) {
+    assert.equal(
+      isPermitted(method, `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`),
+      false,
+      `${method} on a layout is not what ADR-0003 approved`,
+    );
+  }
+  for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
+    for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings", "/chartbit/template"]) {
       assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path} must be rejected`);
     }
   }
-  // And paths we never declared stay closed to GET too.
-  for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings", "/chartbit/BBRI/price/daily"]) {
-    assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}${path}`), false, `GET ${path} must be rejected`);
+  // A template write would also mutate account data and has no ADR behind it.
+  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/template`), false);
+  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false);
+});
+
+test("a GET route refuses a body rather than silently dropping it", async () => {
+  // A caller passing a body to a read has misunderstood something; hiding that would surface later
+  // as data that is quietly wrong.
+  await assert.rejects(
+    () => authenticatedRequest("chartbitLayout", { token: "T", segments: { symbol: "BBRI" }, body: { x: 1 } }),
+    (err: unknown) => err instanceof StockbitError && /cannot carry a body/.test(err.message),
+  );
+});
+
+test("a write sends its body as JSON and still refuses redirects", async () => {
+  const realFetch = globalThis.fetch;
+  let seen: RequestInit | undefined;
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    seen = init;
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    await authenticatedRequest("chartbitSaveLayout", {
+      token: "T",
+      segments: { symbol: "BBRI" },
+      body: { content: "{}" },
+    });
+    assert.equal(seen?.method, "POST");
+    assert.equal(seen?.body, JSON.stringify({ content: "{}" }));
+    assert.equal(new Headers(seen?.headers).get("content-type"), "application/json");
+    // A redirected POST would apply the mutation at an origin the policy never approved.
+    assert.equal(seen?.redirect, "manual");
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });
 

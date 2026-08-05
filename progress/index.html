@@ -70,11 +70,11 @@
   <div class="bar"><i style="width:86%"></i></div>
   <div class="meta">
     <div class="stat"><b>6/7</b><span>features settled</span></div>
-    <div class="stat"><b>24</b><span>MCP tools</span></div>
-    <div class="stat"><b>317 passing</b><span>tests</span></div>
-    <div class="stat"><b>46</b><span>source files</span></div>
-    <div class="stat"><b>21</b><span>test files</span></div>
-    <div class="stat"><b><code>3e83515</code></b><span>pushed to main</span></div>
+    <div class="stat"><b>25</b><span>MCP tools</span></div>
+    <div class="stat"><b>348 passing</b><span>tests</span></div>
+    <div class="stat"><b>47</b><span>source files</span></div>
+    <div class="stat"><b>22</b><span>test files</span></div>
+    <div class="stat"><b><code>d0d4b01</code></b><span>pushed to main</span></div>
   </div>
 
   <h2>Features</h2>
@@ -203,12 +203,22 @@
   <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li></ul>
 
   <h2>Tools registered</h2>
-  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>workflow_list</code> <code>workflow_run</code></p>
+  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>chart_layout_save</code> <code>workflow_list</code> <code>workflow_run</code></p>
 
   <h2>Recent commits</h2>
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>d0d4b01</code></td>
+        <td class="date">2026-08-05</td>
+        <td>docs(adr): propose the Chartbit write increment, unaccepted</td>
+      </tr>
+      <tr>
+        <td><code>1b8b31d</code></td>
+        <td class="date">2026-08-05</td>
+        <td>feat(layout): build and test the Chartbit save payload, without a write route</td>
+      </tr>
       <tr>
         <td><code>3e83515</code></td>
         <td class="date">2026-08-05</td>
@@ -323,21 +333,11 @@
         <td><code>65b7c10</code></td>
         <td class="date">2026-08-04</td>
         <td>docs: add CHANGELOG recording the API hazards behind recent changes</td>
-      </tr>
-      <tr>
-        <td><code>9a97b24</code></td>
-        <td class="date">2026-08-04</td>
-        <td>feat(broker_summary): query any historical day or date range</td>
-      </tr>
-      <tr>
-        <td><code>d5bdc54</code></td>
-        <td class="date">2026-08-04</td>
-        <td>Merge pull request #1 from INo-xious/fix/windows-login-capture</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-05 11:00 UTC from
+    Generated 2026-08-05 11:54 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.

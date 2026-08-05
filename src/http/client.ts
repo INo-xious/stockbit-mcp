@@ -113,3 +113,63 @@ export async function getJson<T = unknown>(route: RouteName, opts: GetOptions = 
     release();
   }
 }
+
+/* ---------------------------------- core POST ---------------------------------- */
+
+/**
+ * POST JSON to a declared route.
+ *
+ * **Deliberately does not share `getJson`'s retry behaviour.** A read that times out can be repeated
+ * for free; a write cannot. If a POST's response is lost in flight, the mutation may already have
+ * been applied, and retrying would apply it again — so the only retry here is the 401 refresh, which
+ * is the one case where the request provably did *not* reach the handler.
+ *
+ * A 429 or 5xx is surfaced to the caller rather than backed off, because the caller is the only
+ * layer that knows whether re-attempting is safe. For layout saves it is — an overwrite is
+ * idempotent — but that is `src/core/layoutwrite.ts`'s judgement to make with a snapshot in hand,
+ * not this module's to make blindly.
+ */
+export async function postJson<T = unknown>(
+  route: RouteName,
+  opts: GetOptions & { body?: unknown } = {},
+): Promise<T> {
+  await acquire();
+  try {
+    let refreshedOn401 = false;
+    for (;;) {
+      const token = await ensureFresh();
+      let res: Response;
+      try {
+        res = await authenticatedRequest(route, {
+          token,
+          segments: opts.segments,
+          params: opts.params,
+          body: opts.body,
+        });
+      } catch (err) {
+        if (err instanceof StockbitError) throw err;
+        throw new StockbitError("upstream", `Network error: ${String(err)}`);
+      }
+
+      if (res.status === 401 && !refreshedOn401) {
+        // The token was rejected, so the handler never ran. Safe to present a fresh one.
+        refreshedOn401 = true;
+        await forceRefresh();
+        continue;
+      }
+
+      const text = await res.text();
+      let body: unknown;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+
+      if (!res.ok) throw mapHttpError(res.status, body);
+      return body as T;
+    }
+  } finally {
+    release();
+  }
+}
