@@ -70,11 +70,11 @@
   <div class="bar"><i style="width:86%"></i></div>
   <div class="meta">
     <div class="stat"><b>6/7</b><span>features settled</span></div>
-    <div class="stat"><b>23</b><span>MCP tools</span></div>
-    <div class="stat"><b>301 passing</b><span>tests</span></div>
-    <div class="stat"><b>43</b><span>source files</span></div>
-    <div class="stat"><b>20</b><span>test files</span></div>
-    <div class="stat"><b><code>598ed05</code></b><span>pushed to main</span></div>
+    <div class="stat"><b>24</b><span>MCP tools</span></div>
+    <div class="stat"><b>302 passing</b><span>tests</span></div>
+    <div class="stat"><b>45</b><span>source files</span></div>
+    <div class="stat"><b>21</b><span>test files</span></div>
+    <div class="stat"><b><code>82a4375</code></b><span>pushed to main</span></div>
   </div>
 
   <h2>Features</h2>
@@ -114,10 +114,10 @@
           <h3>Drawing</h3>
           <span class="pill partial">Partial</span>
         </header>
-        <p>Levels, zones, trend lines and markers drawn on the rendered chart, and the same levels written into generated Pine. Writing drawings INTO the Stockbit account is not done — it needs POST /chartbit/{symbol}/layout, which would overwrite your saved layout and formally supersede ADR-0002.</p>
-        <p class="tools"><code>price_chart</code></p>
-        
-        <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes/no: writing to your Stockbit account.</p>
+        <p>Levels, zones, trend lines and markers drawn on the rendered chart; the same levels written into generated Pine; and your OWN saved Stockbit drawings readable as context via chart_layout. Writing drawings INTO the account is not done — it needs POST /chartbit/{symbol}/layout, which mutates your account and supersedes ADR-0002.</p>
+        <p class="tools"><code>price_chart</code> <code>chart_layout</code> <code>pine_script</code></p>
+        <p class="verified"><strong>Verified:</strong> Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. Every symbol on this account returns an EMPTY layout — nothing has been drawn and saved.</p>
+        <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes: writing to your Stockbit account. Separately, every stored layout is empty, so the serialization format is unknown — a guessed write could corrupt chart state, and a real saved layout must be captured first.</p>
       </article>
       <article class="feature done">
         <header>
@@ -197,18 +197,23 @@
   </table></div>
 
   <h2>Blocked on a decision</h2>
-  <ul class="plain"><li>Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). This is the only thing left, and it needs your explicit yes — not a technical blocker.</li></ul>
+  <ul class="plain"><li>Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). Needs your explicit yes.</li><li>Even with a yes, the layout format is unknown: GET /chartbit/{symbol}/layout returns an empty string for every symbol on this account, so there is no example to write against. Draw something in Stockbit and save it, or capture the save request from the browser's network tab, and the format becomes knowable.</li></ul>
 
   <h2>Worth knowing</h2>
   <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li></ul>
 
   <h2>Tools registered</h2>
-  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>workflow_list</code> <code>workflow_run</code></p>
+  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>workflow_list</code> <code>workflow_run</code></p>
 
   <h2>Recent commits</h2>
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>82a4375</code></td>
+        <td class="date">2026-08-05</td>
+        <td>feat(alerts): a daemon that fires when nobody is asking</td>
+      </tr>
       <tr>
         <td><code>598ed05</code></td>
         <td class="date">2026-08-05</td>
@@ -328,16 +333,11 @@
         <td><code>429f7e8</code></td>
         <td class="date">2026-08-03</td>
         <td>fix(auth): resolve 12 defects found by adversarial review</td>
-      </tr>
-      <tr>
-        <td><code>9c7bc95</code></td>
-        <td class="date">2026-08-03</td>
-        <td>feat(auth): doctor diagnostics, HAR import, universal browser discovery</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-05 10:37 UTC from
+    Generated 2026-08-05 10:41 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.

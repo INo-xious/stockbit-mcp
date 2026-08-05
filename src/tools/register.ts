@@ -919,6 +919,21 @@ export function registerTools(server: McpServer): void {
     async (a) => runTool(() => core.getSentimentStream(a.symbol, a.limit ?? 30)),
   );
 
+  /* ------------------------------- chart layout ------------------------------- */
+
+  server.tool(
+    "chart_layout",
+    "Read the user's OWN saved chart layout and drawings for a symbol on Stockbit, plus the chart " +
+      "metadata (exchange, timezone, full company name).\n" +
+      "Use it before offering an opinion on a level: knowing the user already drew a trendline at " +
+      "3,200 changes what is worth saying about 3,200.\n" +
+      "`hasLayout: false` means nothing has been drawn and saved for that symbol — that is a normal " +
+      "answer, not an error.\n" +
+      "This is READ-ONLY. This server cannot write, move or delete anything on a Stockbit chart.",
+    { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
+    async (a) => runTool(() => core.getChartLayout(a.symbol)),
+  );
+
   /* --------------------------------- workflows --------------------------------- */
   // Registered last, so every handler above is already captured.
 

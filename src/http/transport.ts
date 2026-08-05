@@ -86,6 +86,16 @@ export const ROUTES = {
    * series costs many upstream calls — see `src/core/bars.ts` for how the walk is bounded.
    */
   historicalSummary: { method: "GET", template: "/company-price-feed/historical/summary/:symbol" },
+  /**
+   * The user's own saved chart layout and drawings — a READ.
+   *
+   * ADR-0002 rejects Chartbit *writes* and in the same breath keeps its reads in scope: "an agent
+   * seeing the user's existing markup is useful analysis context." Knowing which levels the user
+   * has already drawn is exactly that, and it adds no mutation reachability. `test/transport.test.ts`
+   * asserts every declared Chartbit route is a GET and that no write path is reachable by any method.
+   */
+  chartbitLayout: { method: "GET", template: "/chartbit/:symbol/layout" },
+  chartbitInitial: { method: "GET", template: "/chartbit/initial/:symbol" },
   // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
   // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back
   // EMPTY for every parameterization tried against live data: ISO dates, UNIX seconds, several

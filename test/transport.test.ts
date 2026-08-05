@@ -37,6 +37,10 @@ test("the permitted request set is exactly this list", () => {
   // Locked deliberately: adding a route must show up as a change to this assertion, so a new
   // authenticated request shape cannot land without a reviewer seeing it.
   assert.deepEqual(permittedRequests(), [
+    // Chartbit READS only. ADR-0002 rejects Chartbit writes and keeps its reads in scope; the test
+    // below asserts every declared Chartbit route is a GET and that no write path is reachable.
+    "GET /chartbit/:symbol/layout",
+    "GET /chartbit/initial/:symbol",
     "GET /company-price-feed/historical/summary/:symbol",
     "GET /company-price-feed/price-performance/:symbol",
     "GET /company-price-feed/prices/close",
@@ -78,28 +82,28 @@ test("every declared route builds a URL the policy accepts", () => {
   }
 });
 
-test("no /chartbit/* route is reachable, whatever its method", () => {
-  // ADR-0002 draws its line at mutation and would permit a Chartbit *read*. One was added and then
-  // removed — it answered 200 with an empty payload for every parameterization tried against live
-  // data — so the prefix is once again entirely absent, and the layout and drawing paths that would
-  // overwrite the user's saved chart stay unreachable by any method.
-  for (const [name, route] of Object.entries(ROUTES)) {
-    assert.equal(
-      route.template.startsWith("/chartbit/"),
-      false,
-      `${name} is a Chartbit route; if that is intended, assert its method here deliberately`,
-    );
+test("Chartbit is readable and NOT writable", () => {
+  // ADR-0002 draws its line at mutation, not at the path prefix: reading the user's own markup is
+  // in scope and writing it is the posture change. So the assertion is not "nothing under
+  // /chartbit" — it is that every declared Chartbit route is a GET.
+  const chartbit = Object.entries(ROUTES).filter(([, r]) => r.template.startsWith("/chartbit/"));
+  assert.ok(chartbit.length > 0, "the Chartbit reads should be declared");
+  for (const [name, route] of chartbit) {
+    assert.equal(route.method, "GET", `${name} writes to Chartbit — that supersedes ADR-0002`);
   }
-  for (const method of ["GET", "POST", "PUT", "DELETE"]) {
-    for (const path of [
-      "/chartbit/layouts",
-      "/chartbit/1.1/charts",
-      "/chartbit/BBRI/layout",
-      "/chartbit/BBRI/drawings",
-      "/chartbit/BBRI/price/daily",
-    ]) {
-      assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path}`);
+});
+
+test("no Chartbit WRITE is reachable, whatever the method", () => {
+  // The declared reads must not make the write paths reachable as a side effect. A POST to the very
+  // path we GET is the case that matters: it would overwrite the user's saved chart.
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    for (const path of ["/chartbit/BBRI/layout", "/chartbit/initial/BBRI", "/chartbit/layouts", "/chartbit/BBRI/drawings"]) {
+      assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path} must be rejected`);
     }
+  }
+  // And paths we never declared stay closed to GET too.
+  for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings", "/chartbit/BBRI/price/daily"]) {
+    assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}${path}`), false, `GET ${path} must be rejected`);
   }
 });
 
