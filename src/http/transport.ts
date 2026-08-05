@@ -86,6 +86,17 @@ export const ROUTES = {
    * series costs many upstream calls — see `src/core/bars.ts` for how the walk is bounded.
    */
   historicalSummary: { method: "GET", template: "/company-price-feed/historical/summary/:symbol" },
+  /**
+   * The same daily series as `historicalSummary`, served to Stockbit's own charting front-end, which
+   * honours `from`/`to` and `limit=0` — a whole range in one request rather than 12 rows at a time.
+   *
+   * A `/chartbit/*` route in this table is narrower than it looks. ADR-0002 rejects Chartbit
+   * *writes* and says in the same breath that Chartbit **reads** "remain desirable and carry no
+   * write surface". This is a GET on a price series; it adds no mutation reachability, and the
+   * layout/drawing paths the ADR is about stay absent — `test/transport.test.ts` still proves they
+   * are unreachable by any method.
+   */
+  chartbitDaily: { method: "GET", template: "/chartbit/:symbol/price/daily" },
   pricePerformance: { method: "GET", template: "/company-price-feed/price-performance/:symbol" },
   orderbook: { method: "GET", template: "/company-price-feed/v2/orderbook/companies/:symbol" },
 
