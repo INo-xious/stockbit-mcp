@@ -188,6 +188,7 @@ export interface Level {
   price: number;
   /** How many pivots cluster at this level — higher means better tested. */
   touches: number;
+  /** Relative to the latest close: below is support, above is resistance. */
   kind: "support" | "resistance";
 }
 
@@ -198,29 +199,45 @@ export interface Level {
  * within `tolerance` of each other are one level, and the count of clustered pivots is reported as
  * `touches` — a level tested five times is a different proposition from one touched once, and
  * collapsing that distinction is how these get over-trusted.
+ *
+ * ## Two decisions that were wrong in the first version, both found against live data
+ *
+ * **`kind` is decided by where price is NOW, not by whether the pivot was a high or a low.** BBRI
+ * over the last year fell from about 4000 to 3020, and labelling every old pivot low as "support"
+ * reported "support 3860, support 3615, support 3580" on a stock trading at 3020 — three levels
+ * above the market, described as the floor. They are not a floor; price fell through them, and
+ * broken support is overhead supply. What makes a level support is that price is above it.
+ *
+ * **Clustering ignores which kind a pivot was.** A price that has acted as both a ceiling and a
+ * floor is a *stronger* level, not two unrelated weak ones, and clustering per-kind split exactly
+ * those into two half-strength entries — the levels most worth seeing.
  */
 export function levels(bars: Bar[], lookback = 5, tolerancePct = 1.5): Level[] {
   if (bars.length < lookback * 2 + 1) return [];
-  const pivots: Array<{ price: number; kind: Level["kind"] }> = [];
+  const pivots: number[] = [];
 
   for (let i = lookback; i < bars.length - lookback; i++) {
     const window = bars.slice(i - lookback, i + lookback + 1);
-    if (window.every((b) => bars[i].high >= b.high)) pivots.push({ price: bars[i].high, kind: "resistance" });
-    if (window.every((b) => bars[i].low <= b.low)) pivots.push({ price: bars[i].low, kind: "support" });
+    if (window.every((b) => bars[i].high >= b.high)) pivots.push(bars[i].high);
+    if (window.every((b) => bars[i].low <= b.low)) pivots.push(bars[i].low);
   }
 
-  const out: Level[] = [];
-  for (const p of pivots) {
-    const hit = out.find((l) => l.kind === p.kind && Math.abs(l.price - p.price) / l.price <= tolerancePct / 100);
+  const clusters: Array<{ price: number; touches: number }> = [];
+  for (const price of pivots) {
+    const hit = clusters.find((c) => Math.abs(c.price - price) / c.price <= tolerancePct / 100);
     if (hit) {
       // Keep the running mean so a level is where the pivots actually sit, not where the first one did.
-      hit.price = round((hit.price * hit.touches + p.price) / (hit.touches + 1), 2);
+      hit.price = round((hit.price * hit.touches + price) / (hit.touches + 1), 2);
       hit.touches++;
     } else {
-      out.push({ price: round(p.price, 2), touches: 1, kind: p.kind });
+      clusters.push({ price: round(price, 2), touches: 1 });
     }
   }
-  return out.sort((a, b) => b.touches - a.touches || b.price - a.price);
+
+  const reference = bars[bars.length - 1].close;
+  return clusters
+    .map((c) => ({ ...c, kind: (c.price <= reference ? "support" : "resistance") as Level["kind"] }))
+    .sort((a, b) => b.touches - a.touches || b.price - a.price);
 }
 
 /** Latest defined value of a series, or null. */

@@ -182,6 +182,44 @@ test("levels returns nothing when there are too few bars to have a pivot", () =>
   assert.deepEqual(levels([bar(1, 1, 1, 1), bar(2, 2, 2, 2)], 5), []);
 });
 
+test("a level is support or resistance by where price is NOW, not by pivot type", () => {
+  // Found against live data: BBRI fell from ~4000 to 3020 over the window, and labelling every old
+  // pivot low "support" reported three levels ABOVE the market as the floor. Price fell through
+  // them; broken support is overhead supply.
+  // (levels 3860/3615/3580 reported as "support" while BBRI traded at 3020.)
+  const bars: Bar[] = [];
+  // Ramp up to 400, carving pivots on the way, then collapse to 300 and stay there.
+  for (const p of [340, 360, 400, 360, 380, 400, 355, 390, 402, 350]) bars.push(bar(p, p + 1, p - 1, p));
+  for (let i = 0; i < 30; i++) bars.push(bar(300, 301, 299, 300));
+
+  const out = levels(bars, 3, 2);
+  assert.ok(out.length > 0, "expected some levels");
+  const lastClose = bars[bars.length - 1].close;
+  for (const level of out) {
+    const expected = level.price <= lastClose ? "support" : "resistance";
+    assert.equal(level.kind, expected, `${level.price} labelled ${level.kind} with price at ${lastClose}`);
+  }
+  assert.equal(
+    out.some((l) => l.kind === "support" && l.price > lastClose),
+    false,
+    "support above the market is not support",
+  );
+});
+
+test("a price tested from both sides is ONE strong level, not two weak ones", () => {
+  // Clustering per pivot-type split exactly the levels most worth seeing: a price that has acted as
+  // both ceiling and floor is stronger evidence, not two unrelated touches.
+  const bars: Bar[] = [];
+  for (let cycle = 0; cycle < 3; cycle++) {
+    // Oscillate tightly enough that pivot highs (~201.4) and pivot lows (~198.6) fall inside one
+    // 3% band — that is the case the old per-kind clustering split in two.
+    for (const p of [199, 200, 201, 200, 199, 200, 201]) bars.push(bar(p, p + 0.4, p - 0.4, p));
+  }
+  const near200 = levels(bars, 2, 3).filter((l) => Math.abs(l.price - 200) <= 6);
+  assert.equal(near200.length, 1, `expected one merged level near 200, got ${JSON.stringify(near200)}`);
+  assert.ok(near200[0].touches >= 4, `merged level should carry both sides' touches, got ${near200[0].touches}`);
+});
+
 test("levels ranks the best-tested level first", () => {
   const bars: Bar[] = [];
   for (let i = 0; i < 60; i++) {

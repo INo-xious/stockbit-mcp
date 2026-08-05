@@ -778,7 +778,6 @@ export function registerTools(server: McpServer): void {
               panels: panels.map((p) => p.label),
               levelsDrawn: annotations.filter((x) => x.kind === "level").length,
               truncated: series.truncated,
-              source: series.source,
               savedTo,
               stockbitUrl: stockbit.url,
               stockbitBrowser: stockbit.action,

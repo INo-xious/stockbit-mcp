@@ -37,9 +37,6 @@ test("the permitted request set is exactly this list", () => {
   // Locked deliberately: adding a route must show up as a change to this assertion, so a new
   // authenticated request shape cannot land without a reviewer seeing it.
   assert.deepEqual(permittedRequests(), [
-    // Chartbit *reads* only. ADR-0002 rejects Chartbit writes and explicitly keeps its reads in
-    // scope; the layout and drawing paths remain unreachable, asserted separately below.
-    "GET /chartbit/:symbol/price/daily",
     "GET /company-price-feed/historical/summary/:symbol",
     "GET /company-price-feed/price-performance/:symbol",
     "GET /company-price-feed/prices/close",
@@ -81,15 +78,17 @@ test("every declared route builds a URL the policy accepts", () => {
   }
 });
 
-test("the Chartbit surface is readable but not writable", () => {
-  // ADR-0002 draws the line at mutation, not at the path prefix: Chartbit *reads* are in scope and
-  // Chartbit *writes* are the posture change. So the assertion is no longer "nothing under
-  // /chartbit" — it is that every declared Chartbit route is a GET, and that the paths which would
-  // let us overwrite the user's saved layouts and drawings are unreachable by any method.
+test("no /chartbit/* route is reachable, whatever its method", () => {
+  // ADR-0002 draws its line at mutation and would permit a Chartbit *read*. One was added and then
+  // removed — it answered 200 with an empty payload for every parameterization tried against live
+  // data — so the prefix is once again entirely absent, and the layout and drawing paths that would
+  // overwrite the user's saved chart stay unreachable by any method.
   for (const [name, route] of Object.entries(ROUTES)) {
-    if (route.template.startsWith("/chartbit/")) {
-      assert.equal(route.method, "GET", `${name} writes to Chartbit — that supersedes ADR-0002`);
-    }
+    assert.equal(
+      route.template.startsWith("/chartbit/"),
+      false,
+      `${name} is a Chartbit route; if that is intended, assert its method here deliberately`,
+    );
   }
   for (const method of ["GET", "POST", "PUT", "DELETE"]) {
     for (const path of [
@@ -97,6 +96,7 @@ test("the Chartbit surface is readable but not writable", () => {
       "/chartbit/1.1/charts",
       "/chartbit/BBRI/layout",
       "/chartbit/BBRI/drawings",
+      "/chartbit/BBRI/price/daily",
     ]) {
       assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path}`);
     }
