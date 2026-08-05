@@ -7,6 +7,7 @@ import { z } from "zod";
 import * as core from "../core/index.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
+import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
 import { defaultChartPath, writeSvg } from "../render/write.js";
 
 export function registerTools(server: McpServer): void {
@@ -153,6 +154,228 @@ export function registerTools(server: McpServer): void {
               dataType: d.dataType,
               marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
+              savedTo,
+            },
+          },
+        };
+      }),
+  );
+
+  /* ------------------------------ charts & technicals ------------------------------ */
+
+  server.tool(
+    "technicals",
+    "Technical indicator readings for an IDX stock, computed from daily bars: SMA/EMA, RSI, MACD, " +
+      "Bollinger Bands, ATR, and support/resistance levels found by pivot clustering.\n" +
+      "Returns NUMBERS for reasoning — use `price_chart` when you want the picture. Every reading " +
+      "reported is the latest defined value of its series.\n" +
+      "Deep history is paged 12 sessions at a time upstream, so a large `bars` is slow; " +
+      "`pagesFetched` reports what the query cost.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce.number().optional().describe("Sessions to analyse (default 200). Ignored if `from` is given."),
+      from: z.string().optional().describe("Earliest session, YYYY-MM-DD"),
+      to: z.string().optional().describe("Latest session, YYYY-MM-DD"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 200, from: a.from, to: a.to });
+        const bars = series.bars;
+        const close = bars.map((b) => b.close);
+        const m = core.macd(close);
+        const bb = core.bollinger(close, 20, 2);
+        const last = bars[bars.length - 1];
+        return {
+          symbol: series.symbol,
+          from: series.from,
+          to: series.to,
+          sessions: bars.length,
+          truncated: series.truncated,
+          pagesFetched: series.pagesFetched,
+          last: last && {
+            date: last.date,
+            open: last.open,
+            high: last.high,
+            low: last.low,
+            close: last.close,
+            volumeLots: last.volume,
+            valueIdr: last.value,
+            netForeignIdr: last.netForeign,
+          },
+          indicators: {
+            sma20: core.latest(core.sma(close, 20)),
+            sma50: core.latest(core.sma(close, 50)),
+            sma200: core.latest(core.sma(close, 200)),
+            ema20: core.latest(core.ema(close, 20)),
+            rsi14: core.latest(core.rsi(close, 14)),
+            macd: core.latest(m.macd),
+            macdSignal: core.latest(m.signal),
+            macdHistogram: core.latest(m.histogram),
+            bollingerUpper: core.latest(bb.upper),
+            bollingerMiddle: core.latest(bb.middle),
+            bollingerLower: core.latest(bb.lower),
+            atr14: core.latest(core.atr(bars, 14)),
+          },
+          levels: core.levels(bars, 5, 1.5).slice(0, 8),
+        };
+      }),
+  );
+
+  server.tool(
+    "price_chart",
+    "Candlestick chart for an IDX stock, ALWAYS rendered as an SVG: daily candles with volume, " +
+      "optional overlays (SMA/EMA/Bollinger) and sub-panels (RSI, MACD), plus support/resistance " +
+      "levels drawn on.\n" +
+      "Returns the image AND writes a .svg, reporting the path in `savedTo`. Use `technicals` for " +
+      "the numbers; this is the picture.\n" +
+      "`annotations` draws your own levels, zones, trend lines and markers, which is how you show " +
+      "the evidence behind an analysis. Drawing happens on this render only — nothing is written to " +
+      "the Stockbit account.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce.number().optional().describe("Sessions to plot (default 120)"),
+      from: z.string().optional().describe("Earliest session, YYYY-MM-DD"),
+      to: z.string().optional().describe("Latest session, YYYY-MM-DD"),
+      overlays: z
+        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "bollinger"]))
+        .optional()
+        .describe("Price overlays. Default sma20 + sma50."),
+      panels: z.array(z.enum(["rsi", "macd"])).optional().describe("Sub-panels below price. Default rsi."),
+      show_levels: z.boolean().optional().describe("Draw support/resistance from pivot clustering. Default true."),
+      show_volume: z.boolean().optional().describe("Default true"),
+      annotations: z
+        .array(
+          z.object({
+            kind: z.enum(["level", "zone", "trend", "marker"]),
+            price: z.coerce.number().optional(),
+            from: z.coerce.number().optional().describe("zone: one edge"),
+            to: z.coerce.number().optional().describe("zone: other edge"),
+            from_date: z.string().optional().describe("trend: start session"),
+            from_price: z.coerce.number().optional(),
+            to_date: z.string().optional().describe("trend: end session"),
+            to_price: z.coerce.number().optional(),
+            date: z.string().optional().describe("marker: session"),
+            label: z.string().optional(),
+            color: z.string().optional(),
+          }),
+        )
+        .optional()
+        .describe("Your own drawings on top of the chart"),
+      theme: z.enum(["dark", "light"]).optional().describe("Default dark"),
+      save_path: z.string().optional().describe("Where to write the .svg. Defaults to ~/.stockbit/charts/."),
+    },
+    async (a) =>
+      runImageTool(async () => {
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 120, from: a.from, to: a.to });
+        const bars = series.bars;
+        const close = bars.map((b) => b.close);
+
+        const wanted = a.overlays ?? ["sma20", "sma50"];
+        const overlays: Array<{ label: string; series: core.Series; dashed?: boolean; color?: string }> = [];
+        if (wanted.includes("sma20")) overlays.push({ label: "SMA 20", series: core.sma(close, 20) });
+        if (wanted.includes("sma50")) overlays.push({ label: "SMA 50", series: core.sma(close, 50) });
+        if (wanted.includes("sma200")) overlays.push({ label: "SMA 200", series: core.sma(close, 200) });
+        if (wanted.includes("ema20")) overlays.push({ label: "EMA 20", series: core.ema(close, 20) });
+        if (wanted.includes("bollinger")) {
+          const bb = core.bollinger(close, 20, 2);
+          overlays.push(
+            { label: "BB upper", series: bb.upper, dashed: true, color: "#8b949e" },
+            { label: "BB lower", series: bb.lower, dashed: true, color: "#8b949e" },
+          );
+        }
+
+        const panels: SubPanel[] = [];
+        for (const p of a.panels ?? ["rsi"]) {
+          if (p === "rsi") {
+            panels.push({
+              label: "RSI(14)",
+              range: [0, 100],
+              guides: [30, 70],
+              series: [{ label: "RSI", series: core.rsi(close, 14) }],
+            });
+          } else {
+            const m = core.macd(close);
+            panels.push({
+              label: "MACD(12,26,9)",
+              histogram: m.histogram,
+              series: [
+                { label: "MACD", series: m.macd },
+                { label: "signal", series: m.signal, color: "#e3b341" },
+              ],
+            });
+          }
+        }
+
+        const annotations: Annotation[] = [];
+        if (a.show_levels !== false) {
+          for (const l of core.levels(bars, 5, 1.5).filter((x) => x.touches >= 2).slice(0, 5)) {
+            annotations.push({ kind: "level", price: l.price, label: `${l.kind} ${l.price} (x${l.touches})` });
+          }
+        }
+        for (const raw of a.annotations ?? []) {
+          if (raw.kind === "level" && raw.price !== undefined) {
+            annotations.push({ kind: "level", price: raw.price, label: raw.label, color: raw.color });
+          } else if (raw.kind === "zone" && raw.from !== undefined && raw.to !== undefined) {
+            annotations.push({ kind: "zone", from: raw.from, to: raw.to, label: raw.label, color: raw.color });
+          } else if (
+            raw.kind === "trend" &&
+            raw.from_date &&
+            raw.to_date &&
+            raw.from_price !== undefined &&
+            raw.to_price !== undefined
+          ) {
+            annotations.push({
+              kind: "trend",
+              fromDate: raw.from_date,
+              fromPrice: raw.from_price,
+              toDate: raw.to_date,
+              toPrice: raw.to_price,
+              label: raw.label,
+              color: raw.color,
+            });
+          } else if (raw.kind === "marker" && raw.date && raw.label) {
+            annotations.push({ kind: "marker", date: raw.date, price: raw.price, label: raw.label, color: raw.color });
+          }
+        }
+
+        const svg = renderCandles({
+          symbol: series.symbol,
+          bars,
+          subtitle: `${series.from} → ${series.to}  ·  ${bars.length} sessions  ·  daily`,
+          overlays,
+          subPanels: panels,
+          annotations,
+          showVolume: a.show_volume !== false,
+          theme: a.theme,
+        });
+
+        const savedTo = writeSvg(
+          a.save_path ??
+            defaultChartPath({
+              symbol: series.symbol,
+              side: "price",
+              from: series.from,
+              to: series.to,
+              dataType: "DAILY",
+            }),
+          svg,
+        );
+
+        return {
+          base64: Buffer.from(svg, "utf8").toString("base64"),
+          mimeType: "image/svg+xml",
+          summary: {
+            success: true,
+            data: {
+              symbol: series.symbol,
+              from: series.from,
+              to: series.to,
+              sessions: bars.length,
+              lastClose: bars[bars.length - 1]?.close,
+              overlays: overlays.map((o) => o.label),
+              panels: panels.map((p) => p.label),
+              levelsDrawn: annotations.filter((x) => x.kind === "level").length,
+              truncated: series.truncated,
               savedTo,
             },
           },
