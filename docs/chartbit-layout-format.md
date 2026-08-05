@@ -118,6 +118,17 @@ A GET that answers 200-with-empty for *any* key, and a POST that answers 200 for
 is the shape of a stub — the pair looks deprecated or entitlement-gated rather than misused.
 `GET {j}/version` returns `{is_new: false}`, a user flag, not a schema version.
 
+`POST {j}/template` — the *other* mechanism Stockbit's client uses for the same job, and additive
+rather than destructive — behaves the same: accepted, and the template list comes back empty.
+
+The base URL was verified rather than assumed: module `93053` defines `q7 = "https://exodus.stockbit.com"`,
+so these requests went to the right host. There is no separate Chartbit service among the twenty-odd
+origins that module lists.
+
+**Conclusion: chart persistence through this API is non-functional on the account tested.** Both
+mechanisms accept and discard. That is a property of Stockbit's server, not of the payload, the
+host, the key, or the encoding — each of which was eliminated separately above.
+
 ## Where the chart configuration actually lives
 
 `GET /user-setting/configurations?user_setting_type=1` → `content` is **base64 of a ZIP containing a
