@@ -10,6 +10,7 @@
  */
 import { AUTH } from "../config.js";
 import { getStore } from "./store.js";
+import { acquireRefreshLock } from "./reflock.js";
 import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest } from "../http/transport.js";
 import { redact } from "../redact.js";
@@ -149,6 +150,18 @@ export function parseRefresh(body: unknown): { access: string; newRefresh?: stri
 }
 
 async function doRefresh(): Promise<AccessToken> {
+  // Serialised across processes: the refresh token rotates, so two processes refreshing at once
+  // invalidate each other and the loser's token is what ends up on disk. See reflock.ts. Failing to
+  // take the lock is not fatal — a possible clobber beats a guaranteed outage.
+  const release = await acquireRefreshLock();
+  try {
+    return await refreshOnce();
+  } finally {
+    release?.();
+  }
+}
+
+async function refreshOnce(): Promise<AccessToken> {
   const store = getStore();
   const refreshToken = store.get();
   if (!refreshToken) {
@@ -177,7 +190,23 @@ async function doRefresh(): Promise<AccessToken> {
     json = text;
   }
   if (!res.ok) {
-    throw new StockbitError("auth", `Refresh failed (HTTP ${res.status})`, { status: res.status });
+    // A 401 here usually means another process rotated the token while this one was queued behind
+    // the lock: our copy was valid when we read it and was superseded before we presented it.
+    // Re-reading the store and retrying once turns that lockout into a hiccup.
+    if (res.status === 401) {
+      const current = getStore().get();
+      if (current && current !== refreshToken) {
+        return refreshOnce();
+      }
+    }
+    throw new StockbitError(
+      "auth",
+      res.status === 401
+        ? "Refresh failed (HTTP 401) — the stored refresh token is no longer valid. " +
+          "Run `stockbit-auth login` to re-authenticate."
+        : `Refresh failed (HTTP ${res.status})`,
+      { status: res.status },
+    );
   }
 
   let parsed: ReturnType<typeof parseRefresh>;

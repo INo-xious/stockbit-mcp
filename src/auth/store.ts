@@ -92,7 +92,8 @@ const keychainStore: TokenStore = {
 
 // STOCKBIT_STORE_DIR lets tests point the encrypted file at an isolated temp dir. Read dynamically
 // (not a module-load const) so multiple test files with different dirs don't collide on a stale path.
-function fileDir(): string {
+/** Directory holding the credential file. Exported so the refresh lock lives beside it. */
+export function fileDir(): string {
   return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
 }
 function filePath(): string {
