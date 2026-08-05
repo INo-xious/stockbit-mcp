@@ -33,18 +33,17 @@
     },
     {
       "name": "Alerts",
-      "state": "partial",
-      "detail": "Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree. Fires once per bar, reports warm-up separately from a false condition. No background daemon yet — nothing is delivered on its own.",
-      "tools": ["alert_create", "alert_list", "alert_delete", "alert_check"],
-      "blocker": "A daemon that wakes you up needs a delivery design (how it reaches you)."
+      "state": "done",
+      "detail": "Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree — plus a standalone daemon (`stockbit-alerts watch`) that polls during IDX hours and delivers. Three channels: an append-only JSONL log (always, written first), a native desktop notification (default on, no setup), and an optional https webhook. Fires once per bar; reports warm-up separately from a false condition.",
+      "tools": ["alert_create", "alert_list", "alert_delete", "alert_check", "stockbit-alerts (CLI)"],
+      "verified": "Live: two rules fired on BBRI with correct values (close 3020 > 2000; RSI 56.18 < 70), Windows toasts delivered, log written; the next pass fired 0, confirming same-bar suppression."
     },
     {
       "name": "Workflow automation",
       "state": "done",
       "detail": "Five saved recipes — deep_dive, morning_scan, bandar_watch, alert_sweep, pine_handoff — each running several tools in one call, the same way every time. Declarative steps only: no eval, a closed template vocabulary, capped fan-out that reports what it skipped, and a failing step that aborts and names itself unless marked optional.",
       "tools": ["workflow_list", "workflow_run"],
-      "verified": "Live: deep_dive on BBRI ran all four steps green in 3.7s (quote, technicals, chart, broker distribution).",
-      "blocker": "Scheduled/unattended runs still need the alert daemon; on-demand runs are complete."
+      "verified": "Live: deep_dive on BBRI ran all four steps green in 3.7s (quote, technicals, chart, broker distribution)."
     },
     {
       "name": "UI automation on graphics",
@@ -88,11 +87,15 @@
       "check": "Workflows run end to end on live data",
       "result": "pass",
       "evidence": "deep_dive on BBRI: quote 388ms, technicals 2542ms, chart 630ms, brokers 156ms — no step failed."
+    },
+    {
+      "check": "Alert daemon fires and delivers on live data",
+      "result": "pass",
+      "evidence": "BBRI: 'close > 2000' fired at 3020 and 'rsi14 < 70' at 56.18; Windows toasts delivered, both logged; a second pass fired 0."
     }
   ],
   "blockers": [
-    "Chartbit writes: drawing into your saved Stockbit layout changes the project's read-only posture. Needs your explicit decision — this is the last thing standing between 'Drawing' and done.",
-    "Alert delivery: a background daemon needs a design for how it reaches you. It is also what unblocks scheduled (unattended) workflow runs; on-demand workflows are already complete."
+    "Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). This is the only thing left, and it needs your explicit yes — not a technical blocker."
   ],
   "notes": [
     "The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.",

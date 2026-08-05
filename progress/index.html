@@ -67,14 +67,14 @@
   <h1>stockbit-mcp — progress</h1>
   <p class="goal">An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks — showing the exact same data Stockbit shows.</p>
 
-  <div class="bar"><i style="width:71%"></i></div>
+  <div class="bar"><i style="width:86%"></i></div>
   <div class="meta">
-    <div class="stat"><b>5/7</b><span>features settled</span></div>
+    <div class="stat"><b>6/7</b><span>features settled</span></div>
     <div class="stat"><b>23</b><span>MCP tools</span></div>
-    <div class="stat"><b>284 passing</b><span>tests</span></div>
-    <div class="stat"><b>41</b><span>source files</span></div>
-    <div class="stat"><b>19</b><span>test files</span></div>
-    <div class="stat"><b><code>8047a81</code></b><span>pushed to main</span></div>
+    <div class="stat"><b>301 passing</b><span>tests</span></div>
+    <div class="stat"><b>43</b><span>source files</span></div>
+    <div class="stat"><b>20</b><span>test files</span></div>
+    <div class="stat"><b><code>598ed05</code></b><span>pushed to main</span></div>
   </div>
 
   <h2>Features</h2>
@@ -119,15 +119,15 @@
         
         <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes/no: writing to your Stockbit account.</p>
       </article>
-      <article class="feature partial">
+      <article class="feature done">
         <header>
           <h3>Alerts</h3>
-          <span class="pill partial">Partial</span>
+          <span class="pill done">Done</span>
         </header>
-        <p>Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree. Fires once per bar, reports warm-up separately from a false condition. No background daemon yet — nothing is delivered on its own.</p>
-        <p class="tools"><code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code></p>
+        <p>Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree — plus a standalone daemon (`stockbit-alerts watch`) that polls during IDX hours and delivers. Three channels: an append-only JSONL log (always, written first), a native desktop notification (default on, no setup), and an optional https webhook. Fires once per bar; reports warm-up separately from a false condition.</p>
+        <p class="tools"><code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>stockbit-alerts (CLI)</code></p>
+        <p class="verified"><strong>Verified:</strong> Live: two rules fired on BBRI with correct values (close 3020 &gt; 2000; RSI 56.18 &lt; 70), Windows toasts delivered, log written; the next pass fired 0, confirming same-bar suppression.</p>
         
-        <p class="blocker"><strong>Blocked:</strong> A daemon that wakes you up needs a delivery design (how it reaches you).</p>
       </article>
       <article class="feature done">
         <header>
@@ -137,7 +137,7 @@
         <p>Five saved recipes — deep_dive, morning_scan, bandar_watch, alert_sweep, pine_handoff — each running several tools in one call, the same way every time. Declarative steps only: no eval, a closed template vocabulary, capped fan-out that reports what it skipped, and a failing step that aborts and names itself unless marked optional.</p>
         <p class="tools"><code>workflow_list</code> <code>workflow_run</code></p>
         <p class="verified"><strong>Verified:</strong> Live: deep_dive on BBRI ran all four steps green in 3.7s (quote, technicals, chart, broker distribution).</p>
-        <p class="blocker"><strong>Blocked:</strong> Scheduled/unattended runs still need the alert daemon; on-demand runs are complete.</p>
+        
       </article>
       <article class="feature declined">
         <header>
@@ -188,11 +188,16 @@
         <td>Workflows run end to end on live data</td>
         <td><span class="result pass">pass</span></td>
         <td>deep_dive on BBRI: quote 388ms, technicals 2542ms, chart 630ms, brokers 156ms — no step failed.</td>
+      </tr>
+      <tr>
+        <td>Alert daemon fires and delivers on live data</td>
+        <td><span class="result pass">pass</span></td>
+        <td>BBRI: 'close &gt; 2000' fired at 3020 and 'rsi14 &lt; 70' at 56.18; Windows toasts delivered, both logged; a second pass fired 0.</td>
       </tr></tbody>
   </table></div>
 
   <h2>Blocked on a decision</h2>
-  <ul class="plain"><li>Chartbit writes: drawing into your saved Stockbit layout changes the project's read-only posture. Needs your explicit decision — this is the last thing standing between 'Drawing' and done.</li><li>Alert delivery: a background daemon needs a design for how it reaches you. It is also what unblocks scheduled (unattended) workflow runs; on-demand workflows are already complete.</li></ul>
+  <ul class="plain"><li>Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). This is the only thing left, and it needs your explicit yes — not a technical blocker.</li></ul>
 
   <h2>Worth knowing</h2>
   <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li></ul>
@@ -204,6 +209,11 @@
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>598ed05</code></td>
+        <td class="date">2026-08-05</td>
+        <td>feat(workflows): saved multi-step recipes runnable as one call</td>
+      </tr>
       <tr>
         <td><code>8047a81</code></td>
         <td class="date">2026-08-05</td>
@@ -323,16 +333,11 @@
         <td><code>9c7bc95</code></td>
         <td class="date">2026-08-03</td>
         <td>feat(auth): doctor diagnostics, HAR import, universal browser discovery</td>
-      </tr>
-      <tr>
-        <td><code>a3493ac</code></td>
-        <td class="date">2026-08-03</td>
-        <td>fix(login): fail loudly when the browser closes; survive Windows capture hazards</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-05 10:30 UTC from
+    Generated 2026-08-05 10:37 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.
