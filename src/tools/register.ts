@@ -9,6 +9,7 @@ import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
 import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
 import { defaultChartPath, writeSvg } from "../render/write.js";
+import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
 
 export function registerTools(server: McpServer): void {
   /* ------------------------------ broker / bandar ------------------------------ */
@@ -96,6 +97,14 @@ export function registerTools(server: McpServer): void {
       top_sources: z.coerce.number().optional().describe("Source brokers to draw (default 8)"),
       top_targets: z.coerce.number().optional().describe("Counterparties to draw; the rest merge into an 'others' band (default 12)"),
       save_path: z.string().optional().describe("Where to write the .svg. Defaults to ~/.stockbit/charts/."),
+      open_in_stockbit: z
+        .boolean()
+        .optional()
+        .describe("Open the symbol's Stockbit page in the user's browser. Default true."),
+      browser: z
+        .string()
+        .optional()
+        .describe("Browser to open Stockbit in, by name, e.g. \"Edge\". Defaults to STOCKBIT_WEB_BROWSER, else the OS default."),
     },
     async (a) =>
       runImageTool(async () => {
@@ -138,6 +147,14 @@ export function registerTools(server: McpServer): void {
           svg,
         );
 
+        // The symbol page, not a broker deep link: Stockbit's Broker Analysis route carries no
+        // symbol and redirects away when one is appended, so a guessed URL would open the wrong
+        // stock. See `stockbitUrl`.
+        const stockbit =
+          a.open_in_stockbit === false
+            ? { url: stockbitUrl(d.symbol, "symbol"), action: "skipped" as const, via: undefined }
+            : await ensureStockbitOpen({ symbol: d.symbol, view: "symbol", browser: a.browser });
+
         return {
           base64: Buffer.from(svg, "utf8").toString("base64"),
           mimeType: "image/svg+xml",
@@ -155,9 +172,55 @@ export function registerTools(server: McpServer): void {
               marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
               savedTo,
+              stockbitUrl: stockbit.url,
+              stockbitBrowser: stockbit.action,
+              stockbitOpenedIn: stockbit.via,
             },
           },
         };
+      }),
+  );
+
+  /* --------------------------------- the browser --------------------------------- */
+
+  server.tool(
+    "stockbit_web",
+    "Check whether Stockbit is already open in the user's browser, and open it if it is not.\n" +
+      "Use this when the user should be LOOKING at Stockbit — before walking them through a chart, " +
+      "after drawing one, or when they ask to see something on the site. `price_chart` and " +
+      "`broker_distribution` already call it themselves.\n" +
+      "IT MATTERS WHICH BROWSER. Stockbit's chart page renders a BLANK WHITE PAGE when signed out " +
+      "— no login prompt, nothing — so opening it where the user has no session looks like a broken " +
+      "feature. Pass `browser` (e.g. \"Edge\") to target the one they are signed into, or set " +
+      "STOCKBIT_WEB_BROWSER once. Without either, the OS default is used, which may be the wrong " +
+      "one. `installed` in the result lists what is available.\n" +
+      "DETECTION IS NOT EXACT EVERYWHERE. On macOS every tab of every running browser is checked. " +
+      "On Windows and Linux only each window's ACTIVE tab is visible, so Stockbit sitting in a " +
+      "background tab reports as closed and opening it adds a duplicate tab. `exact` in the result " +
+      "says which case applied — do not tell the user Stockbit is closed when `exact` is false; " +
+      "say it is not in front.\n" +
+      "`check_only` reports without opening anything. `force` opens even if it looks open already.",
+    {
+      symbol: z.string().optional().describe("IDX ticker to open, e.g. BBRI. Omitted opens the Stockbit home page."),
+      view: z
+        .enum(["chart", "symbol", "home"])
+        .optional()
+        .describe("chart = the symbol's Chartbit page (default), symbol = its overview, home = stockbit.com"),
+      check_only: z.boolean().optional().describe("Report presence without opening anything. Default false."),
+      force: z.boolean().optional().describe("Open even when it already looks open. Default false."),
+      browser: z
+        .string()
+        .optional()
+        .describe("Browser to open in, by name, e.g. \"Edge\" or \"Chrome\". Must be one that is installed."),
+    },
+    async (a) =>
+      runTool(async () => {
+        const url = stockbitUrl(a.symbol, a.view);
+        if (a.check_only) {
+          const presence = await detectStockbit();
+          return { ...presence, action: "checked-only", url, installed: installedBrowsers() };
+        }
+        return ensureStockbitOpen({ symbol: a.symbol, view: a.view, force: a.force, browser: a.browser });
       }),
   );
 
@@ -230,7 +293,10 @@ export function registerTools(server: McpServer): void {
       "the numbers; this is the picture.\n" +
       "`annotations` draws your own levels, zones, trend lines and markers, which is how you show " +
       "the evidence behind an analysis. Drawing happens on this render only — nothing is written to " +
-      "the Stockbit account.",
+      "the Stockbit account.\n" +
+      "Whenever this draws, it also opens the symbol's Stockbit chart in the user's own default " +
+      "browser so they can compare the drawing against the live chart in their own session. " +
+      "`stockbitUrl` in the result is that page; pass `open_in_stockbit: false` to skip opening it.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       bars: z.coerce.number().optional().describe("Sessions to plot (default 120)"),
@@ -263,6 +329,14 @@ export function registerTools(server: McpServer): void {
         .describe("Your own drawings on top of the chart"),
       theme: z.enum(["dark", "light"]).optional().describe("Default dark"),
       save_path: z.string().optional().describe("Where to write the .svg. Defaults to ~/.stockbit/charts/."),
+      open_in_stockbit: z
+        .boolean()
+        .optional()
+        .describe("Open the symbol's Stockbit chart in the user's browser. Default true."),
+      browser: z
+        .string()
+        .optional()
+        .describe("Browser to open Stockbit in, by name, e.g. \"Edge\". Defaults to STOCKBIT_WEB_BROWSER, else the OS default."),
     },
     async (a) =>
       runImageTool(async () => {
@@ -361,6 +435,14 @@ export function registerTools(server: McpServer): void {
           svg,
         );
 
+        // Opened after the render succeeds, so a failed chart never throws a browser window at the
+        // user. The user's own browser, not an automation one — theirs holds the Stockbit session,
+        // and a signed-out chart is worse than no chart because it still looks like it worked.
+        const stockbit =
+          a.open_in_stockbit === false
+            ? { url: stockbitUrl(series.symbol, "chart"), action: "skipped" as const, via: undefined }
+            : await ensureStockbitOpen({ symbol: series.symbol, view: "chart", browser: a.browser });
+
         return {
           base64: Buffer.from(svg, "utf8").toString("base64"),
           mimeType: "image/svg+xml",
@@ -376,7 +458,11 @@ export function registerTools(server: McpServer): void {
               panels: panels.map((p) => p.label),
               levelsDrawn: annotations.filter((x) => x.kind === "level").length,
               truncated: series.truncated,
+              source: series.source,
               savedTo,
+              stockbitUrl: stockbit.url,
+              stockbitBrowser: stockbit.action,
+              stockbitOpenedIn: stockbit.via,
             },
           },
         };
