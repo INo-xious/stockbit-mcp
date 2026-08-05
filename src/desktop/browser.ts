@@ -30,6 +30,31 @@ import { basename, isAbsolute } from "node:path";
 import { normalizeSymbol } from "../symbol.js";
 import { findBrowsers } from "../auth/browsers.js";
 
+/**
+ * Does a window title belong to the Stockbit *site*?
+ *
+ * Not a bare `/stockbit/i`. That was the first version and it was wrong in a way that showed up
+ * immediately: a browser tab open on `INo-xious/stockbit-mcp` — this project's own GitHub page —
+ * reported Stockbit as open, so `ensureStockbitOpen` would decide there was nothing to do and the
+ * user would be told to look at a chart that was never opened. An editor with the project folder in
+ * its title does the same.
+ *
+ * So "stockbit" must appear as a standalone word: not glued to a `-`, `/`, `.` or another word
+ * character, which is what every repo, path and package name looks like. Real titles pass —
+ * "Saham: BBRI … | Stockbit" and "Stockbit - Investasi Saham …" — and "stockbit-mcp",
+ * "stockbit.com/docs" and "stockbit_notes.txt" do not.
+ *
+ * This is a heuristic over window titles, which is all Windows and Linux expose, and it is the
+ * reason `exact` is false on those platforms. It deliberately stops here: a title like "Harison
+ * stockbit project - File Explorer" still matches, because no string rule separates that from
+ * "Stockbit - Investasi Saham" without also rejecting real page titles. That is safe because the
+ * predicate is only ever applied to titles of processes in `BROWSER_PROCESSES` — the process filter
+ * is the guard, not the pattern.
+ */
+export function looksLikeStockbit(title: string): boolean {
+  return /(^|[^\w-])stockbit(?![-/.\w])/i.test(title);
+}
+
 /** Browsers worth asking about, by process image name. */
 const BROWSER_PROCESSES = [
   "chrome.exe",
@@ -138,7 +163,7 @@ async function windowsPresence(): Promise<BrowserPresence> {
     // Get-Process reports the name without ".exe"; the table carries it for readability.
     if (!BROWSER_PROCESSES.some((p) => p.replace(/\.exe$/, "") === name.toLowerCase())) continue;
     browsers.add(name);
-    if (/stockbit/i.test(title)) matches.push(`${name}: ${title}`);
+    if (looksLikeStockbit(title)) matches.push(`${name}: ${title}`);
   }
 
   return {
@@ -224,7 +249,7 @@ async function linuxPresence(): Promise<BrowserPresence> {
   const haveWmctrl = titles.trim().length > 0;
   const matches = titles
     .split(/\r?\n/)
-    .filter((l) => /stockbit/i.test(l))
+    .filter((l) => looksLikeStockbit(l))
     .map((l) => l.trim());
 
   const ps = await run("ps", ["-eo", "comm="]);

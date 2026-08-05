@@ -16,6 +16,15 @@ import {
   type Panel,
   type PineSpec,
 } from "../pine/emit.js";
+import {
+  describeCondition,
+  evaluateRule,
+  validateRule,
+  warmupBars,
+  type AlertRule,
+} from "../alerts/rules.js";
+import { addRule, loadRules, newRuleId, removeRule, updateRule } from "../alerts/store.js";
+import { StockbitError } from "../http/errors.js";
 import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
 import { normalizeSymbol } from "../symbol.js";
 
@@ -185,6 +194,177 @@ export function registerTools(server: McpServer): void {
               stockbitOpenedIn: stockbit.via,
             },
           },
+        };
+      }),
+  );
+
+  /* ----------------------------------- alerts ----------------------------------- */
+
+  const OVERLAY_SPECS: Record<string, Overlay> = {
+    sma20: { kind: "sma", period: 20 },
+    sma50: { kind: "sma", period: 50 },
+    sma200: { kind: "sma", period: 200 },
+    ema20: { kind: "ema", period: 20 },
+    ema50: { kind: "ema", period: 50 },
+    bollinger: { kind: "bollinger", period: 20, k: 2 },
+  };
+  const PANEL_SPECS: Record<string, Panel> = {
+    rsi: { kind: "rsi", period: 14 },
+    atr: { kind: "atr", period: 14 },
+    macd: { kind: "macd", fast: 12, slow: 26, signal: 9 },
+  };
+
+  server.tool(
+    "alert_create",
+    "Create a price or indicator alert on an IDX stock, stored on this machine.\n" +
+      "The condition uses the SAME grammar as `pine_script` signals and is evaluated with the same " +
+      "indicator maths, so an alert and the Pine alertcondition for it agree.\n" +
+      "Reference a declared series (sma20, sma50, rsi14, macdLine, macdSignal, bbUpper…), a price " +
+      "field (close, high, low, volume, hl2…), or a number. Declare what you reference via " +
+      "`overlays`/`panels` — the tool refuses a condition it cannot evaluate rather than storing a " +
+      "rule that silently never fires.\n" +
+      "Alerts fire once per bar. Nothing is delivered automatically — `alert_check` evaluates them; " +
+      "there is no background daemon yet.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      name: z.string().describe("What this alert means, e.g. 'RSI oversold'"),
+      left: z.union([z.string(), z.coerce.number()]).describe("Series id, price field, or number"),
+      op: z.enum(["crossover", "crossunder", "cross", ">", "<", ">=", "<="]),
+      right: z.union([z.string(), z.coerce.number()]),
+      overlays: z
+        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "ema50", "bollinger"]))
+        .optional()
+        .describe("Price series the condition references"),
+      panels: z.array(z.enum(["rsi", "macd", "atr"])).optional().describe("Oscillators the condition references"),
+      cooldown_minutes: z.coerce.number().optional().describe("Minimum minutes between fires. Default 0 (once per bar)."),
+      note: z.string().optional().describe("Free text for your own reference"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const rule: AlertRule = {
+          id: newRuleId(),
+          symbol: normalizeSymbol(a.symbol),
+          name: a.name,
+          overlays: (a.overlays ?? []).map((k) => OVERLAY_SPECS[k]),
+          panels: (a.panels ?? []).map((k) => PANEL_SPECS[k]),
+          left: a.left,
+          op: a.op,
+          right: a.right,
+          cooldownMinutes: a.cooldown_minutes ?? 0,
+          enabled: true,
+          createdAt: new Date().toISOString(),
+          note: a.note,
+        };
+        // Fails here rather than at fire time: a rule referencing a series nobody declared would
+        // otherwise sit in the file looking healthy and never fire.
+        validateRule(rule);
+        addRule(rule);
+        return {
+          created: rule,
+          condition: describeCondition(rule),
+          barsNeeded: warmupBars(rule),
+          note: "Run alert_check to evaluate. No background delivery yet — nothing fires on its own.",
+        };
+      }),
+  );
+
+  server.tool(
+    "alert_list",
+    "List the alert rules stored on this machine, with when each last fired.",
+    { symbol: z.string().optional().describe("Only rules for this ticker") },
+    async (a) =>
+      runTool(async () => {
+        const symbol = a.symbol ? normalizeSymbol(a.symbol) : undefined;
+        const rules = loadRules().filter((r) => !symbol || r.symbol === symbol);
+        return {
+          count: rules.length,
+          rules: rules.map((r) => ({ ...r, condition: describeCondition(r) })),
+        };
+      }),
+  );
+
+  server.tool(
+    "alert_delete",
+    "Delete an alert rule by id, or disable it instead with `disable_only`.",
+    {
+      id: z.string().describe("Rule id from alert_list"),
+      disable_only: z.boolean().optional().describe("Keep the rule but stop it firing. Default false."),
+    },
+    async (a) =>
+      runTool(async () => {
+        if (a.disable_only) {
+          const updated = updateRule(a.id, { enabled: false });
+          if (!updated) throw new StockbitError("not_found", `No alert rule with id ${a.id}`);
+          return { disabled: updated.id, name: updated.name };
+        }
+        const removed = removeRule(a.id);
+        if (!removed) throw new StockbitError("not_found", `No alert rule with id ${a.id}`);
+        return { deleted: removed.id, name: removed.name };
+      }),
+  );
+
+  server.tool(
+    "alert_check",
+    "Evaluate stored alert rules against current Stockbit bars and report which fired.\n" +
+      "Fetches only the symbols with rules, and only as much history as the slowest indicator needs. " +
+      "A rule that fires is recorded so it does not fire again for the same bar.\n" +
+      "`reason` on a rule that did not fire distinguishes 'condition-false' from 'warming-up' — the " +
+      "second means there is not yet enough history to judge, which is NOT the same as a no.",
+      {
+      symbol: z.string().optional().describe("Only check rules for this ticker"),
+      dry_run: z.boolean().optional().describe("Evaluate without recording fires, so a check can be repeated. Default false."),
+    },
+    async (a) =>
+      runTool(async () => {
+        const symbol = a.symbol ? normalizeSymbol(a.symbol) : undefined;
+        const rules = loadRules().filter((r) => !symbol || r.symbol === symbol);
+        if (rules.length === 0) return { checked: 0, fired: [], evaluations: [] };
+
+        // One instant for the whole batch, so two rules with the same cooldown cannot disagree
+        // about whether it has elapsed.
+        const now = new Date();
+
+        // Grouped by symbol: ten rules on BBRI are one bar fetch, not ten.
+        const bySymbol = new Map<string, AlertRule[]>();
+        for (const rule of rules) {
+          const list = bySymbol.get(rule.symbol) ?? [];
+          list.push(rule);
+          bySymbol.set(rule.symbol, list);
+        }
+
+        const evaluations = [];
+        for (const [sym, group] of bySymbol) {
+          const need = Math.max(...group.map((r) => warmupBars(r)), 60);
+          let bars: Awaited<ReturnType<typeof core.getBars>>["bars"] = [];
+          let error: string | undefined;
+          try {
+            bars = (await core.getBars({ symbol: sym, bars: need })).bars;
+          } catch (err) {
+            // One dead symbol must not abort the whole check — the other rules still have answers.
+            error = err instanceof Error ? err.message : String(err);
+          }
+          for (const rule of group) {
+            if (error) {
+              evaluations.push({
+                ruleId: rule.id, symbol: sym, name: rule.name, fired: false,
+                reason: "no-data" as const, condition: describeCondition(rule), error,
+              });
+              continue;
+            }
+            const result = evaluateRule(rule, bars, now);
+            if (result.fired && !a.dry_run) {
+              updateRule(rule.id, { lastFiredBar: result.barDate, lastFiredAt: now.toISOString() });
+            }
+            if (!a.dry_run) updateRule(rule.id, { lastCheckedAt: now.toISOString() });
+            evaluations.push(result);
+          }
+        }
+
+        return {
+          checked: evaluations.length,
+          dryRun: a.dry_run === true,
+          fired: evaluations.filter((e) => e.fired),
+          evaluations,
         };
       }),
   );

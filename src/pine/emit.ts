@@ -36,26 +36,20 @@
  * signal name — which matters because the output is code the user is going to paste and run.
  */
 import type { Level } from "../core/indicators.js";
+import {
+  OPERATORS,
+  PRICE_REFS,
+  defineSeries,
+  isPriceRef,
+  type Operator,
+  type Overlay,
+  type Panel,
+  type SeriesDef,
+} from "../analysis/series.js";
 
-/* ---------------------------------- the vocabulary ---------------------------------- */
-
-/** Built-in series a signal may reference without declaring anything. */
-export const PRICE_REFS = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "volume"] as const;
-export type PriceRef = (typeof PRICE_REFS)[number];
-
-/** Comparisons a signal may use. Closed on purpose: a free-text condition would be arbitrary Pine. */
-export const OPERATORS = ["crossover", "crossunder", "cross", ">", "<", ">=", "<="] as const;
-export type Operator = (typeof OPERATORS)[number];
-
-export type Overlay =
-  | { kind: "sma"; period: number }
-  | { kind: "ema"; period: number }
-  | { kind: "bollinger"; period: number; k: number };
-
-export type Panel =
-  | { kind: "rsi"; period: number }
-  | { kind: "atr"; period: number }
-  | { kind: "macd"; fast: number; slow: number; signal: number };
+// Re-exported so callers have one import for the Pine surface, but DEFINED in analysis/series.ts —
+// the same registry the alert evaluator uses, so a Pine condition and a fired alert cannot disagree.
+export { OPERATORS, PRICE_REFS, type Operator, type Overlay, type Panel };
 
 export interface Signal {
   /** Becomes a Pine identifier and an alert name; sanitised, never interpolated raw. */
@@ -174,80 +168,17 @@ function pineNumber(value: number, what: string): string {
   return String(value);
 }
 
-function requirePeriod(period: number, what: string): number {
-  if (!Number.isInteger(period) || period < 1) {
-    throw new Error(`${what} period must be a positive integer, got ${period}`);
-  }
-  return period;
-}
-
 /* ------------------------------------ the emitter ------------------------------------ */
 
-interface Declared {
-  /** Pine identifier holding the series. */
-  id: string;
-  /** Human label for plots and legends. */
-  label: string;
-  /** Where it is drawn. */
-  where: "price" | "rsi" | "macd" | "atr";
-  /** The right-hand side of `id = ...`. */
-  expr: string;
-  /** Plot colour. */
-  color: string;
-  style?: "line" | "histogram";
-}
-
-/** Cycled so two moving averages never land in the same colour. */
-const MA_COLORS = ["#58a6ff", "#d29922", "#a371f7", "#3fb950", "#f778ba"];
-
-/** Everything a spec declares, in emission order, with the identifiers signals may reference. */
-export function declaredSeries(spec: PineSpec): Declared[] {
-  const out: Declared[] = [];
-
-  for (const o of spec.overlays ?? []) {
-    if (o.kind === "sma") {
-      const p = requirePeriod(o.period, "sma");
-      // Distinct colours per line: two SMAs in the same blue are indistinguishable on a chart.
-      const shade = MA_COLORS[out.filter((s) => /^(sma|ema)/.test(s.id)).length % MA_COLORS.length];
-      out.push({ id: `sma${p}`, label: `SMA ${p}`, where: "price", expr: `ta.sma(close, ${p})`, color: `color.new(${shade}, 0)` });
-    } else if (o.kind === "ema") {
-      const p = requirePeriod(o.period, "ema");
-      const shade = MA_COLORS[out.filter((s) => /^(sma|ema)/.test(s.id)).length % MA_COLORS.length];
-      out.push({ id: `ema${p}`, label: `EMA ${p}`, where: "price", expr: `ta.ema(close, ${p})`, color: `color.new(${shade}, 0)` });
-    } else {
-      const p = requirePeriod(o.period, "bollinger");
-      const k = pineNumber(o.k, "bollinger k");
-      // One ta.bb call, destructured — calling it three times would recompute the same stdev.
-      out.push(
-        { id: `bbMiddle`, label: `BB basis (${p})`, where: "price", expr: `ta.sma(close, ${p})`, color: "color.new(#8b949e, 40)" },
-        { id: `bbDev`, label: "", where: "price", expr: `${k} * ta.stdev(close, ${p})`, color: "" },
-        { id: `bbUpper`, label: `BB upper`, where: "price", expr: `bbMiddle + bbDev`, color: "color.new(#8b949e, 0)" },
-        { id: `bbLower`, label: `BB lower`, where: "price", expr: `bbMiddle - bbDev`, color: "color.new(#8b949e, 0)" },
-      );
-    }
-  }
-
-  for (const p of spec.panels ?? []) {
-    if (p.kind === "rsi") {
-      const n = requirePeriod(p.period, "rsi");
-      out.push({ id: `rsi${n}`, label: `RSI ${n}`, where: "rsi", expr: `ta.rsi(close, ${n})`, color: "color.new(#a371f7, 0)" });
-    } else if (p.kind === "atr") {
-      const n = requirePeriod(p.period, "atr");
-      out.push({ id: `atr${n}`, label: `ATR ${n}`, where: "atr", expr: `ta.atr(${n})`, color: "color.new(#3fb950, 0)" });
-    } else {
-      const f = requirePeriod(p.fast, "macd fast");
-      const s = requirePeriod(p.slow, "macd slow");
-      const g = requirePeriod(p.signal, "macd signal");
-      if (f >= s) throw new Error(`macd fast (${f}) must be shorter than slow (${s})`);
-      out.push(
-        { id: "macdLine", label: "MACD", where: "macd", expr: `ta.ema(close, ${f}) - ta.ema(close, ${s})`, color: "color.new(#58a6ff, 0)" },
-        { id: "macdSignal", label: "Signal", where: "macd", expr: `ta.ema(macdLine, ${g})`, color: "color.new(#d29922, 0)" },
-        { id: "macdHist", label: "Histogram", where: "macd", expr: `macdLine - macdSignal`, color: "color.new(#8b949e, 20)", style: "histogram" },
-      );
-    }
-  }
-
-  return out;
+/**
+ * Everything a spec declares, in emission order, with the identifiers signals may reference.
+ *
+ * A thin wrapper over the shared registry rather than its own list of indicators: the alert
+ * evaluator expands the same overlays and panels through the same function, so a Pine
+ * `alertcondition` and a server-fired alert are the same condition over the same maths.
+ */
+export function declaredSeries(spec: PineSpec): SeriesDef[] {
+  return defineSeries(spec.overlays ?? [], spec.panels ?? []);
 }
 
 /** Identifiers a signal is allowed to name: declared series, price builtins, and level constants. */
@@ -258,11 +189,11 @@ function operandExpr(
   side: string,
 ): string {
   if (typeof operand === "number") return pineNumber(operand, side);
-  if ((PRICE_REFS as readonly string[]).includes(operand)) return operand;
+  if (isPriceRef(operand)) return operand;
   if (declared.has(operand) || levelIds.has(operand)) return operand;
   throw new Error(
     `${side} references "${operand}", which is not a declared series. ` +
-      `Available: ${[...declared, ...levelIds, ...PRICE_REFS].join(", ")}`,
+      `Available: ${[...declared, ...levelIds, ...Object.keys(PRICE_REFS)].join(", ")}`,
   );
 }
 
@@ -319,7 +250,7 @@ export function buildPine(spec: PineSpec): string {
 
   if (series.length) {
     lines.push("// ---- series ----");
-    for (const s of series) lines.push(`${s.id} = ${s.expr}`);
+    for (const s of series) lines.push(`${s.id} = ${s.pine}`);
     lines.push("");
   }
 
@@ -360,7 +291,7 @@ export function buildPine(spec: PineSpec): string {
   // may reference one — but they are drawn by their own script (see `buildPineScripts`). Plotting
   // an RSI on an overlay chart squashes the price axis into a line; hiding it with `display.none`
   // is worse, because the user is told it was plotted and sees nothing.
-  const plotted = series.filter((s) => s.color && s.where === "price");
+  const plotted = series.filter((s) => s.color && s.pane === "price");
   if (plotted.length) {
     lines.push("// ---- plots ----");
     for (const s of plotted) {
@@ -529,7 +460,7 @@ export function buildPineScripts(spec: PineSpec): PineScript[] {
       `indicator(${pineString(title)}, overlay = false)`,
       "",
     ];
-    for (const s of only) lines.push(`${s.id} = ${s.expr}`);
+    for (const s of only) lines.push(`${s.id} = ${s.pine}`);
     lines.push("");
     for (const s of only) {
       const style = s.style === "histogram" ? ", style = plot.style_histogram" : "";

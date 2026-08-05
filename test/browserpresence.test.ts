@@ -8,6 +8,7 @@ import {
   detectStockbit,
   ensureStockbitOpen,
   installedBrowsers,
+  looksLikeStockbit,
   openUrl,
   resolveBrowser,
   stockbitUrl,
@@ -119,6 +120,51 @@ test("a suppressed open is reported as suppressed, not as success", async () => 
 });
 
 /* ------------------------------------- detection -------------------------------------- */
+
+test("a window title must be the Stockbit SITE, not merely contain the word", () => {
+  // Found in the wild, not theorised: a tab on this project's own GitHub page,
+  // "INo-xious/stockbit-mcp - Opera", reported Stockbit as open — so ensureStockbitOpen decided
+  // there was nothing to do and the user was told to look at a chart that never opened.
+  for (const title of [
+    "Saham: BBRI - PT. Bank Rakyat Indonesia (Persero) Tbk. | Stockbit",
+    "Stockbit - Investasi Saham Bersama Komunitas Saham Terbesar di Indonesia - Opera",
+    "stockbit — Google Chrome",
+  ]) {
+    assert.equal(looksLikeStockbit(title), true, `should match: ${title}`);
+  }
+  for (const title of [
+    "INo-xious/stockbit-mcp - Opera",
+    "stockbit-mcp — Visual Studio Code",
+    "stockbit.com/docs at main",
+    "stockbit_notes.txt - Notepad",
+    "GitHub - INo-xious/stockbit-mcp: unofficial MCP",
+  ]) {
+    assert.equal(looksLikeStockbit(title), false, `should NOT match: ${title}`);
+  }
+
+  // A title like "My stockbit project - File Explorer" DOES match this predicate, and that is
+  // accepted rather than papered over: "stockbit" there is a standalone word and no string rule
+  // separates it from "Stockbit - Investasi Saham" without also rejecting real page titles. It is
+  // harmless because the predicate is only ever applied to BROWSER window titles — see the next
+  // test. Tightening it further would trade a false positive that cannot occur for false negatives
+  // that can.
+  assert.equal(looksLikeStockbit("My stockbit project - File Explorer"), true);
+});
+
+test("only browser processes are considered, which is what makes the title rule safe", async () => {
+  // The guard against non-browser windows is the process filter, not the title pattern.
+  const presence = await detectStockbit();
+  const browserish = /^(chrome|msedge|firefox|brave|opera|vivaldi|arc|google chrome|microsoft edge|safari)$/i;
+  for (const name of presence.browsers) {
+    assert.ok(browserish.test(name), `${name} is not a browser and should not have been counted`);
+  }
+  for (const match of presence.matches) {
+    assert.ok(
+      presence.browsers.some((b) => match.startsWith(b)),
+      `match "${match}" is not attributed to a detected browser`,
+    );
+  }
+});
 
 test("detection answers on this platform without throwing or launching anything", async () => {
   const presence = await detectStockbit();
