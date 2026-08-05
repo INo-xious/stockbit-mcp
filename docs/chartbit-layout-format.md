@@ -99,12 +99,45 @@ expects — is defined by the TradingView charting library, which is served sepa
 chunks. Composing brand-new drawings needs it. Reading, round-tripping and modifying an existing
 layout does not.
 
-## Why the write is still not enabled here
+## The layout endpoint pair does not work (measured)
 
-The format being knowable does not make the write appropriate. `POST {j}/{symbol}/layout`
-**overwrites** the user's saved chart, and ADR-0002 makes mutation of account data the property this
-codebase is built around — enforced by a closed route table, not by convention. Enabling it is a
-change of posture that must arrive with the apparatus that ADR names: read-before-write snapshot,
-post-write verification, rollback, a mutation log, and an explicit per-call confirmation.
+Enabled under ADR-0003 and exercised against a live account, `POST {j}/{symbol}/layout` **accepts and
+discards**. This is not a payload problem, and the elimination is worth recording so nobody repeats
+it:
 
-It also needs the account owner's explicit instruction, which a goal-completion check is not.
+| what was tried | result |
+|---|---|
+| `{content: <raw JSON>}` | 200 `"Retrieved Save Layout"`, nothing stored |
+| `{content: <plain string>}` | 200, nothing stored |
+| `{content: <base64 ZIP>}` (the encoding user-settings uses) | 200, nothing stored |
+| `{content, name}` / `{layout}` | **400 INVALID_PARAMETER** — so `{content}` is definitively the schema |
+| `?version=1`, `?user_setting_type=1`, `?symbol=` | 200, nothing stored |
+| `GET` with key `BBRI`, `bbri`, `59` (company id) | 200, `layout: ""` for all three |
+
+A GET that answers 200-with-empty for *any* key, and a POST that answers 200 for any body it accepts,
+is the shape of a stub — the pair looks deprecated or entitlement-gated rather than misused.
+`GET {j}/version` returns `{is_new: false}`, a user flag, not a schema version.
+
+## Where the chart configuration actually lives
+
+`GET /user-setting/configurations?user_setting_type=1` → `content` is **base64 of a ZIP containing a
+single `layout.json`**. ~12KB decoded on the account tested, holding the real TradingView settings:
+`chartproperties`, `current_theme.name`, `ChartDrawingToolbarWidget.visible`,
+`chart.lastUsedTimeBasedResolution`, `chartbitCustomSetting`, 18 keys in all.
+
+That is a chart's *properties*, which TradingView's charting library persists separately from a
+chart's *layout* — so an empty per-symbol layout does not mean the user has configured nothing.
+`src/core/chartsettings.ts` reads it.
+
+`GET {j}/template` (the named-layout list) returns `[]` on this account.
+
+## What remains untried
+
+`POST {j}/template` with `{name, content: JSON.stringify(layout)}` — Stockbit's *named layout* save,
+a different route from the per-symbol slot. It is additive rather than destructive (it creates a
+named object instead of replacing a slot), which makes it lower-risk than the write already enabled.
+
+It is untried because **ADR-0003 scoped the approved mutation to `POST {j}/{symbol}/layout` and says
+in its own terms that a further write needs a fourth ADR** — an instruction to enable one route is
+not an instruction to enable the next one. Whether the intent behind "enable the write" covers it is
+the account owner's call, not an inference to make on their behalf.

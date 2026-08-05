@@ -117,6 +117,7 @@ export const ROUTES = {
    * `/user-setting/configurations` is what the bundle's settings merge reads `chartproperties` from.
    */
   chartbitTemplates: { method: "GET", template: "/chartbit/template" },
+  chartbitVersion: { method: "GET", template: "/chartbit/version" },
   userSettings: { method: "GET", template: "/user-setting/configurations" },
   // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
   // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back

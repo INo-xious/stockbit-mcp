@@ -42,6 +42,7 @@ test("the permitted request set is exactly this list", () => {
     "GET /chartbit/:symbol/layout",
     "GET /chartbit/initial/:symbol",
     "GET /chartbit/template",
+    "GET /chartbit/version",
     "GET /company-price-feed/historical/summary/:symbol",
     "GET /company-price-feed/price-performance/:symbol",
     "GET /company-price-feed/prices/close",
