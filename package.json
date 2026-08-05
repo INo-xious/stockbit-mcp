@@ -22,7 +22,9 @@
     "auth": "node dist/bin/stockbit-auth.js",
     "test": "node --test --import tsx test/*.test.ts",
     "dev:mcp": "node --import tsx bin/stockbit-mcp.ts",
-    "dev:auth": "node --import tsx bin/stockbit-auth.ts"
+    "dev:auth": "node --import tsx bin/stockbit-auth.ts",
+    "progress": "node progress/build.mjs",
+    "progress:serve": "node progress/serve.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

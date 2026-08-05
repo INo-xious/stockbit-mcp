@@ -1,0 +1,94 @@
+{
+  "project": "stockbit-mcp",
+  "goal": "An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks — showing the exact same data Stockbit shows.",
+  "repo": "https://github.com/INo-xious/stockbit-mcp",
+  "features": [
+    {
+      "name": "Chart analysis",
+      "state": "done",
+      "detail": "Daily candles with volume, SMA/EMA/Bollinger overlays, RSI and MACD sub-panels, support/resistance from pivot clustering. Rendered as zero-dependency SVG.",
+      "tools": ["technicals", "price_chart"],
+      "verified": "Live: 220 sessions for BBRI in 19 requests; indicators computed and cross-checked."
+    },
+    {
+      "name": "Bandarmology",
+      "state": "done",
+      "detail": "Broker summary plus a broker-to-broker distribution Sankey showing who accumulated from whom. Date ranges and market boards supported.",
+      "tools": ["broker_summary", "broker_distribution"],
+      "verified": "Cross-checked against Stockbit screenshots for BRMS, TPIA and PSAB."
+    },
+    {
+      "name": "Pine Script development",
+      "state": "done",
+      "detail": "TradingView Pine v6: indicators, strategies, alert conditions, and Stockbit-derived levels embedded as constants. One script per pane.",
+      "tools": ["pine_script"],
+      "verified": "Generated and structurally validated; runs with no API call when levels are excluded."
+    },
+    {
+      "name": "Drawing",
+      "state": "partial",
+      "detail": "Levels, zones, trend lines and markers drawn on the rendered chart, and the same levels written into generated Pine. Writing drawings INTO the Stockbit account is not done — it needs POST /chartbit/{symbol}/layout, which would overwrite your saved layout and formally supersede ADR-0002.",
+      "tools": ["price_chart"],
+      "blocker": "Needs your explicit yes/no: writing to your Stockbit account."
+    },
+    {
+      "name": "Alerts",
+      "state": "partial",
+      "detail": "Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree. Fires once per bar, reports warm-up separately from a false condition. No background daemon yet — nothing is delivered on its own.",
+      "tools": ["alert_create", "alert_list", "alert_delete", "alert_check"],
+      "blocker": "A daemon that wakes you up needs a delivery design (how it reaches you)."
+    },
+    {
+      "name": "Workflow automation",
+      "state": "not-started",
+      "detail": "Saved multi-step recipes (scan → analyse → chart → alert) invocable as one call. Depends on the alert daemon for the scheduled variants.",
+      "tools": []
+    },
+    {
+      "name": "UI automation on graphics",
+      "state": "declined",
+      "detail": "Deliberately not built. Stockbit Desktop is Tauri/WKWebView with no CDP, and Stockbit exposes a clean JSON API this server already reads — so driving a GUI would solve a problem that does not exist. The practical substitute is opening the real Stockbit chart in your own browser beside what was drawn.",
+      "tools": ["stockbit_web"]
+    }
+  ],
+  "verification": [
+    {
+      "check": "Volume unit is LOTS, not shares",
+      "result": "pass",
+      "evidence": "BBRI value/volume = 303,668 against an average price of 3,037 — exactly price x 100."
+    },
+    {
+      "check": "Support/resistance labelled correctly",
+      "result": "pass",
+      "evidence": "BBRI, TLKM, GOTO: zero levels labelled support above the close or resistance below it. Was broken; fixed in 1c4e52c."
+    },
+    {
+      "check": "Quote matches Stockbit",
+      "result": "pass",
+      "evidence": "BBRI 3020, -40 (-1.31%), best bid 3020 / offer 3030."
+    },
+    {
+      "check": "Bars reach back far enough",
+      "result": "pass",
+      "evidence": "220 sessions (2025-09-03 to 2026-08-05) in 19 requests, not truncated."
+    },
+    {
+      "check": "Read-only boundary holds",
+      "result": "pass",
+      "evidence": "POST /login/refresh is still the only non-GET route; no /chartbit/* path reachable by any method."
+    },
+    {
+      "check": "Broker distribution against live data",
+      "result": "pending",
+      "evidence": "Previously matched Stockbit screenshots; not re-run since the session was restored."
+    }
+  ],
+  "blockers": [
+    "Chartbit writes: drawing into your saved Stockbit layout changes the project's read-only posture. Needs your explicit decision.",
+    "Alert delivery: a background daemon needs a design for how it reaches you (and ADR-0002 sketches this as a separate increment)."
+  ],
+  "notes": [
+    "The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.",
+    "Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about)."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "progress",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["progress/serve.mjs"],
+      "port": 4173
+    }
+  ]
+}
