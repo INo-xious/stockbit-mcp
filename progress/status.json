@@ -29,8 +29,8 @@
       "state": "partial",
       "detail": "Levels, zones, trend lines and markers drawn on the rendered chart; the same levels written into generated Pine; and your OWN saved Stockbit drawings readable as context via chart_layout. Writing drawings INTO the account is not done — it needs POST /chartbit/{symbol}/layout, which mutates your account and supersedes ADR-0002.",
       "tools": ["price_chart", "chart_layout", "pine_script"],
-      "verified": "Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. Every symbol on this account returns an EMPTY layout — nothing has been drawn and saved.",
-      "blocker": "Needs your explicit yes: writing to your Stockbit account. Separately, every stored layout is empty, so the serialization format is unknown — a guessed write could corrupt chart state, and a real saved layout must be captured first."
+      "verified": "Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. The save format is now fully recovered from Stockbit's own bundle (docs/chartbit-layout-format.md) — Fj is a string substitution, not encryption, and the payload is plain TradingView chart state. The encoder, composer and round-trip are implemented and tested (layoutcodec).",
+      "blocker": "Needs your explicit yes: POST /chartbit/{symbol}/layout overwrites your saved chart. The payload is ready and tested; no write route exists until you say so. Separately, composing BRAND-NEW drawings needs the TradingView line-tool schema, which Stockbit serves only to an authenticated chart page — reading and round-tripping a layout does not need it."
     },
     {
       "name": "Alerts",
@@ -96,8 +96,8 @@
     }
   ],
   "blockers": [
-    "Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). Needs your explicit yes.",
-    "Even with a yes, the layout format is unknown: GET /chartbit/{symbol}/layout returns an empty string for every symbol on this account, so there is no example to write against. Draw something in Stockbit and save it, or capture the save request from the browser's network tab, and the format becomes knowable."
+    "Chartbit writes: POST /chartbit/{symbol}/layout OVERWRITES your saved chart and changes the project's read-only posture (ADR-0002). Needs your explicit yes — say 'enable the write'. The payload encoder, composer and round-trip are already built and tested; only the route and its apparatus (snapshot, verify, rollback, mutation log) are missing.",
+    "Composing brand-new drawings needs the TradingView line-tool schema (what `state` a LineToolHorzLine expects). Stockbit serves the charting library only to an authenticated chart page, so it could not be read the way the rest of the format was. Reading, round-tripping and modifying an existing layout does not need it."
   ],
   "notes": [
     "The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.",

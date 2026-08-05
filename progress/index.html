@@ -71,10 +71,10 @@
   <div class="meta">
     <div class="stat"><b>6/7</b><span>features settled</span></div>
     <div class="stat"><b>24</b><span>MCP tools</span></div>
-    <div class="stat"><b>302 passing</b><span>tests</span></div>
+    <div class="stat"><b>317 passing</b><span>tests</span></div>
     <div class="stat"><b>46</b><span>source files</span></div>
     <div class="stat"><b>21</b><span>test files</span></div>
-    <div class="stat"><b><code>18e9568</code></b><span>pushed to main</span></div>
+    <div class="stat"><b><code>3e83515</code></b><span>pushed to main</span></div>
   </div>
 
   <h2>Features</h2>
@@ -116,8 +116,8 @@
         </header>
         <p>Levels, zones, trend lines and markers drawn on the rendered chart; the same levels written into generated Pine; and your OWN saved Stockbit drawings readable as context via chart_layout. Writing drawings INTO the account is not done — it needs POST /chartbit/{symbol}/layout, which mutates your account and supersedes ADR-0002.</p>
         <p class="tools"><code>price_chart</code> <code>chart_layout</code> <code>pine_script</code></p>
-        <p class="verified"><strong>Verified:</strong> Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. Every symbol on this account returns an EMPTY layout — nothing has been drawn and saved.</p>
-        <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes: writing to your Stockbit account. Separately, every stored layout is empty, so the serialization format is unknown — a guessed write could corrupt chart state, and a real saved layout must be captured first.</p>
+        <p class="verified"><strong>Verified:</strong> Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. The save format is now fully recovered from Stockbit's own bundle (docs/chartbit-layout-format.md) — Fj is a string substitution, not encryption, and the payload is plain TradingView chart state. The encoder, composer and round-trip are implemented and tested (layoutcodec).</p>
+        <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes: POST /chartbit/{symbol}/layout overwrites your saved chart. The payload is ready and tested; no write route exists until you say so. Separately, composing BRAND-NEW drawings needs the TradingView line-tool schema, which Stockbit serves only to an authenticated chart page — reading and round-tripping a layout does not need it.</p>
       </article>
       <article class="feature done">
         <header>
@@ -197,7 +197,7 @@
   </table></div>
 
   <h2>Blocked on a decision</h2>
-  <ul class="plain"><li>Chartbit writes: drawing into your saved Stockbit layout would MUTATE your account and changes the project's read-only posture (ADR-0002). Needs your explicit yes.</li><li>Even with a yes, the layout format is unknown: GET /chartbit/{symbol}/layout returns an empty string for every symbol on this account, so there is no example to write against. Draw something in Stockbit and save it, or capture the save request from the browser's network tab, and the format becomes knowable.</li></ul>
+  <ul class="plain"><li>Chartbit writes: POST /chartbit/{symbol}/layout OVERWRITES your saved chart and changes the project's read-only posture (ADR-0002). Needs your explicit yes — say 'enable the write'. The payload encoder, composer and round-trip are already built and tested; only the route and its apparatus (snapshot, verify, rollback, mutation log) are missing.</li><li>Composing brand-new drawings needs the TradingView line-tool schema (what `state` a LineToolHorzLine expects). Stockbit serves the charting library only to an authenticated chart page, so it could not be read the way the rest of the format was. Reading, round-tripping and modifying an existing layout does not need it.</li></ul>
 
   <h2>Worth knowing</h2>
   <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li></ul>
@@ -209,6 +209,11 @@
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>3e83515</code></td>
+        <td class="date">2026-08-05</td>
+        <td>docs: recover the Chartbit layout format from Stockbit's own bundle</td>
+      </tr>
       <tr>
         <td><code>18e9568</code></td>
         <td class="date">2026-08-05</td>
@@ -328,16 +333,11 @@
         <td><code>d5bdc54</code></td>
         <td class="date">2026-08-04</td>
         <td>Merge pull request #1 from INo-xious/fix/windows-login-capture</td>
-      </tr>
-      <tr>
-        <td><code>a50f30a</code></td>
-        <td class="date">2026-08-03</td>
-        <td>fix(login): await profile deletion before settling, so it is not killed by exit</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-05 10:49 UTC from
+    Generated 2026-08-05 11:00 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.
