@@ -22,6 +22,23 @@ export function writeSvg(path: string, svg: string): string {
 }
 
 /**
+ * Write a Pine script to disk, forcing a `.pine` extension for the same reason `writeSvg` forces
+ * `.svg` — TradingView and every editor key off it.
+ */
+export function writePine(path: string, source: string): string {
+  const target = resolve(/\.pine$/i.test(path) ? path : `${path}.pine`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, source, "utf8");
+  return target;
+}
+
+/** Where generated Pine lands by default, beside the charts for the same reasons. */
+export function defaultPinePath(symbol: string, pane: string): string {
+  const name = `${symbol}-${pane}`.replace(/[^A-Za-z0-9._-]/g, "_");
+  return join(homedir(), ".stockbit", "pine", name);
+}
+
+/**
  * Where a chart lands when the caller does not name a path.
  *
  * Under `~/.stockbit/charts` rather than the working directory or a temp dir: the working directory

@@ -8,8 +8,16 @@ import * as core from "../core/index.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
 import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
-import { defaultChartPath, writeSvg } from "../render/write.js";
+import { defaultChartPath, defaultPinePath, writePine, writeSvg } from "../render/write.js";
+import {
+  buildPineScripts,
+  validatePine,
+  type Overlay,
+  type Panel,
+  type PineSpec,
+} from "../pine/emit.js";
 import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
+import { normalizeSymbol } from "../symbol.js";
 
 export function registerTools(server: McpServer): void {
   /* ------------------------------ broker / bandar ------------------------------ */
@@ -177,6 +185,138 @@ export function registerTools(server: McpServer): void {
               stockbitOpenedIn: stockbit.via,
             },
           },
+        };
+      }),
+  );
+
+  /* --------------------------------- pine script --------------------------------- */
+
+  server.tool(
+    "pine_script",
+    "Generate TradingView Pine Script v6 for an IDX stock — indicators, support/resistance, " +
+      "signals, alert conditions, or a backtestable strategy.\n" +
+      "The indicators are emitted as the TradingView builtins whose definitions MATCH what " +
+      "`technicals` computes (ta.sma/ta.ema/ta.rsi/ta.atr/ta.macd, and ta.stdev for Bollinger, " +
+      "which is population SD like ours), so the script plots the same numbers the user was shown.\n" +
+      "Support/resistance are written in as CONSTANTS from Stockbit's bars, not recomputed in " +
+      "Pine — recomputing would use TradingView's data, a different source that would quietly " +
+      "disagree. Set `include_levels: false` to skip them, which also means NO Stockbit API call " +
+      "is made and the tool works without a live session.\n" +
+      "Returns one script per pane: price plus a separate one for each oscillator, because " +
+      "TradingView puts a script in exactly one pane and an RSI on an overlay flattens the price " +
+      "axis. Each is also written to a .pine file.\n" +
+      "`validation` is a STRUCTURAL check only — brackets, pragma, duplicate assignments. It is " +
+      "not a compiler and passing it does not guarantee TradingView will accept the script.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      kind: z.enum(["indicator", "strategy"]).optional().describe("Default indicator. strategy adds orders and is backtestable."),
+      title: z.string().optional().describe("Script title shown in TradingView"),
+      overlays: z
+        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "ema50", "bollinger"]))
+        .optional()
+        .describe("Price overlays. Default sma20 + sma50."),
+      panels: z.array(z.enum(["rsi", "macd", "atr"])).optional().describe("Oscillators, each as its own script. Default rsi."),
+      include_levels: z
+        .boolean()
+        .optional()
+        .describe("Embed support/resistance from Stockbit bars (default true). false skips the API call entirely."),
+      bars: z.coerce.number().optional().describe("Sessions to derive levels from (default 200)"),
+      from: z.string().optional().describe("Earliest session, YYYY-MM-DD"),
+      to: z.string().optional().describe("Latest session, YYYY-MM-DD"),
+      signals: z
+        .array(
+          z.object({
+            name: z.string().describe("Signal name; becomes the alert title"),
+            left: z.union([z.string(), z.coerce.number()]).describe("A declared series (sma20, rsi14, macdLine, bbUpper, res1, sup1…), a price ref (close, high…), or a number"),
+            op: z.enum(["crossover", "crossunder", "cross", ">", "<", ">=", "<="]),
+            right: z.union([z.string(), z.coerce.number()]),
+            message: z.string().optional().describe("Alert text; defaults to 'SYMBOL: name'"),
+          }),
+        )
+        .optional()
+        .describe("Conditions to compute. Only declared series and price refs may be referenced."),
+      alerts: z.boolean().optional().describe("Emit alertcondition() per signal. Default true for indicators."),
+      strategy_long_when: z.string().optional().describe("Signal name that opens a long (kind=strategy)"),
+      strategy_exit_when: z.string().optional().describe("Signal name that closes it"),
+      stop_loss_pct: z.coerce.number().optional().describe("Percent stop from entry, e.g. 3"),
+      take_profit_pct: z.coerce.number().optional().describe("Percent target from entry, e.g. 6"),
+      save_dir: z.string().optional().describe("Where to write the .pine files. Defaults to ~/.stockbit/pine/."),
+    },
+    async (a) =>
+      runTool(async () => {
+        const overlayMap: Record<string, Overlay> = {
+          sma20: { kind: "sma", period: 20 },
+          sma50: { kind: "sma", period: 50 },
+          sma200: { kind: "sma", period: 200 },
+          ema20: { kind: "ema", period: 20 },
+          ema50: { kind: "ema", period: 50 },
+          bollinger: { kind: "bollinger", period: 20, k: 2 },
+        };
+        const panelMap: Record<string, Panel> = {
+          rsi: { kind: "rsi", period: 14 },
+          atr: { kind: "atr", period: 14 },
+          macd: { kind: "macd", fast: 12, slow: 26, signal: 9 },
+        };
+
+        const kind = a.kind ?? "indicator";
+        const wantLevels = a.include_levels !== false;
+
+        // Only touched when levels are wanted, so a script with no embedded Stockbit data needs no
+        // session at all — which is the difference between this tool working and not when the
+        // refresh token has expired.
+        let levels: core.Level[] = [];
+        let from: string | undefined;
+        let to: string | undefined;
+        if (wantLevels) {
+          const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 200, from: a.from, to: a.to });
+          levels = core.levels(series.bars, 5, 1.5).filter((l) => l.touches >= 2).slice(0, 6);
+          from = series.from;
+          to = series.to;
+        }
+
+        const spec: PineSpec = {
+          symbol: normalizeSymbol(a.symbol),
+          kind,
+          title: a.title,
+          overlays: (a.overlays ?? ["sma20", "sma50"]).map((k) => overlayMap[k]),
+          panels: (a.panels ?? ["rsi"]).map((k) => panelMap[k]),
+          levels,
+          levelsFrom: from,
+          levelsTo: to,
+          signals: a.signals as PineSpec["signals"],
+          alerts: kind === "indicator" && a.alerts !== false,
+          strategy: {
+            longWhen: a.strategy_long_when,
+            exitWhen: a.strategy_exit_when,
+            stopLossPct: a.stop_loss_pct,
+            takeProfitPct: a.take_profit_pct,
+          },
+        };
+
+        const scripts = buildPineScripts(spec);
+        return {
+          symbol: spec.symbol,
+          kind,
+          levelsFrom: from,
+          levelsTo: to,
+          levelsEmbedded: levels.length,
+          scripts: scripts.map((s) => {
+            const validation = validatePine(s.source);
+            return {
+              title: s.title,
+              pane: s.pane,
+              savedTo: writePine(
+                a.save_dir ? `${a.save_dir}/${spec.symbol}-${s.pane}` : defaultPinePath(spec.symbol, s.pane),
+                s.source,
+              ),
+              structurallyValid: validation.ok,
+              issues: validation.issues,
+              source: s.source,
+            };
+          }),
+          note:
+            "Paste each script into TradingView's Pine Editor and 'Add to chart'. Structural validation " +
+            "is not a compiler — TradingView is the authority on whether it compiles.",
         };
       }),
   );
