@@ -109,6 +109,15 @@ export const ROUTES = {
    * mandatory rather than advisory.
    */
   chartbitSaveLayout: { method: "POST", template: "/chartbit/:symbol/layout" },
+  /**
+   * The other two places Chartbit state can live, both READS.
+   *
+   * The per-symbol layout answers 200 and stores nothing on this account, so these exist to find out
+   * where a saved chart actually goes: `template` is Stockbit's named-layout list, and
+   * `/user-setting/configurations` is what the bundle's settings merge reads `chartproperties` from.
+   */
+  chartbitTemplates: { method: "GET", template: "/chartbit/template" },
+  userSettings: { method: "GET", template: "/user-setting/configurations" },
   // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
   // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back
   // EMPTY for every parameterization tried against live data: ISO dates, UNIX seconds, several

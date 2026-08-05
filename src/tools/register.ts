@@ -940,6 +940,19 @@ export function registerTools(server: McpServer): void {
   );
 
   server.tool(
+    "chart_settings",
+    "Read the user's saved chart CONFIGURATION — theme, chart properties, drawing-toolbar state, " +
+      "last-used resolution.\n" +
+      "This is a different store from `chart_layout`: TradingView persists a chart's properties and " +
+      "its layout separately, and Stockbit keeps them in different places. A symbol can have no " +
+      "saved layout while the account still has full chart settings, so do not conclude from an " +
+      "empty `chart_layout` that the user has configured nothing.\n" +
+      "Account-wide, not per-symbol. Read-only.",
+    {},
+    async () => runTool(() => core.getChartSettings()),
+  );
+
+  server.tool(
     "chart_layout_save",
     "WRITE the user's saved chart layout on Stockbit. This is the ONLY tool here that modifies the " +
       "account, and it OVERWRITES — Stockbit does not merge, version, or offer an undo.\n" +

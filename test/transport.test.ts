@@ -41,6 +41,7 @@ test("the permitted request set is exactly this list", () => {
     // below asserts every declared Chartbit route is a GET and that no write path is reachable.
     "GET /chartbit/:symbol/layout",
     "GET /chartbit/initial/:symbol",
+    "GET /chartbit/template",
     "GET /company-price-feed/historical/summary/:symbol",
     "GET /company-price-feed/price-performance/:symbol",
     "GET /company-price-feed/prices/close",
@@ -57,6 +58,7 @@ test("the permitted request set is exactly this list", () => {
     // parameter rather than a path segment, so there is no `:symbol` here.
     "GET /order-trade/broker/distribution",
     "GET /stream/v3/symbol/:symbol",
+    "GET /user-setting/configurations",
     "POST /chartbit/:symbol/layout",
     "POST /login/refresh",
   ]);
@@ -112,13 +114,19 @@ test("the ONLY writable Chartbit path is the layout, and only by POST", () => {
     );
   }
   for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
-    for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings", "/chartbit/template"]) {
+    // `/chartbit/template` is deliberately absent here — its GET is permitted and its writes are
+    // asserted separately below.
+    for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings"]) {
       assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path} must be rejected`);
     }
   }
-  // A template write would also mutate account data and has no ADR behind it.
+  // The template LIST is readable; writing or deleting a template would mutate account data and has
+  // no ADR behind it. Same for the settings blob, which holds the user's real chart configuration.
+  assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/chartbit/template`), true);
   assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/template`), false);
   assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false);
+  assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), true);
+  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), false);
 });
 
 test("a GET route refuses a body rather than silently dropping it", async () => {
