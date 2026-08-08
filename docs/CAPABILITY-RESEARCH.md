@@ -196,3 +196,192 @@ eighty. Any future fan-out over this API should refresh **once** up front and pa
 to the agents, rather than letting each mint its own.
 
 Re-authenticate with `node dist\bin\stockbit-auth.js login`.
+
+---
+---
+
+# Pass 2 — 2026-08-05, evidence from the public CDN and the source tree
+
+Run with the session token dead, so **nothing here was live-probed**. Every claim is anchored to a
+quoted line in Stockbit's public bundle or in this repo, and each was independently re-checked by a
+challenger who fetched the evidence rather than trusting the quote. 35 agents, 30 proposals,
+**27 held up**.
+
+That constraint turned out to be a feature: it forced the lenses onto ground pass 1 skipped, and the
+first thing they found was that some of what already ships does not work.
+
+## Bugs in shipped code — fix these before building anything new
+
+### `morning_scan` aborts on every single run
+`src/workflows/builtin.ts:71` · **reproduced against the shipped `dist/`**
+
+The step iterates `steps.movers.data.results`, and `getTopMovers` returns `data` as an array — there
+is no `.results` to resolve, **in any market condition**. One of five shipped workflows is 100% dead,
+it is the one a user reaches for daily, and `workflow_list` advertises it with no indication it
+cannot run. Fix is `forEach: "steps.movers.data"`.
+
+### `top_movers` may never have returned a row
+`src/http/transport.ts:43-51`, `src/core/emitten.ts:114`
+
+The tool sends camelCase path segments (`topGainer`) where Stockbit's own client sends lowercase
+(`topgainer`) — verified byte-for-byte in chunk `46906-1f5f18e9cfe92c41.js`.
+
+What makes this nasty is the cover story: the tool's own description says an empty result is normal
+when the market is closed, so an always-empty hotlist is **indistinguishable from correct behaviour**
+and nothing in the system can notice. It is also the input to `morning_scan`, so both halves of that
+workflow are broken independently.
+
+### `broker_summary` sends three enum values that do not exist
+`src/core/marketdetectors.ts:13-14`, `:49-50`
+
+- `transaction_type`: the tool advertises `BUY` and `SELL`. Neither is in the API's enum. The one
+  real alternative to `NET` is `GROSS`, and the tool cannot reach it.
+- `market_board`: sends `MARKET_BOARD_NEGOTIATED` / `MARKET_BOARD_CASH` where the API wants `NEGO` /
+  `TUNAI`, and `ALL` is missing entirely.
+
+The second one stings: **the correct vocabulary was measured, written down, and applied to
+`broker_distribution` in this same codebase** — and `broker_summary` kept the guess. Given this API's
+documented habit of answering 200 and ignoring what it does not understand, the likely outcome is not
+a 400 but a silent fallback to the default.
+
+### `getBars` with `to` and no `from` lies about completeness
+`src/core/bars.ts:197`
+
+The stop condition never consults `to`. Asking for `technicals(symbol:"BBRI", to:"2026-01-15")` pages
+~17 upstream requests for the *most recent* 200 sessions, filters nearly all of them away, and
+returns a short series — or, for a `to` more than ~200 sessions back, **zero bars with every
+indicator null** — while reporting `truncated: false`.
+
+### A 100× unit error pre-loaded for the next maintainer
+`src/core/brokerdistribution.ts:62`, `:146`, `:265`
+
+Three doc comments say VOLUME is in **shares**; the code, the tool, the tests and the doc's own
+arithmetic proof all say **lots**. The runtime output is currently correct, so this is not a live
+wrong number — it is a trap. A maintainer reading the interface comment and "correcting" the code to
+match would ship exactly the 100× mistake this project has already shipped once.
+
+### `sectors` discards the fields that make rotation possible
+`src/core/emitten.ts::getSectors` drops `parent` and the performance field. Restoring them plus N
+calls on the already-declared `pricePerformance` route gives a ranked sector-rotation table with no
+new endpoint.
+
+---
+
+## The screener is fully decoded — and the read half needs no ADR
+
+Pass 1 left this as "running a screen requires a POST". **Half right, and the useful half is a GET.**
+
+**Run a built-in preset — pure GET, ships today:**
+`GET /screener/templates/{id}?type=TEMPLATE_TYPE_GURU` (module `71914`, `getLoadPresetScreener`)
+
+That is *"run Stockbit's Big Accumulation screen and tell me what showed up"* as a one-GET,
+one-parser tool, ahead of and independent of any write decision.
+
+**The query language, quoted from the bundle:** two rule types, operators `[">", "<", "<=", "=", ">="]`,
+combined with **implicit AND — there is no OR**. Small enough to expose as a typed MCP schema with a
+closed operator enum, which means the model *cannot* emit an invalid screen. The no-OR limit needs
+encoding up front: "foreign accumulation OR bandar accumulation" is two screens and a union.
+
+**A watchlist is a first-class screening scope** — `{"scope":"wl","scopeID":"5455717"}`. Combined with
+pass 1's watchlist read, *"which of MY stocks is bandar accumulating"* becomes one call instead of 26.
+
+**`operator:"all"` projects a metric as an output column without filtering on it.** This quietly turns
+the screener into a **batch fundamentals fetcher** — scope to the watchlist, one trivially-true rule,
+eight `operator:"all"` columns, and you get market cap, PER, foreign flow and bandar value for every
+holding in *one* request. The server has no equivalent of that today.
+
+**Running a custom screen** is `POST /screener/templates` with `save:"0"` — Stockbit's own UI
+distinguishes run from save with that one field, and the reducer only adopts a new `screenerid` when
+`save === "1"`. So a run need not create anything on the account. It is still a fourth non-GET route
+and still needs its own ADR; the point is that the *account-mutating* reading of pass 1 was wrong.
+
+---
+
+## New data classes the server has no coverage of
+
+| capability | endpoint | effort |
+|---|---|---|
+| **Analyst ratings + consensus** — target prices, buy/hold/sell | `/analyst-ratings/{symbol}` · `/{symbol}/consensus` | small |
+| **Sector constituents** — the cross-sectional primitive | `/emitten/v3/sector/{id}/company` | small |
+| **Comparison service** — peer ratios *and an industry benchmark* | `/comparison/{SYMBOL}/ratios` · `/industries` | medium |
+| **Order queue** — individual open orders and queue positions | `/order-trade/order-queue` | medium |
+| **Ownership suite** — incl. a traversable ownership *graph* | `/insider/shareholding/{investors,companies,network,composition}` | large |
+
+Two are worth spelling out.
+
+**Analyst ratings** is a whole data class at zero risk: two GETs, symbol-only, no enums to get wrong.
+The 26 tools cover price, fundamentals, broker flow and sentiment — and nothing about what analysts
+actually forecast.
+
+**Sector constituents** is the answer to "the server is single-symbol". Every existing tool takes a
+symbol you already decided to ask about; this hands back a *population*. ~22 sector ids, one request
+each, and breadth, rotation, leadership and relative strength all reduce to arithmetic over data you
+now have.
+
+**Comparison** matters because `ratios` answers *"what is BBRI's PBV"* and nobody can currently ask
+*"and is that cheap for a bank"*. `/industries` is Stockbit's own industry aggregate — the
+denominator — so relative valuation stops being a client-side computation over N peer fetches.
+
+---
+
+## Build from what is already here
+
+### The honest half of "backtesting" — *medium*
+`src/alerts/rules.ts:138` is `const i = bars.length - 1;`. The engine computes every indicator across
+**all** bars and then throws away every index but the last.
+
+So *"how often has my RSI-oversold rule fired in the last year, and what did price do in the 10
+sessions after each fire?"* is **~15 lines of loop plus a forward-return table** — not a backtester.
+The compute cost is already being paid. This is the highest value-per-line item in the report.
+
+### Event detectors that draw themselves — *small*
+Gap = `bars[i].low > bars[i-1].high`. Inside bar = two comparisons. Volume spike needs no new maths
+because `sma()` takes a bare `number[]`. Each returns a set of **dates**, and dates are exactly what
+the chart's marker annotation already consumes — `indicators.ts:215 levels()` is the same
+`(bars, opts) => detections` shape already wired to annotations, so this is a *second instance of a
+proven pattern*, not a new mechanism.
+
+Two gotchas the challenger caught: the marker guard requires a truthy `label`, so labelless events
+are **silently dropped**; and there is no collision avoidance, so a chatty detector needs a cap the
+way `levels` already caps to 5.
+
+### Relative strength as a sub-panel — *small*
+The precise thing `renderCandles` lacks is a second y-axis and a date-keyed x-mapping — and it needs
+**neither** if the comparison is drawn as a ratio in a sub-panel. That reduces "relative strength vs
+IHSG" to a date-join and a rebase.
+
+### Universe scan with the existing rule grammar — *medium*
+*"Of today's top gainers, which have SMA20 crossing above SMA50?"* — a grammar already built,
+already validated, and already agreeing with the Pine output.
+
+### CSV/JSON export — *small*
+Bars are expensive (12 rows per upstream page) and there is currently **no way to get them out of the
+process at all**. Every tool returns a derived reading or a picture.
+
+### An invariant this project claims and does not hold — *medium*
+`src/alerts/rules.ts:5-10` states that a rule "can be emitted as a Pine `alertcondition` and
+evaluated server-side, and both must agree". But the alert grammar cannot reference support or
+resistance while the Pine grammar can — `close crossover res1` is a valid Pine signal and an
+**impossible alert**. The levels are the one thing this server computes that TradingView cannot.
+
+---
+
+## Reference artifacts
+
+**143 protobuf enums extracted verbatim** from Stockbit's generated schemas — authoritative rather
+than inferred. This is the durable win of the pass: the project has guessed enum values wrong at
+least three times (documented above), and this ends that class of bug. Several unlock capability
+directly, e.g. `MOVER_TYPE_BIG_MONEY_NET_VALUE`.
+
+**The remote inventory was wrong: 15 Module Federation remotes, not 9.** Pass 1 mined 9 and about 20%
+of the site chunks, so its "we have swept the CDN" conclusion was unsound — every new endpoint above
+came from the remainder.
+
+## Dropped in challenge
+
+- **The 23 Bandarmology metric names** — the challenger could not reproduce the quoted list against a
+  freshly fetched bundle. The *group* is confirmed to exist; the specific metric names are not.
+- **Three conflicting BoardType numberings** — bundle half impeccable, project half did not hold.
+- **`/charts/{SYMBOL}/daily`** — a whole price series in one request. Bundle text verified, but this
+  is the same shape as the single-request bars idea that already failed live once; needs a probe
+  before anyone trusts it.
