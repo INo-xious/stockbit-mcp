@@ -12,6 +12,7 @@ import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { getBrokerSummary, clearCache } from "../src/core/index.ts";
 import { brokerSummaryTtlFor } from "../src/core/marketdetectors.ts";
+import { extractBands } from "../src/core/pricefeed.ts";
 import { CACHE } from "../src/config.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -204,4 +205,59 @@ test("TTL: a settled range caches long, a live range and no-range do not", () =>
     settled > live,
     "a closed window must cache longer than one still being written to by the running session",
   );
+});
+
+/* ------------------------- auto-rejection bands & foreign flow ------------------------- */
+
+test("bands are extracted from the orderbook payload we already fetched", () => {
+  // No new request and no new route — these fields arrive inside the ~19KB depth payload and were
+  // simply never surfaced. Reaching them meant knowing they existed and parsing the blob by hand.
+  const bands = extractBands("BBRI", {
+    ara: 5200,
+    arb: 4400,
+    next_ara: "5320",
+    next_arb: { raw: 4510 },
+    fbuy: "1,250,000",
+    fsell: 900_000,
+    fnet: 350_000,
+  });
+
+  assert.equal(bands.ara, 5200);
+  assert.equal(bands.arb, 4400);
+  assert.equal(bands.nextAra, 5320, "a numeric string parses");
+  assert.equal(bands.nextArb, 4510, "so does a {raw} wrapper");
+  assert.equal(bands.foreignBuy, 1_250_000, "and thousands separators are stripped");
+  assert.equal(bands.foreignNet, 350_000);
+  assert.deepEqual(bands.missing, []);
+  assert.equal(bands.found.length, 7);
+});
+
+test("a missing band is null and NAMED, never zero", () => {
+  // Zero is a real value for foreign net flow. Defaulting a missing field to it would make "no
+  // foreign participation today" indistinguishable from "this field was not in the payload".
+  const bands = extractBands("BBRI", { ara: 5200, fnet: 0 });
+
+  assert.equal(bands.ara, 5200);
+  assert.equal(bands.foreignNet, 0, "an explicit zero survives as zero");
+  assert.equal(bands.arb, null);
+  assert.ok(bands.missing.includes("arb"));
+  assert.ok(bands.found.includes("fnet"));
+  assert.ok(!bands.found.includes("arb"));
+});
+
+test("an empty string is null, not the zero Number('') would give", () => {
+  const bands = extractBands("BBRI", { ara: "", arb: "   ", fnet: "abc" });
+  assert.equal(bands.ara, null);
+  assert.equal(bands.arb, null);
+  assert.equal(bands.foreignNet, null);
+  assert.equal(bands.missing.length, 7);
+});
+
+test("a payload of the wrong shape yields nulls rather than throwing", () => {
+  for (const payload of [null, undefined, "nonsense", 42, []]) {
+    const bands = extractBands("BBRI", payload);
+    assert.equal(bands.symbol, "BBRI");
+    assert.equal(bands.ara, null);
+    assert.equal(bands.found.length, 0);
+  }
 });

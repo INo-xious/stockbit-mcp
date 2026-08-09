@@ -247,7 +247,7 @@ test("an optional step records its failure and the run continues", async () => {
 test("every built-in workflow is internally consistent", () => {
   const registered = new Set([
     "quote", "technicals", "price_chart", "broker_summary", "broker_distribution",
-    "alert_check", "top_movers", "pine_script",
+    "alert_check", "top_movers", "pine_script", "strategy_compare", "scan", "patterns",
   ]);
   for (const workflow of BUILTIN_WORKFLOWS) {
     assert.doesNotThrow(() => validateWorkflow(workflow, registered), `${workflow.name} is invalid`);
@@ -338,6 +338,28 @@ const REAL_TOOL_SHAPES: Record<string, unknown> = {
   },
   // the pine_script handler → written script paths
   pine_script: { symbol: "BBRI", scripts: [{ pane: "price", savedTo: "/tmp/BBRI.pine" }] },
+  // compareStrategies → { results, ranking, rankedBy, note }
+  strategy_compare: {
+    symbol: "BBRI",
+    ranking: [{ name: "sma_cross", rank: 1, totalReturnPct: 12.4, excessReturnPct: 3.1, sharpe: 0.8, maxDrawdownPct: 9, trades: 14 }],
+    results: [{ strategy: "sma_cross", metrics: { trades: 14 }, warnings: [] }],
+    rankedBy: "excessReturnPct",
+    note: "…",
+  },
+  // the scan handler → a ScanResult. `hits` is the array the fan-out walks.
+  scan: {
+    universe: { source: "topGainer hotlist", discovered: 12, evaluated: 12 },
+    conditions: ["close > sma20"],
+    hits: [
+      { symbol: "BRMS", date: "2026-08-05", close: 400, values: { close: 400, sma20: 380 }, matched: ["close > sma20"] },
+      { symbol: "ANTM", date: "2026-08-05", close: 1500, values: { close: 1500, sma20: 1450 }, matched: ["close > sma20"] },
+    ],
+    misses: [],
+    truncated: { symbols: 0, reason: null },
+    cost: { pagesFetched: 40, symbolsFetched: 12, elapsedMs: 6100 },
+  },
+  // detectPatterns, wrapped by the tool
+  patterns: { symbol: "BBRI", detections: [{ pattern: "hammer", index: 118, date: "2026-08-05" }], count: 1 },
 };
 
 /** The envelope `invokeTool` produces, so a built-in's `steps.<id>.data` path resolves for real. */

@@ -100,21 +100,91 @@ Register with your MCP client (e.g. Claude Desktop `mcpServers`):
 }
 ```
 
+## How this compares
+
+Two good MCP servers exist for TradingView: [atilaahmettaner/tradingview-mcp](https://github.com/atilaahmettaner/tradingview-mcp)
+(screener + backtesting, Python) and [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp)
+(drives the TradingView desktop app over the Chrome DevTools Protocol). Neither covers IDX in any
+depth, and neither has broker-flow data at all.
+
+| | atila | tradesdontlie | **stockbit-mcp** |
+|---|---|---|---|
+| **Broker-to-broker flow (*bandarmology*)** | — | — | ✅ *nobody else has this* |
+| IDX coverage | thin | thin | ✅ native |
+| Backtesting + walk-forward | ✅ | — | ✅ |
+| Candlestick patterns | ✅ | — | ✅ |
+| Multi-timeframe | ✅ | — | ✅ (daily→weekly→monthly; see the caveat below) |
+| Universe scan | ✅ | — | ✅ |
+| Pine generation | — | ✅ | ✅ |
+| Chart rendering | — | ✅ (screenshots) | ✅ (SVG, no browser) |
+| Alerts | — | ✅ | ✅ + a standalone daemon |
+| Drives a desktop app | — | ✅ | — *deliberately: see below* |
+| Needs a running desktop app | — | ✅ | — |
+
+**Why no desktop automation.** Stockbit Desktop is a Tauri/WKWebView app, so the CDP approach does
+not apply — and it is not needed, because the desktop app is a thin client over the same JSON API
+this server talks to. Writing chart drawings back to Stockbit was attempted, measured across nine
+variables, and found to be a server-side no-op: their own web bundle has no save path either. That
+is recorded in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
+
 ## Tools
+
+**Bandarmology** — the thing no other MCP has.
 
 | Tool | What it returns |
 |---|---|
-| `broker_summary` | Net buyers/sellers per broker (lots + IDR + foreign/local). The unique bandarmology signal. Optional `from`/`to` (`YYYY-MM-DD`) query any historical day or window — the server aggregates net flow across it in a single request. |
-| `broker_distribution` | Broker-to-broker flow, **always rendered as an SVG diagram** (dark or light) and written to `~/.stockbit/charts/`, laid out **buyer → seller** like Stockbit's own view: top buyers left, the sellers they bought from right. Each seller bar is that seller's true total. Returns the picture, not a table. Requires a Stockbit balance of Rp 10,000,000. |
-| `quote` | Last price + best bid/offer for a symbol |
-| `top_movers` | Top gainers / losers / most-active (empty when market closed) |
-| `trending` | Trending tickers |
-| `intraday_prices` | Minutely close-price series |
-| `price_performance` | 1D/1W/1M/… performance |
-| `orderbook` | Full depth ladder |
-| `keystats` / `ratios` / `financials` | Fundamentals |
-| `sentiment_stream` | Community posts about a symbol (sentiment proxy) |
-| `sectors` | IDX sector list |
+| `broker_summary` | Net buyers/sellers per broker (lots + IDR + foreign/local/govt). Optional `from`/`to` query any historical window — the server aggregates net flow across it in a single request. |
+| `broker_distribution` | Broker-to-broker flow, **always an SVG diagram** written to `~/.stockbit/charts/`, laid out buyer → seller like Stockbit's own view. Each seller bar is that seller's true total. Returns the picture, not a table. Requires a Stockbit balance of Rp 10,000,000. |
+
+**Strategy & analysis**
+
+| Tool | What it returns |
+|---|---|
+| `backtest` | Every trade a strategy would have taken, an equity curve, and metrics against buy-and-hold over the **same** window. Next-bar fills, stops win ties, gaps fill at the open, ARA/ARB-locked sessions cannot be filled. Optional walk-forward. Read `warnings` before quoting a number. |
+| `strategy_compare` | All nine built-in strategies over one history — one bar fetch — ranked by return *above* buy-and-hold. |
+| `technicals` | Indicator readings plus support/resistance from pivot clustering. |
+| `patterns` | 16 candlestick formations, each with the prior trend it was read against. `confidence` scores the shape, not the outcome. |
+| `timeframe_alignment` | Whether daily, weekly and monthly agree — and, in `limits`, exactly what the data cannot support. |
+| `scan` | One condition across many symbols. Misses distinguish "condition false" from "not enough history yet". |
+| `price_chart` | Candles + volume + overlays + RSI/MACD panels + annotations, as SVG. No browser involved. |
+| `pine_script` | TradingView Pine v6, with Stockbit-derived levels embedded as constants. |
+
+**Alerts** — `alert_create`, `alert_list`, `alert_delete`, `alert_check`, plus a standalone
+`stockbit-alerts` daemon (an MCP server only lives while a client holds it open).
+
+**Market data** — `quote`, `orderbook`, `price_bands` (ARA/ARB + foreign flow), `intraday_prices`,
+`price_performance`, `top_movers`, `trending`, `sectors`.
+
+**Fundamentals** — `keystats`, `ratios`, `financials`, `sentiment_stream`.
+
+**Chart state** — `chart_layout`, `chart_settings`, `stockbit_web`, and `chart_layout_save` (the one
+write, confirm-gated).
+
+**Workflows** — `workflow_list` / `workflow_run`: seven recipes including `deep_dive`,
+`bandar_watch`, `strategy_check` and `screen_and_dive`.
+
+### One grammar, three consumers
+
+`sma20 crosses above sma50` means exactly one thing here. The same condition is evaluated locally to
+fire an alert, replayed over history by the backtester, run across a universe by `scan`, and emitted
+as Pine for TradingView — all from one registry (`src/analysis/series.ts`) that carries each
+indicator's Pine expression and its local implementation side by side. Written twice, those drift:
+one gets a Wilder-smoothed RSI and the other a simple one, and then the alert fires on a day the
+chart says it should not have.
+
+### What this data cannot do
+
+Stated here rather than discovered at run time:
+
+- **Daily bars only.** Weekly and monthly are resampled from them. There is no 4H/1H/15m OHLC — the
+  intraday feed is a minutely *close-only* series for the current session.
+- **~500 sessions (about two years).** That is ~104 weekly and ~24 monthly bars, so a monthly
+  RSI(14) is reported as `null` rather than computed from a window that has not converged.
+- **Scans cost real time.** Throughput caps at roughly 6.6 upstream requests a second, so a
+  20-symbol moving-average screen takes ~15s and anything using `sma200` takes ~50s. Bar pages are
+  cached for six hours once settled, so a second scan over an overlapping universe is far cheaper.
+- **Walk-forward will usually say `inconclusive`** on real data, because three folds over two years
+  yields single-digit trade counts. That is the honest answer, not a bug.
 
 ## Development
 

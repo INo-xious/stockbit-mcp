@@ -31,18 +31,99 @@ import { addRule, loadRules, newRuleId, removeRule, updateRule } from "../alerts
 import { StockbitError } from "../http/errors.js";
 import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
 import {
+  OPERATORS,
   OVERLAY_NAMES,
   PANEL_NAMES,
   defineSeries,
   overlaysFrom,
   panelsFrom,
 } from "../analysis/series.js";
+import { backtest, compareStrategies } from "../analysis/backtest.js";
+import { walkForward, type Fold } from "../analysis/robustness.js";
+import { PRESET_IDS, presetSpec, type StrategySpec } from "../analysis/strategy.js";
+import { detectPatterns, type PatternId } from "../analysis/patterns.js";
+import { alignment } from "../analysis/timeframe.js";
+import { scan, symbolOf, type UniverseSource } from "../analysis/scan.js";
 import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
 
 /** Sub-panel titles, matching the periods `PANEL_PRESETS` declares. */
 const PANE_LABELS = { rsi: "RSI(14)", macd: "MACD(12,26,9)", atr: "ATR(14)" } as const;
+
+/**
+ * A strategy from tool arguments: a preset, or a hand-written condition pair.
+ *
+ * A preset that also carries stop/target/hold overrides is the common case, so the two are not
+ * exclusive — but a half-specified custom condition is refused rather than silently ignored, since
+ * a caller who passed `entry_left` and forgot `entry_op` would otherwise get a preset they did not
+ * ask for and no indication of it.
+ */
+function specFrom(a: {
+  strategy?: (typeof PRESET_IDS)[number];
+  overlays?: readonly string[];
+  panels?: readonly string[];
+  entry_left?: string | number;
+  entry_op?: (typeof OPERATORS)[number];
+  entry_right?: string | number;
+  exit_left?: string | number;
+  exit_op?: (typeof OPERATORS)[number];
+  exit_right?: string | number;
+  stop_loss_pct?: number;
+  take_profit_pct?: number;
+  max_hold_bars?: number;
+}): StrategySpec {
+  const custom = a.entry_left !== undefined || a.entry_op !== undefined || a.entry_right !== undefined;
+
+  let spec: StrategySpec;
+  if (custom) {
+    if (a.entry_left === undefined || a.entry_op === undefined || a.entry_right === undefined) {
+      throw new StockbitError(
+        "invalid_param",
+        "A custom entry needs all three of entry_left, entry_op and entry_right.",
+      );
+    }
+    const exitGiven = a.exit_left !== undefined || a.exit_op !== undefined || a.exit_right !== undefined;
+    if (exitGiven && (a.exit_left === undefined || a.exit_op === undefined || a.exit_right === undefined)) {
+      throw new StockbitError("invalid_param", "A custom exit needs all three of exit_left, exit_op and exit_right.");
+    }
+    spec = {
+      name: "custom",
+      overlays: overlaysFrom(a.overlays),
+      panels: panelsFrom(a.panels),
+      entry: { left: a.entry_left, op: a.entry_op, right: a.entry_right },
+      exit: exitGiven ? { left: a.exit_left!, op: a.exit_op!, right: a.exit_right! } : undefined,
+    };
+  } else if (a.strategy) {
+    spec = presetSpec(a.strategy);
+  } else {
+    throw new StockbitError(
+      "invalid_param",
+      `Pass a \`strategy\` (${PRESET_IDS.join(", ")}) or a custom entry_left/entry_op/entry_right.`,
+    );
+  }
+
+  if (a.stop_loss_pct !== undefined) spec.stopLossPct = a.stop_loss_pct;
+  if (a.take_profit_pct !== undefined) spec.takeProfitPct = a.take_profit_pct;
+  if (a.max_hold_bars !== undefined) spec.maxHoldBars = a.max_hold_bars;
+  return spec;
+}
+
+/** A fold without its two full backtests — those would be two trade logs and two equity curves. */
+function foldSummary(fold: Fold) {
+  return {
+    index: fold.index,
+    trainFrom: fold.trainFrom,
+    trainTo: fold.trainTo,
+    testFrom: fold.testFrom,
+    testTo: fold.testTo,
+    trainBars: fold.trainBars,
+    testBars: fold.testBars,
+    trainReturnPct: fold.train.metrics.totalReturnPct,
+    testReturnPct: fold.test.metrics.totalReturnPct,
+    testTrades: fold.test.metrics.trades,
+  };
+}
 
 export function registerTools(server: McpServer): void {
   /**
@@ -992,6 +1073,282 @@ export function registerTools(server: McpServer): void {
           message,
         };
       }),
+  );
+
+
+  /* ---------------------- backtesting, patterns & screening ---------------------- */
+
+  server.tool(
+    "backtest",
+    "Run a trading strategy over Stockbit's own daily history and report what it would actually " +
+      "have done: every trade, an equity curve, and metrics (return, CAGR, Sharpe, max drawdown, " +
+      "win rate, profit factor, expectancy, exposure) against buy-and-hold over the SAME window.\n" +
+      "Use a preset name, or supply your own entry/exit in the same condition grammar alert_create " +
+      "and pine_script use — so a backtested rule, a live alert and a TradingView strategy are one " +
+      "object rather than three that drift.\n" +
+      "The execution model is deliberately pessimistic and it matters: signals are read at the bar " +
+      "CLOSE and filled at the NEXT bar's open (never at the price the signal was computed from); a " +
+      "bar that hits both stop and target resolves to the STOP; a gap through a level fills at the " +
+      "open, not the level; and a session locked by IDX auto-rejection (high === low) cannot be " +
+      "filled at all. Costs default to Indonesian retail: 0.15% to buy, 0.25% to sell (the extra " +
+      "0.1% is the sale tax), plus 0.1% slippage, in whole 100-share lots.\n" +
+      "ALWAYS read `warnings` before quoting a number. Under ten trades it says so, and it means it.\n" +
+      "Set walk_forward for an out-of-sample check. Long-only: retail shorting is not available on IDX.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      strategy: z.enum(PRESET_IDS).optional().describe("A preset. Omit to supply entry/exit yourself."),
+      bars: z.coerce.number().optional().describe("Sessions of history (default 500, the practical maximum)"),
+      from: z.string().optional().describe("Earliest session, YYYY-MM-DD"),
+      to: z.string().optional().describe("Latest session, YYYY-MM-DD"),
+      overlays: z.array(z.enum(OVERLAY_NAMES)).optional().describe("Series the conditions reference"),
+      panels: z.array(z.enum(PANEL_NAMES)).optional().describe("Oscillators the conditions reference"),
+      entry_left: z.union([z.string(), z.coerce.number()]).optional().describe("Entry condition, left side"),
+      entry_op: z.enum(OPERATORS).optional(),
+      entry_right: z.union([z.string(), z.coerce.number()]).optional(),
+      exit_left: z.union([z.string(), z.coerce.number()]).optional().describe("Exit condition, left side"),
+      exit_op: z.enum(OPERATORS).optional(),
+      exit_right: z.union([z.string(), z.coerce.number()]).optional(),
+      stop_loss_pct: z.coerce.number().optional().describe("Percent below the fill price, e.g. 5"),
+      take_profit_pct: z.coerce.number().optional().describe("Percent above the fill price"),
+      max_hold_bars: z.coerce.number().optional().describe("Force an exit after this many bars"),
+      initial_capital: z.coerce.number().optional().describe("IDR, default 10,000,000"),
+      commission_buy_pct: z.coerce.number().optional().describe("Default 0.15"),
+      commission_sell_pct: z.coerce.number().optional().describe("Default 0.25 (includes the 0.1% sale tax)"),
+      slippage_pct: z.coerce.number().optional().describe("Default 0.1"),
+      walk_forward: z.boolean().optional().describe("Also run an out-of-sample check. Costs no extra requests."),
+      folds: z.coerce.number().optional().describe("Walk-forward folds, default 3"),
+      include_trades: z.boolean().optional().describe("Include the full trade log. Default true."),
+      include_equity: z.boolean().optional().describe("Include the equity curve, one point per bar. Default false."),
+    },
+    async (a) =>
+      runTool(async () => {
+        const spec = specFrom(a);
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 500, from: a.from, to: a.to });
+        const options = {
+          symbol: series.symbol,
+          initialCapital: a.initial_capital,
+          costs: {
+            ...(a.commission_buy_pct === undefined ? {} : { commissionBuyPct: a.commission_buy_pct }),
+            ...(a.commission_sell_pct === undefined ? {} : { commissionSellPct: a.commission_sell_pct }),
+            ...(a.slippage_pct === undefined ? {} : { slippagePct: a.slippage_pct }),
+          },
+        };
+
+        const result = backtest(series.bars, spec, options);
+        const walk = a.walk_forward ? walkForward(series.bars, spec, { folds: a.folds, backtest: options }) : undefined;
+
+        return {
+          ...result,
+          trades: a.include_trades === false ? undefined : result.trades,
+          equity: a.include_equity === true ? result.equity : undefined,
+          barsTruncated: series.truncated,
+          pagesFetched: series.pagesFetched,
+          walkForward: walk
+            ? { folds: walk.folds.map(foldSummary), inSample: walk.inSample, outOfSample: walk.outOfSample, efficiency: walk.efficiency, verdict: walk.verdict }
+            : undefined,
+        };
+      }),
+  );
+
+  server.tool(
+    "strategy_compare",
+    "Run every built-in strategy over ONE stock's history and rank them — the bars are fetched once " +
+      "for all nine, so this costs the same as a single backtest.\n" +
+      "Ranked by return ABOVE buy-and-hold over the same window and costs, not by raw return: over a " +
+      "rising window every long-only strategy shows a profit, and the only question worth asking is " +
+      "whether the trading added anything to owning the stock.\n" +
+      "Taking the winner of nine on one window is a SELECTION, not a finding. Run `backtest` with " +
+      "walk_forward on the winner before believing it.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce.number().optional().describe("Sessions of history (default 500)"),
+      from: z.string().optional(),
+      to: z.string().optional(),
+      strategies: z.array(z.enum(PRESET_IDS)).optional().describe("Which to compare. Default: all nine."),
+      stop_loss_pct: z.coerce.number().optional().describe("Applied to every strategy"),
+      take_profit_pct: z.coerce.number().optional(),
+      initial_capital: z.coerce.number().optional(),
+    },
+    async (a) =>
+      runTool(async () => {
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 500, from: a.from, to: a.to });
+        const specs = (a.strategies ?? PRESET_IDS).map((id) => {
+          const spec = presetSpec(id);
+          if (a.stop_loss_pct !== undefined) spec.stopLossPct = a.stop_loss_pct;
+          if (a.take_profit_pct !== undefined) spec.takeProfitPct = a.take_profit_pct;
+          return spec;
+        });
+
+        const comparison = compareStrategies(series.bars, specs, {
+          symbol: series.symbol,
+          initialCapital: a.initial_capital,
+        });
+        return {
+          ...comparison,
+          // The full result per strategy would be nine trade logs and nine equity curves; the
+          // ranking plus each one's warnings is what a caller can actually read.
+          results: comparison.results.map((r) => ({
+            strategy: r.strategy,
+            description: r.description,
+            metrics: r.metrics,
+            trades: r.metrics.trades,
+            warnings: r.warnings,
+          })),
+          pagesFetched: series.pagesFetched,
+        };
+      }),
+  );
+
+  server.tool(
+    "patterns",
+    "Candlestick patterns on an IDX stock's daily bars — 16 classic formations with the prior trend " +
+      "they were read against.\n" +
+      "The prior trend is PART of the pattern, not decoration: a hammer and a hanging man are the " +
+      "same candle, as are an inverted hammer and a shooting star, and only what came before them " +
+      "tells the two apart. Set ignore_context to see the raw shapes anyway.\n" +
+      "`confidence` scores how closely the candle matches the TEXTBOOK PROPORTIONS. It is not a " +
+      "probability, it is not backtested, and it says nothing about what happened next — use " +
+      "`backtest` for that question.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce.number().optional().describe("Sessions to search (default 120)"),
+      from: z.string().optional(),
+      to: z.string().optional(),
+      only: z.array(z.string()).optional().describe("Restrict to these pattern ids"),
+      min_confidence: z.coerce.number().optional().describe("0-1, default 0.5"),
+      ignore_context: z.boolean().optional().describe("Report reversal shapes regardless of prior trend. Default false."),
+      since: z.coerce.number().optional().describe("Only the last N sessions"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 120, from: a.from, to: a.to });
+        const detections = detectPatterns(series.bars, {
+          only: a.only as PatternId[] | undefined,
+          minConfidence: a.min_confidence,
+          ignoreContext: a.ignore_context,
+          since: a.since,
+        });
+        return {
+          symbol: series.symbol,
+          from: series.from,
+          to: series.to,
+          detections,
+          count: detections.length,
+          note:
+            "confidence scores the SHAPE against the textbook proportions. It is not a probability " +
+            "and says nothing about what followed.",
+        };
+      }),
+  );
+
+  server.tool(
+    "timeframe_alignment",
+    "Whether the daily, weekly and monthly views of a stock agree, and what each one can actually " +
+      "support.\n" +
+      "Stockbit serves DAILY bars only — weekly and monthly here are resampled from those sessions, " +
+      "not exchange-published candles. There is NO 4H/1H/15m data: the intraday feed is a minutely " +
+      "close-only series for the current session, with no open, high, low or history.\n" +
+      "About 500 sessions are reachable, which is ~104 weekly and ~24 monthly bars — so a monthly " +
+      "RSI(14) is reported as null rather than computed from a window that has not converged. The " +
+      "`limits` field says what could not be computed and why; read it.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce.number().optional().describe("Daily sessions to fold up (default 500 — monthly needs all of them)"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 500 });
+        return {
+          ...alignment(series.bars, { symbol: series.symbol }),
+          dailySessions: series.bars.length,
+          barsTruncated: series.truncated,
+          pagesFetched: series.pagesFetched,
+        };
+      }),
+  );
+
+  server.tool(
+    "scan",
+    "Run a condition across many IDX stocks at once — alert_check for stocks you have no rules for.\n" +
+      "COST: bars are the expensive part. Throughput is capped at roughly 6.6 upstream requests a " +
+      "second, so a 20-symbol moving-average screen takes ~15s and anything referencing sma200 takes " +
+      "~50s. Defaults are set at that honest ceiling; raising max_symbols much past 30 will time out " +
+      "before it finishes. A SECOND scan over an overlapping universe is far cheaper — bar pages are " +
+      "cached for six hours once settled — so sweep broadly once, then iterate on the condition.\n" +
+      "Misses distinguish `condition-false` from `warming-up` (not enough history to say yet) and " +
+      "`no-data`. Truncation is always reported with its reason, so a capped sweep never reads as a " +
+      "complete one.",
+    {
+      symbols: z.array(z.string()).optional().describe("Explicit tickers. Omit to use movers or trending."),
+      universe: z.enum(["symbols", "topGainer", "topLoser", "mostActive", "trending"]).optional().describe("Default symbols"),
+      overlays: z.array(z.enum(OVERLAY_NAMES)).optional(),
+      panels: z.array(z.enum(PANEL_NAMES)).optional(),
+      left: z.union([z.string(), z.coerce.number()]).describe("Condition left side, e.g. close"),
+      op: z.enum(OPERATORS),
+      right: z.union([z.string(), z.coerce.number()]).describe("Condition right side, e.g. sma20"),
+      report: z.array(z.string()).optional().describe("Series to report for each hit, e.g. [\"close\", \"rsi14\"]"),
+      max_symbols: z.coerce.number().optional().describe("Default 20. See the cost note."),
+      max_seconds: z.coerce.number().optional().describe("Default 45"),
+    },
+    async (a) =>
+      runTool(async () => {
+        const kind = a.universe ?? "symbols";
+        const universe: UniverseSource =
+          kind === "symbols"
+            ? { kind: "symbols", symbols: (a.symbols ?? []).map(normalizeSymbol) }
+            : kind === "trending"
+              ? { kind: "trending" }
+              : { kind: "movers", type: kind };
+
+        if (kind === "symbols" && (a.symbols ?? []).length === 0) {
+          throw new StockbitError("invalid_param", "Pass `symbols`, or set `universe` to a hotlist or trending.");
+        }
+
+        return scan(
+          {
+            universe,
+            overlays: overlaysFrom(a.overlays),
+            panels: panelsFrom(a.panels),
+            conditions: [{ left: a.left, op: a.op, right: a.right }],
+            report: a.report,
+            budget: {
+              ...(a.max_symbols === undefined ? {} : { maxSymbols: a.max_symbols }),
+              ...(a.max_seconds === undefined ? {} : { maxMs: a.max_seconds * 1000 }),
+            },
+          },
+          {
+            getBars: async (opts) => {
+              const series = await core.getBars(opts);
+              return { bars: series.bars, pagesFetched: series.pagesFetched };
+            },
+            resolveUniverse: async (u) => {
+              if (u.kind === "symbols") return u.symbols;
+              if (u.kind === "trending") return (await core.getTrending()).map(symbolOf);
+              if (u.kind === "movers") return (await core.getTopMovers(u.type, 50)).map(symbolOf);
+              // `watchlist` is declared in the universe type and not reachable from this tool: the
+              // route it needs has not been verified live yet, and a source that silently returns
+              // nothing would report "0 hits" as if it were a clean answer.
+              throw new StockbitError(
+                "invalid_param",
+                "The watchlist universe is not wired yet — its endpoint has not been verified against a live session.",
+              );
+            },
+            now: () => Date.now(),
+          },
+        );
+      }),
+  );
+
+  server.tool(
+    "price_bands",
+    "The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock.\n" +
+      "A stock at its ARA has no seller at any price and one at its ARB has no buyer — \"1,200 and " +
+      "rising\" means something different when 1,200 IS the ceiling. Costs no extra request: these " +
+      "fields already arrive inside the orderbook response.\n" +
+      "A field that was not in the payload is reported as null and named in `missing`, never as zero " +
+      "— zero is a real value for foreign net flow.",
+    { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
+    async (a) => runTool(() => core.getPriceBands(a.symbol)),
   );
 
   /* --------------------------------- workflows --------------------------------- */

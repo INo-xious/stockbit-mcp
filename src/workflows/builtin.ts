@@ -162,6 +162,92 @@ export const BUILTIN_WORKFLOWS: Workflow[] = [
       },
     ],
   },
+  {
+    name: "strategy_check",
+    description:
+      "Has this actually worked? Read the current technical state, run every built-in strategy over " +
+      "the same history, then generate TradingView Pine for the winner — one grammar the whole way, " +
+      "so the script you paste into TradingView fires on the condition that was measured.",
+    inputs: [
+      { name: "symbol", required: true, description: "IDX ticker" },
+      { name: "bars", required: false, description: "Sessions of history (default 500)" },
+    ],
+    steps: [
+      {
+        id: "technicals",
+        tool: "technicals",
+        describe: "Where the stock stands right now",
+        params: { symbol: "{{input.symbol}}", bars: "{{input.bars}}" },
+      },
+      {
+        id: "compare",
+        tool: "strategy_compare",
+        describe: "Every strategy over one history, ranked against buy-and-hold",
+        params: { symbol: "{{input.symbol}}", bars: "{{input.bars}}" },
+      },
+      {
+        id: "pine",
+        tool: "pine_script",
+        describe: "The winner as a TradingView script",
+        // The ranking's first row. Reading it from the result rather than re-deciding here is the
+        // point: the recipe cannot disagree with the comparison it just ran.
+        params: {
+          symbol: "{{input.symbol}}",
+          kind: "strategy",
+          title: "{{input.symbol}} — {{steps.compare.data.ranking.0.name}}",
+          overlays: ["sma20", "sma50"],
+          panels: ["rsi"],
+          include_levels: true,
+        },
+      },
+    ],
+  },
+
+  {
+    name: "screen_and_dive",
+    description:
+      "Sweep today's movers for a condition, then look properly at the ones that matched: technical " +
+      "readings and candlestick patterns for each hit, rather than a list of tickers to go and check " +
+      "by hand.",
+    // The condition is fixed rather than parameterised. The engine has no defaulting — an absent
+    // optional input interpolates to undefined and is dropped before the tool sees it — so an
+    // "optional" condition here would simply fail the scan's schema. And a workflow's value is
+    // reproducibility, not configurability: a caller who wants a different condition should call
+    // `scan` directly, which is one tool call rather than three.
+    inputs: [{ name: "max_symbols", required: false, description: "How many movers to sweep (default 20)" }],
+    steps: [
+      {
+        id: "scan",
+        tool: "scan",
+        describe: "Today's gainers, filtered to those trading above their 20-day average",
+        params: {
+          universe: "topGainer",
+          overlays: ["sma20"],
+          left: "close",
+          op: ">",
+          right: "sma20",
+          report: ["close", "sma20"],
+          max_symbols: "{{input.max_symbols}}",
+        },
+      },
+      {
+        id: "readings",
+        tool: "technicals",
+        describe: "Indicators for each hit",
+        forEach: "steps.scan.data.hits",
+        limit: 5,
+        params: { symbol: "{{item.symbol}}" },
+      },
+      {
+        id: "shapes",
+        tool: "patterns",
+        describe: "Candlestick patterns for each hit",
+        forEach: "steps.scan.data.hits",
+        limit: 5,
+        params: { symbol: "{{item.symbol}}", since: 10 },
+      },
+    ],
+  },
 ];
 
 export function findWorkflow(name: string): Workflow | undefined {

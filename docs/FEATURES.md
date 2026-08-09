@@ -13,6 +13,68 @@ Empty results on a weekend or public holiday are normal, not errors.
 
 ---
 
+
+## Strategy testing (added 2026-08-09)
+
+`backtest` runs a strategy over Stockbit's own daily history and reports every trade, an equity
+curve, and metrics against buy-and-hold over the *same* window. `strategy_compare` runs all nine
+presets over one bar fetch and ranks them by return above buy-and-hold.
+
+Entry and exit use the condition grammar `alert_create` and `pine_script` already share, so one
+strategy is a backtest, a live alert and a TradingView script rather than three things that drift.
+
+The execution model is deliberately pessimistic, and each choice avoids a specific way a backtest
+flatters itself:
+
+- signals read at the bar **close**, filled at the **next** bar's open — never at the price the
+  signal was computed from;
+- a bar that hits both stop and target resolves to the **stop**, because daily OHLC does not record
+  which came first;
+- a gap through a level fills at the **open**, not the level;
+- a session locked by IDX auto-rejection (`high === low`) **cannot be filled at all**;
+- buy-and-hold is measured from the strategy's own first tradeable bar, with the same costs;
+- Sharpe comes from the equity curve, never from trade returns, and `exposurePct` is reported
+  beside it.
+
+Costs default to Indonesian retail: 0.15% to buy, 0.25% to sell (the extra 0.1% is the sale tax),
+0.1% slippage, whole 100-share lots, 246 trading days a year. Long-only, because retail shorting is
+not available on IDX.
+
+**Read `warnings` before quoting anything.** Under ten trades it says so.
+
+`walk_forward` adds an out-of-sample check at no extra request cost. Its verdict reaches
+`inconclusive` before it can reach `robust` — and on ~500 real daily bars it usually will, because
+three folds of two years yields single-digit trade counts. That is the honest answer.
+
+## Patterns and timeframes (added 2026-08-09)
+
+`patterns` detects 16 candlestick formations. The prior trend is part of the pattern rather than
+decoration: a hammer and a hanging man are the same candle, and only what came before separates
+them. `confidence` scores how closely the candle matches the textbook proportions — it is not a
+probability and says nothing about what followed.
+
+`timeframe_alignment` folds daily bars into weekly and monthly and reports whether they agree.
+Stockbit serves daily bars only, so those are resampled, and there is **no** 4H/1H/15m OHLC — the
+intraday feed is a minutely close-only series for the current session. About 500 sessions are
+reachable, which is ~104 weekly and ~24 monthly bars, so a monthly RSI(14) is reported `null`
+rather than computed from a window that has not converged. The `limits` field says so in the
+payload.
+
+## Screening (added 2026-08-09)
+
+`scan` runs one condition across many symbols — `alert_check` for stocks you have no rules for.
+Misses distinguish `condition-false` from `warming-up` from `no-data`, and truncation always
+reports its reason so a capped sweep never reads as a complete one.
+
+Throughput caps at roughly 6.6 upstream requests a second, so a 20-symbol moving-average screen
+takes ~15s and anything using `sma200` takes ~50s. Bar pages are cached for six hours once settled,
+so a second scan over an overlapping universe costs about one page per symbol.
+
+`price_bands` reports the ARA/ARB auto-rejection band and the session's foreign flow, from fields
+already inside the orderbook response — no extra request. A field absent from the payload is `null`
+and named, never zero: zero is a real value for foreign net flow.
+
+
 ## Bandarmology
 
 The thing no free data source gives you: who actually bought and sold.

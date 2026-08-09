@@ -67,14 +67,14 @@
   <h1>stockbit-mcp — progress</h1>
   <p class="goal">An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks — showing the exact same data Stockbit shows.</p>
 
-  <div class="bar"><i style="width:86%"></i></div>
+  <div class="bar"><i style="width:78%"></i></div>
   <div class="meta">
-    <div class="stat"><b>6/7</b><span>features settled</span></div>
-    <div class="stat"><b>26</b><span>MCP tools</span></div>
-    <div class="stat"><b>357 passing</b><span>tests</span></div>
-    <div class="stat"><b>49</b><span>source files</span></div>
-    <div class="stat"><b>24</b><span>test files</span></div>
-    <div class="stat"><b><code>1dc475b</code></b><span>pushed to main</span></div>
+    <div class="stat"><b>7/9</b><span>features settled</span></div>
+    <div class="stat"><b>32</b><span>MCP tools</span></div>
+    
+    <div class="stat"><b>54</b><span>source files</span></div>
+    <div class="stat"><b>29</b><span>test files</span></div>
+    <div class="stat"><b><code>a2bd8fa</code></b><span>NOT pushed</span></div>
   </div>
 
   <h2>Features</h2>
@@ -84,8 +84,8 @@
           <h3>Chart analysis</h3>
           <span class="pill done">Done</span>
         </header>
-        <p>Daily candles with volume, SMA/EMA/Bollinger overlays, RSI and MACD sub-panels, support/resistance from pivot clustering. Rendered as zero-dependency SVG.</p>
-        <p class="tools"><code>technicals</code> <code>price_chart</code></p>
+        <p>Indicator readings, pivot-clustered support/resistance, SVG candles with overlays and sub-panels, 16 candlestick patterns, and daily/weekly/monthly alignment.</p>
+        <p class="tools"><code>patterns</code> <code>price_chart</code> <code>technicals</code> <code>timeframe_alignment</code></p>
         <p class="verified"><strong>Verified:</strong> Live: 220 sessions for BBRI in 19 requests; indicators computed and cross-checked.</p>
         
       </article>
@@ -148,6 +148,26 @@
         <p class="tools"><code>stockbit_web</code></p>
         
         
+      </article>
+      <article class="feature done">
+        <header>
+          <h3>Backtesting</h3>
+          <span class="pill done">Done</span>
+        </header>
+        <p>Nine preset strategies plus custom conditions in the same grammar the alerts and the Pine emitter share. Next-bar fills, stops win ties, gaps fill at the open, ARA/ARB-locked sessions are unfillable, buy-and-hold benchmarked over the same window. Walk-forward with a verdict that reaches 'inconclusive' before it reaches 'robust'.</p>
+        <p class="tools"><code>backtest</code> <code>strategy_compare</code></p>
+        <p class="verified"><strong>Verified:</strong> Absence of lookahead proved structurally: a backtest over the first N bars is a prefix of the backtest over all bars, asserted across nine presets, three cut points and 100+ trades.</p>
+        
+      </article>
+      <article class="feature partial">
+        <header>
+          <h3>Universe screening</h3>
+          <span class="pill partial">Partial</span>
+        </header>
+        <p>One condition across many symbols, with pre-dispatch budgets and honest truncation. Universe sources: explicit symbols, movers, trending.</p>
+        <p class="tools"><code>scan</code> <code>price_bands</code></p>
+        
+        <p class="blocker"><strong>Blocked:</strong> Watchlist and screener universes are designed but not wired — their endpoints have not been verified against a live session yet.</p>
       </article></div>
 
   <h2>Verified against live Stockbit</h2>
@@ -177,7 +197,7 @@
       <tr>
         <td>Read-only boundary holds</td>
         <td><span class="result pass">pass</span></td>
-        <td>POST /login/refresh is still the only non-GET route; no /chartbit/* path reachable by any method.</td>
+        <td>Three non-GET routes, all declared: POST /login/refresh (session only) plus the two ADR-0003 Chartbit writes, POST /chartbit/{symbol}/layout and POST /chartbit/template. No order, portfolio or withdrawal path is reachable by any method. test/transport.test.ts asserts the permitted set exactly.</td>
       </tr>
       <tr>
         <td>Broker distribution against live data</td>
@@ -197,18 +217,83 @@
   </table></div>
 
   <h2>Blocked on a decision</h2>
-  <ul class="plain"><li>Chartbit writes: POST /chartbit/{symbol}/layout OVERWRITES your saved chart and changes the project's read-only posture (ADR-0002). Needs your explicit yes — say 'enable the write'. The payload encoder, composer and round-trip are already built and tested; only the route and its apparatus (snapshot, verify, rollback, mutation log) are missing.</li><li>Composing brand-new drawings needs the TradingView line-tool schema (what `state` a LineToolHorzLine expects). Stockbit serves the charting library only to an authenticated chart page, so it could not be read the way the rest of the format was. Reading, round-tripping and modifying an existing layout does not need it.</li></ul>
+  <ul class="plain"><li>Chartbit writes are ENABLED under ADR-0003 with their full apparatus (snapshot, verify, rollback, mutation log) — and Stockbit's end discards them. Both POST routes answer 200 and store nothing; eliminated across nine variables, and their own web bundle has no save wiring either. Not a blocker this project can clear.</li><li>Composing brand-new drawings needs the TradingView line-tool schema (what `state` a LineToolHorzLine expects). Stockbit serves the charting library only to an authenticated chart page, so it could not be read the way the rest of the format was. Reading, round-tripping and modifying an existing layout does not need it.</li></ul>
 
   <h2>Worth knowing</h2>
-  <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li></ul>
+  <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li><li>2026-08-09: eight shipped defects fixed (morning_scan aborted on every run; top_movers sent a spelling Stockbit does not use; broker_summary sent three non-existent enums; getBars with `to` and no `from` returned a remnant of the requested window while reporting truncated:false). Then backtesting, walk-forward, candlestick patterns, multi-timeframe and universe scan. 496 tests, up from 362.</li></ul>
 
   <h2>Tools registered</h2>
-  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>chart_settings</code> <code>chart_layout_save</code> <code>workflow_list</code> <code>workflow_run</code></p>
+  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>chart_settings</code> <code>chart_layout_save</code> <code>backtest</code> <code>strategy_compare</code> <code>patterns</code> <code>timeframe_alignment</code> <code>scan</code> <code>price_bands</code> <code>workflow_list</code> <code>workflow_run</code></p>
 
   <h2>Recent commits</h2>
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>a2bd8fa</code></td>
+        <td class="date">2026-08-09</td>
+        <td>feat(analysis): candlestick patterns and honest multi-timeframe</td>
+      </tr>
+      <tr>
+        <td><code>cc24037</code></td>
+        <td class="date">2026-08-09</td>
+        <td>feat(analysis): backtesting and walk-forward, the gap that mattered</td>
+      </tr>
+      <tr>
+        <td><code>7bd5029</code></td>
+        <td class="date">2026-08-09</td>
+        <td>refactor(series): one registry for three consumers, and a measured warm-up</td>
+      </tr>
+      <tr>
+        <td><code>d013386</code></td>
+        <td class="date">2026-08-09</td>
+        <td>fix: eight defects, two of which made shipped features silently useless</td>
+      </tr>
+      <tr>
+        <td><code>f5f7d90</code></td>
+        <td class="date">2026-08-09</td>
+        <td>fix(desktop): stop macOS asking the user to locate browsers they do not have</td>
+      </tr>
+      <tr>
+        <td><code>ad149f3</code></td>
+        <td class="date">2026-08-09</td>
+        <td>chore(lock): record the stockbit-alerts bin the manifest already declares</td>
+      </tr>
+      <tr>
+        <td><code>73f33ba</code></td>
+        <td class="date">2026-08-08</td>
+        <td>docs: second research pass — and it found shipped code that does not work</td>
+      </tr>
+      <tr>
+        <td><code>3fe9b5b</code></td>
+        <td class="date">2026-08-08</td>
+        <td>docs: what else this server could do, with every endpoint probed live</td>
+      </tr>
+      <tr>
+        <td><code>2da70ed</code></td>
+        <td class="date">2026-08-08</td>
+        <td>Delete .claude directory</td>
+      </tr>
+      <tr>
+        <td><code>7494b48</code></td>
+        <td class="date">2026-08-07</td>
+        <td>feat(agents): a capability researcher that proposes rather than builds</td>
+      </tr>
+      <tr>
+        <td><code>36d6c4e</code></td>
+        <td class="date">2026-08-07</td>
+        <td>Update SECURITY.md with dependency security and reporting</td>
+      </tr>
+      <tr>
+        <td><code>2581084</code></td>
+        <td class="date">2026-08-05</td>
+        <td>docs: a feature guide and a session log</td>
+      </tr>
+      <tr>
+        <td><code>308cc01</code></td>
+        <td class="date">2026-08-05</td>
+        <td>fix(chartbit): retract the paywall explanation — the account IS eligible</td>
+      </tr>
       <tr>
         <td><code>1dc475b</code></td>
         <td class="date">2026-08-05</td>
@@ -268,76 +353,11 @@
         <td><code>82a4375</code></td>
         <td class="date">2026-08-05</td>
         <td>feat(alerts): a daemon that fires when nobody is asking</td>
-      </tr>
-      <tr>
-        <td><code>598ed05</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(workflows): saved multi-step recipes runnable as one call</td>
-      </tr>
-      <tr>
-        <td><code>8047a81</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(progress): a self-refreshing localhost progress report</td>
-      </tr>
-      <tr>
-        <td><code>1c4e52c</code></td>
-        <td class="date">2026-08-05</td>
-        <td>fix(levels): decide support vs resistance from where price is now, and stop splitting levels</td>
-      </tr>
-      <tr>
-        <td><code>5a8a28d</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(alerts): rule engine sharing one indicator registry with the Pine emitter</td>
-      </tr>
-      <tr>
-        <td><code>9cec027</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(pine): generate TradingView Pine v6 that plots the same numbers we report</td>
-      </tr>
-      <tr>
-        <td><code>3dd32e4</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(agents): add a bug-hunting subagent that reports rather than fixes</td>
-      </tr>
-      <tr>
-        <td><code>c1bee97</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(browser): show the real Stockbit page next to what we drew</td>
-      </tr>
-      <tr>
-        <td><code>34ad1e4</code></td>
-        <td class="date">2026-08-05</td>
-        <td>perf(bars): fetch a whole range in one request, verified against the paged endpoint</td>
-      </tr>
-      <tr>
-        <td><code>cfd9435</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(chart): candlestick renderer with overlays, sub-panels and annotations</td>
-      </tr>
-      <tr>
-        <td><code>49b41ae</code></td>
-        <td class="date">2026-08-05</td>
-        <td>fix(auth): serialise refresh across processes so rotation cannot lock the user out</td>
-      </tr>
-      <tr>
-        <td><code>c72ddfe</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(core): daily OHLCV bars and a technical-indicator library</td>
-      </tr>
-      <tr>
-        <td><code>b14409a</code></td>
-        <td class="date">2026-08-04</td>
-        <td>fix(chart): feed the counterparty remainder from an &quot;other buyers&quot; source</td>
-      </tr>
-      <tr>
-        <td><code>682a291</code></td>
-        <td class="date">2026-08-04</td>
-        <td>fix(chart): draw counterparty bars in two tones so the remainder is not blank space</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-05 13:23 UTC from
+    Generated 2026-08-09 08:30 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.
