@@ -59,8 +59,19 @@ test("the permitted request set is exactly this list", () => {
     // parameter rather than a path segment, so there is no `:symbol` here.
     "GET /order-trade/broker/distribution",
     "GET /paywall/eligibility/check",
+    // The screener, all READS. Running a saved screen is a plain GET — an earlier research pass
+    // assumed a POST and concluded this needed its own ADR; it does not. Creating or saving a
+    // screen is account state and is deliberately absent.
+    "GET /screener/metric",
+    "GET /screener/preset",
+    "GET /screener/templates",
+    "GET /screener/templates/:templateId",
+    "GET /screener/universe",
     "GET /stream/v3/symbol/:symbol",
     "GET /user-setting/configurations",
+    // The user's own watchlists. Reads only: adding to or removing from a list is account state.
+    "GET /watchlist",
+    "GET /watchlist/:watchlistId",
     "POST /chartbit/:symbol/layout",
     "POST /chartbit/template",
     "POST /login/refresh",
@@ -101,7 +112,7 @@ test("every write touches ONLY the session or the user's chart", () => {
 
 test("every declared route builds a URL the policy accepts", () => {
   for (const [name, route] of Object.entries(ROUTES)) {
-    const segments = { symbol: "BBRI", moverType: "topGainer" };
+    const segments = { symbol: "BBRI", moverType: "topGainer", watchlistId: "6252652", templateId: "5951939" };
     const url = buildUrl(name as keyof typeof ROUTES, segments);
     assert.ok(
       isPermitted(route.method, url),
@@ -258,6 +269,21 @@ test("a missing or invalid segment fails before any request is built", () => {
     () => resolvePath("emittenHotlist", { moverType: "topFlop" }),
     (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
   );
+});
+
+test("a numeric-id segment refuses anything that is not digits", () => {
+  // A watchlist or template id goes into the PATH, so a lax validator would be a path-traversal
+  // primitive on a bearer-carrying request. The URL parser resolves `..` before `isPermitted` sees
+  // it, but the right place to stop this is before the URL is built at all.
+  for (const bad of ["../../login", "6252652/../..", "abc", "", "6252652;drop", "-1", "1e3"]) {
+    assert.throws(
+      () => resolvePath("watchlistDetail", { watchlistId: bad }),
+      (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
+      `watchlistId ${JSON.stringify(bad)} should be refused`,
+    );
+  }
+  assert.equal(resolvePath("watchlistDetail", { watchlistId: "6252652" }), "/watchlist/6252652");
+  assert.equal(resolvePath("screenerRunTemplate", { templateId: "5951939" }), "/screener/templates/5951939");
 });
 
 test("REGRESSION: the hotlist path carries the spelling Stockbit's own client sends", () => {

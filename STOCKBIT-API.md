@@ -128,11 +128,38 @@ each `{accdist:"Big Acc"|…, amount, percent, vol}`.
 - `transaction_type`: `TRANSACTION_TYPE_NET` ✓ · likely `_BUY`, `_SELL`
 - `market_board`: `MARKET_BOARD_REGULER` ✓ · likely `_NEGOTIATED`, `_CASH`. **Use REGULER** for
   bandarmology (negotiated block trades distort accumulation signals).
-- `investor_type`: `INVESTOR_TYPE_ALL` ✓ · likely `_FOREIGN`, `_DOMESTIC`
-- `period`: **only** `BROKER_SUMMARY_PERIOD_LATEST` ✓ and `_UNSPECIFIED` ✓ are accepted. There are
-  **no** date-range period variants — an earlier revision of this document speculated otherwise and
-  was wrong. Swept and rejected: `_CUSTOM`, `_RANGE`, `_DATE_RANGE`, `_CUSTOM_DATE`, `_TODAY`,
-  `_DAILY`, `_WEEKLY`, `_1D`, `_1W`, `_1M`, `_3M`, `_6M`, `_1Y`, `_YTD`, `_ALL`, and every bare form.
+- `investor_type`: `INVESTOR_TYPE_ALL` ✓ · `_FOREIGN` · `_DOMESTIC`
+- `period` [**CORRECTED 2026-08-09, live**]: date-range variants **do** exist. A previous revision of
+  this document said only `_LATEST` and `_UNSPECIFIED` were accepted and that "there are no
+  date-range period variants"; `docs/CAPABILITY-RESEARCH.md` disagreed, and **the research doc was
+  right**. The earlier sweep tested plausible-sounding names (`_TODAY`, `_1W`, `_YTD`, `_ALL`, bare
+  forms) and none of them happen to be the real spellings, which is how a wrong conclusion survived
+  sixteen probes.
+
+  Measured, with the window each returns:
+
+  | value | | `data.from` → `data.to` |
+  |---|---|---|
+  | `BROKER_SUMMARY_PERIOD_LATEST` | ✅ | last session only |
+  | `BROKER_SUMMARY_PERIOD_UNSPECIFIED` | ✅ | identical to `_LATEST` |
+  | `BROKER_SUMMARY_PERIOD_YESTERDAY` | ✅ | the session before |
+  | `BROKER_SUMMARY_PERIOD_LAST_7_DAYS` | ✅ | 2026-08-01 → 2026-08-07 |
+  | `BROKER_SUMMARY_PERIOD_LAST_3_MONTHS` | ✅ | 2026-05-07 → 2026-08-07 |
+  | `BROKER_SUMMARY_PERIOD_YEAR_TO_DATE` | ✅ | 2026-01-02 → 2026-08-07 |
+  | `BROKER_SUMMARY_PERIOD_LAST_30_DAYS` | ❌ 400 | |
+  | `BROKER_SUMMARY_PERIOD_LAST_1_DAY` | ❌ 400 | |
+
+  This is a real capability, not a spelling note: the server aggregates net broker flow across the
+  whole window in **one request**, so "who accumulated year to date" costs the same as "who bought
+  today" and needs no dates computed client-side.
+- `transaction_type` [**CORRECTED 2026-08-09, live**]: `TRANSACTION_TYPE_NET` ✓ and
+  `TRANSACTION_TYPE_GROSS` ✓ — and they genuinely differ (BBRI top buyer ZP: 801,071 lots net vs
+  938,193 gross). `_BUY` and `_SELL` **400**; they never existed. Every response already carries
+  both sides as `brokers_buy` and `brokers_sell`.
+- `market_board` [**CORRECTED 2026-08-09, live**]: `MARKET_BOARD_REGULER` ✓ `_ALL` ✓ `_NEGO` ✓
+  `_TUNAI` ✓. `_NEGOTIATED` and `_CASH` **400** — those were English translations of the board
+  names, not the board names. Note the prefix differs from broker *distribution*, which uses
+  `MARKET_TYPE_` for the same four boards.
 
 #### Date ranges — `from` / `to` [CONFIRMED 2026-08-03, live]
 
@@ -442,3 +469,85 @@ when false, renders a blurred `broker-distribution-not-eligible-overlay` over pl
 **UNVERIFIED** — it could not be observed from an entitled account. Client code should therefore treat a `403` as *probably* the entitlement gate while preserving the
 server's own message — these routes also 403 on missing browser-shaped headers (see §3), so
 asserting the balance outright misdiagnoses a WAF block as an empty wallet.
+
+
+---
+
+## 11. Watchlist, screener and price bands [CONFIRMED 2026-08-09, live]
+
+Probed sequentially against a real account. All reads.
+
+### 11a. Watchlists
+
+```
+GET /watchlist                       → the user's lists
+GET /watchlist/{watchlist_id}?limit  → one list's contents
+```
+
+**The two endpoints have different response shapes and look interchangeable.** The index returns
+`data` as a bare array of lists; the detail wraps its rows in **`data.result`**. Assuming the array
+shape for both fails at the first real call.
+
+Index row: `watchlist_id`, `name`, `is_default`, `is_favorite`, `category_type`, `total_items`.
+
+> ⚠️ **`total_items` on the index is always 0**, whatever the list holds — the account probed had a
+> list reporting 0 and containing 116 symbols. Never use it as a count. `data.total` on the *detail*
+> endpoint is correct.
+
+> ⚠️ **`limit` is required** and capped at 500. Omitting it does not mean "everything".
+
+Detail row: `symbol`, `name`, `last`, `change`, `percent`, `previous`, `volume`, `id`, `orderbook`,
+`notations`, `uma`, `corp_action`, plus display metadata.
+
+> ⚠️ **`volume` here is in SHARES**, while `/company-price-feed/historical/summary` reports volume in
+> **LOTS** for the same stock on the same day. One lot is 100 shares; comparing them is a 100x error.
+
+### 11b. Screener — running a saved screen is a plain GET
+
+```
+GET /screener/templates                     → the user's saved screens
+GET /screener/templates/{id}?type=…         → RUNS one; returns matched companies
+GET /screener/metric                        → ~52KB catalogue of screenable fields
+GET /screener/preset                        → Stockbit's built-in Guru screens
+GET /screener/universe                      → index scopes (IHSG, IDX30, …)
+```
+
+An earlier research pass assumed running a screen required a POST and therefore its own ADR. **It
+does not** — it is a read, and nothing here creates, edits or saves a screen.
+
+`type` must match the template's own (`TEMPLATE_TYPE_CUSTOM` / `TEMPLATE_TYPE_GURU`); a custom screen
+run as GURU is simply not found. Results arrive as `data.calcs[]`, each with a `company` object and a
+`results[]` of projected metric columns.
+
+Creating or saving a screen is deliberately **not** in the route table.
+
+### 11c. ARA/ARB and foreign flow — already inside the orderbook response
+
+No new route. `GET /company-price-feed/v2/orderbook/companies/{SYMBOL}` already carries these, in
+**two different shapes**:
+
+```
+ara       {"value":"3,910","visible":true}     ← wrapped, string, thousands separator
+arb       {"value":"2,670","visible":true}
+next_ara  {"value":"3,910","visible":true}
+next_arb  {"value":"2,670","visible":true}
+fbuy      789081065000                          ← a bare number
+fsell     282200351000
+fnet      506880714000
+```
+
+Also present and unmapped: `iepiev`, `has_foreign_bs`, `total_bid_offer`, `market_data`,
+`autoreject_*`, `domestic`, `foreign`, `up`/`down`/`unchanged`.
+
+### 11d. `/charts/{SYMBOL}` — real, and still locked
+
+`GET /charts/BBRI` answers **400** with `errors: [{ key: "Timeframe" }]`, and `GET /charts/BBRI/daily`
+answers 400 `"Kurun waktu tidak valid"` ("time period is not valid"). By this document's own rule a
+400 naming a parameter means the route is real — but every timeframe spelling tried was rejected:
+`timeframe` / `tf` / `interval` / `resolution`, each with `daily`, `1D`, `D`, `DAILY`,
+`TIMEFRAME_DAILY`.
+
+Left unwired rather than guessed at further, exactly as `/chartbit/{symbol}/price/daily` was. It
+remains the highest-leverage unknown in the project: bars currently cost 12 rows a page, and a route
+returning a whole series in one request would change the cost of every scan, backtest and alignment
+by roughly 40x. It needs the front-end's exact call, not more guesses.

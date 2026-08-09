@@ -60,8 +60,20 @@ export const MOVER_WIRE = {
 
 export type MoverTypeName = keyof typeof MOVER_WIRE;
 
+/** A Stockbit numeric id, as a path segment. Digits only — never a caller-supplied path fragment. */
+function numericId(name: string) {
+  return (value: string): string => {
+    if (!/^[0-9]{1,20}$/.test(value)) {
+      throw new StockbitError("invalid_param", `Invalid ${name} ${JSON.stringify(value)}: expected a numeric id`);
+    }
+    return value;
+  };
+}
+
 const SEGMENT_VALIDATORS = {
   symbol: normalizeSymbol,
+  watchlistId: numericId("watchlist id"),
+  templateId: numericId("screener template id"),
   /**
    * Accepts either spelling and always returns the wire one.
    *
@@ -189,6 +201,37 @@ export const ROUTES = {
 
   /* -- social / sentiment -- */
   streamSymbol: { method: "GET", template: "/stream/v3/symbol/:symbol" },
+
+  /**
+   * The user's own watchlists, and their contents. READS.
+   *
+   * Verified live 2026-08-09: the index returns five lists, and `All Watchlist` holds 116 symbols.
+   * Traps worth knowing before touching the accessor — `limit` is required and capped at 500, and
+   * `total_items` in the index reports **0** for every list regardless of how many symbols it
+   * actually contains, so it must never be used as a count.
+   *
+   * This is the universe a user actually cares about, and until now the server had no way to learn
+   * which symbols those were.
+   */
+  watchlists: { method: "GET", template: "/watchlist" },
+  watchlistDetail: { method: "GET", template: "/watchlist/:watchlistId" },
+
+  /**
+   * The screener. All READS — running a screen does not mutate anything.
+   *
+   * Verified live 2026-08-09. `templates` lists the user's own saved screens and
+   * `templates/:templateId` RUNS one, returning matched companies with their metric values: a plain
+   * GET, no POST and no ADR required. `metric` is the ~52KB catalogue of screenable fields,
+   * `preset` the built-in Guru screens, and `universe` the index scopes (IHSG, IDX30, …).
+   *
+   * Creating or saving a screen is deliberately absent. Reading is analysis; writing is account
+   * state, and this table is where that line is drawn.
+   */
+  screenerTemplates: { method: "GET", template: "/screener/templates" },
+  screenerRunTemplate: { method: "GET", template: "/screener/templates/:templateId" },
+  screenerMetrics: { method: "GET", template: "/screener/metric" },
+  screenerPresets: { method: "GET", template: "/screener/preset" },
+  screenerUniverse: { method: "GET", template: "/screener/universe" },
 } as const satisfies Record<string, RouteSpec>;
 
 export type RouteName = keyof typeof ROUTES;

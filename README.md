@@ -114,7 +114,7 @@ depth, and neither has broker-flow data at all.
 | Backtesting + walk-forward | ✅ | — | ✅ |
 | Candlestick patterns | ✅ | — | ✅ |
 | Multi-timeframe | ✅ | — | ✅ (daily→weekly→monthly; see the caveat below) |
-| Universe scan | ✅ | — | ✅ |
+| Universe scan | ✅ | — | ✅ (incl. your own watchlist and saved screens) |
 | Pine generation | — | ✅ | ✅ |
 | Chart rendering | — | ✅ (screenshots) | ✅ (SVG, no browser) |
 | Alerts | — | ✅ | ✅ + a standalone daemon |
@@ -154,6 +154,9 @@ is recorded in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
 
 **Market data** — `quote`, `orderbook`, `price_bands` (ARA/ARB + foreign flow), `intraday_prices`,
 `price_performance`, `top_movers`, `trending`, `sectors`.
+
+**Your own account** — `watchlist` (your lists, and what's in them) and `screener` (your saved
+screens, and running one). Both read-only. `scan` can sweep a watchlist directly.
 
 **Fundamentals** — `keystats`, `ratios`, `financials`, `sentiment_stream`.
 

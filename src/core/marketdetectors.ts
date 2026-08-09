@@ -31,6 +31,42 @@ import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput
  *
  * A wrong enum here does not 400. It comes back 200 with numbers, which is why this went unnoticed.
  */
+/**
+ * Preset windows, the alternative to `from`/`to`.
+ *
+ * Measured against a live account on 2026-08-09, which settled a direct contradiction between two
+ * of this project's own documents: `STOCKBIT-API.md` §4a claimed a 16-candidate sweep had left only
+ * `_LATEST` and `_UNSPECIFIED`, and `docs/CAPABILITY-RESEARCH.md` claimed eleven. **The research
+ * doc was right and the catalogue was wrong.** What the endpoint actually accepts:
+ *
+ * ```
+ *   LATEST         200   from = to = the last session
+ *   UNSPECIFIED    200   identical to LATEST
+ *   YESTERDAY      200   the session before
+ *   LAST_7_DAYS    200   2026-08-01 → 2026-08-07
+ *   YEAR_TO_DATE   200   2026-01-02 → 2026-08-07
+ *   LAST_3_MONTHS  200   2026-05-07 → 2026-08-07
+ *   LAST_30_DAYS   400
+ *   LAST_1_DAY     400
+ * ```
+ *
+ * This matters more than a spelling correction. The server aggregates net broker flow across the
+ * whole window in ONE request, so "who accumulated year to date" costs exactly as much as "who
+ * bought today" — and it needed no dates worked out client-side.
+ *
+ * Mutually exclusive with `from`/`to`, and violating that fails SILENTLY: the API ignores the dates
+ * and answers 200 with the latest session. See `paramsFor`.
+ */
+export const BROKER_SUMMARY_PERIODS = [
+  "LATEST",
+  "YESTERDAY",
+  "LAST_7_DAYS",
+  "LAST_3_MONTHS",
+  "YEAR_TO_DATE",
+] as const;
+
+export type BrokerSummaryPeriod = (typeof BROKER_SUMMARY_PERIODS)[number];
+
 export const TRANSACTION_TYPES = ["NET", "GROSS"] as const;
 export const MARKET_BOARDS = ["REGULER", "ALL", "NEGO", "TUNAI"] as const;
 export const INVESTOR_TYPES = ["ALL", "FOREIGN", "DOMESTIC"] as const;
@@ -41,6 +77,8 @@ export type InvestorType = (typeof INVESTOR_TYPES)[number];
 
 export interface BrokerSummaryOptions extends DateRangeInput {
   symbol: string;
+  /** Preset window. Ignored when `from`/`to` are given — the two are mutually exclusive. */
+  period?: BrokerSummaryPeriod;
   transactionType?: TransactionType;
   marketBoard?: MarketBoard;
   investorType?: InvestorType;
@@ -78,7 +116,7 @@ function paramsFor(
   };
   return range
     ? { ...base, from: range.from, to: range.to }
-    : { ...base, period: "BROKER_SUMMARY_PERIOD_LATEST" };
+    : { ...base, period: `BROKER_SUMMARY_PERIOD_${opts.period ?? "LATEST"}` };
 }
 
 export function buildBrokerSummaryParams(opts: BrokerSummaryOptions): Record<string, string | number> {

@@ -181,12 +181,21 @@ export function registerTools(server: McpServer): void {
             "negotiated blocks and can be several times larger. NEGO and TUNAI select those boards alone.",
         ),
       investor_type: z.enum(core.INVESTOR_TYPES).optional().describe("Default ALL"),
+      period: z
+        .enum(core.BROKER_SUMMARY_PERIODS)
+        .optional()
+        .describe(
+          "Preset window instead of from/to — LATEST (default), YESTERDAY, LAST_7_DAYS, " +
+            "LAST_3_MONTHS, YEAR_TO_DATE. The server aggregates the whole window in ONE request, so " +
+            "YEAR_TO_DATE costs the same as today. Ignored when from/to are given.",
+        ),
     },
     async (a) =>
       runTool(() =>
         core.getBrokerSummary({
           symbol: a.symbol,
           limit: a.limit,
+          period: a.period,
           transactionType: a.transaction_type,
           marketBoard: a.market_board,
           investorType: a.investor_type,
@@ -1280,7 +1289,11 @@ export function registerTools(server: McpServer): void {
       "complete one.",
     {
       symbols: z.array(z.string()).optional().describe("Explicit tickers. Omit to use movers or trending."),
-      universe: z.enum(["symbols", "topGainer", "topLoser", "mostActive", "trending"]).optional().describe("Default symbols"),
+      universe: z
+        .enum(["symbols", "watchlist", "topGainer", "topLoser", "mostActive", "trending"])
+        .optional()
+        .describe("Default symbols. `watchlist` sweeps your own list — usually the one you want."),
+      watchlist_id: z.string().optional().describe("Which watchlist, from the `watchlist` tool. Defaults to your default list."),
       overlays: z.array(z.enum(OVERLAY_NAMES)).optional(),
       panels: z.array(z.enum(PANEL_NAMES)).optional(),
       left: z.union([z.string(), z.coerce.number()]).describe("Condition left side, e.g. close"),
@@ -1296,9 +1309,11 @@ export function registerTools(server: McpServer): void {
         const universe: UniverseSource =
           kind === "symbols"
             ? { kind: "symbols", symbols: (a.symbols ?? []).map(normalizeSymbol) }
-            : kind === "trending"
-              ? { kind: "trending" }
-              : { kind: "movers", type: kind };
+            : kind === "watchlist"
+              ? { kind: "watchlist", id: a.watchlist_id }
+              : kind === "trending"
+                ? { kind: "trending" }
+                : { kind: "movers", type: kind };
 
         if (kind === "symbols" && (a.symbols ?? []).length === 0) {
           throw new StockbitError("invalid_param", "Pass `symbols`, or set `universe` to a hotlist or trending.");
@@ -1325,13 +1340,7 @@ export function registerTools(server: McpServer): void {
               if (u.kind === "symbols") return u.symbols;
               if (u.kind === "trending") return (await core.getTrending()).map(symbolOf);
               if (u.kind === "movers") return (await core.getTopMovers(u.type, 50)).map(symbolOf);
-              // `watchlist` is declared in the universe type and not reachable from this tool: the
-              // route it needs has not been verified live yet, and a source that silently returns
-              // nothing would report "0 hits" as if it were a clean answer.
-              throw new StockbitError(
-                "invalid_param",
-                "The watchlist universe is not wired yet — its endpoint has not been verified against a live session.",
-              );
+              return core.getWatchlistSymbols(u.id);
             },
             now: () => Date.now(),
           },
@@ -1349,6 +1358,68 @@ export function registerTools(server: McpServer): void {
       "— zero is a real value for foreign net flow.",
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
     async (a) => runTool(() => core.getPriceBands(a.symbol)),
+  );
+
+
+  server.tool(
+    "watchlist",
+    "The user's own Stockbit watchlists, and the symbols in one.\n" +
+      "Call with no arguments to list them; pass `id` to read a list's contents. This is usually the " +
+      "universe a user means by \"my stocks\" — `scan` can sweep it directly with universe=watchlist.\n" +
+      "Note `volume` here is in SHARES, while daily bars report volume in LOTS (1 lot = 100 shares). " +
+      "The field is named `volumeShares` so the two are never compared by accident.",
+    {
+      id: z.string().optional().describe("Watchlist id. Omit to list all watchlists."),
+      limit: z.coerce.number().optional().describe("Max symbols (default and cap 500)"),
+    },
+    async (a) =>
+      runTool(async () => {
+        if (!a.id) {
+          const lists = await core.getWatchlists();
+          return {
+            watchlists: lists,
+            count: lists.length,
+            note:
+              "Stockbit reports total_items as 0 for every list regardless of contents, so it is " +
+              "not returned. Pass an `id` to see what a list actually holds.",
+          };
+        }
+        return core.getWatchlist(a.id, a.limit);
+      }),
+  );
+
+  server.tool(
+    "screener",
+    "Stockbit's stock screener — the user's own saved screens, and the results of running one.\n" +
+      "Call with no arguments to list saved screens; pass `template_id` (and the `type` from the " +
+      "listing) to RUN one and get the matching stocks with their metric values. Running a screen is " +
+      "a read: nothing is created, edited or saved.\n" +
+      "This is IDX-specific in a way no TradingView screener can match — the metric catalogue " +
+      "includes a Bandarmology group built on broker-level flow. Use `catalogue` to see what can be " +
+      "screened on, or `presets` for Stockbit's built-in Guru screens.",
+    {
+      template_id: z.string().optional().describe("Run this saved screen. Omit to list them."),
+      type: z.string().optional().describe("From the listing, e.g. TEMPLATE_TYPE_CUSTOM. Must match the template's own."),
+      limit: z.coerce.number().optional().describe("Cap the matches returned"),
+      catalogue: z.boolean().optional().describe("Return the screenable-metric catalogue instead (large)"),
+      presets: z.boolean().optional().describe("Return Stockbit's built-in screens instead"),
+      universe: z.boolean().optional().describe("Return the index scopes a screen can be limited to"),
+    },
+    async (a) =>
+      runTool(async () => {
+        if (a.catalogue) return { metrics: await core.getScreenerMetrics() };
+        if (a.presets) return { presets: await core.getScreenerPresets() };
+        if (a.universe) return { universe: await core.getScreenerUniverse() };
+        if (!a.template_id) {
+          const templates = await core.getScreenerTemplates();
+          return {
+            templates,
+            count: templates.length,
+            note: "Pass template_id AND the matching type to run one.",
+          };
+        }
+        return core.runScreenerTemplate(a.template_id, a.type ?? "TEMPLATE_TYPE_CUSTOM", a.limit);
+      }),
   );
 
   /* --------------------------------- workflows --------------------------------- */

@@ -100,12 +100,25 @@ export async function getOrderbook(symbol: string): Promise<unknown> {
  * different when 1,200 *is* the ceiling. It is also the same condition `src/analysis/backtest.ts`
  * refuses to fill against, so having it available as a live reading keeps the two consistent.
  *
- * ## Field names are looked for, not assumed
+ * ## Verified live, and the shape was not what it looked like
  *
- * The spellings below come from Stockbit's own bundle rather than from a live response, so each is
- * tried and the ones that were actually present are reported in `found`. A missing field is `null`
- * and named in `missing` — never zero, and never quietly dropped. Zero is a real value for foreign
- * net flow and would be indistinguishable from "this field was not in the payload".
+ * Probed against BBRI on 2026-08-09. The two families arrive in **different shapes**, which is
+ * exactly the kind of thing that is invisible until it is measured:
+ *
+ * ```
+ *   ara      {"value":"3,910","visible":true}     ← wrapped, string, thousands separator
+ *   arb      {"value":"2,670","visible":true}
+ *   next_ara {"value":"3,910","visible":true}
+ *   next_arb {"value":"2,670","visible":true}
+ *   fbuy     789081065000                          ← a bare number
+ *   fsell    282200351000
+ *   fnet     506880714000
+ * ```
+ *
+ * The first draft of this handled a `{raw}` wrapper and a bare number and would have reported all
+ * four bands as missing. It did not report them as *zero*, which is the point of the `found` /
+ * `missing` split: a wrong guess about shape surfaced as "this field was not in the payload"
+ * rather than as a confident 0 for the auto-rejection ceiling.
  */
 export interface PriceBands {
   symbol: string;
@@ -138,10 +151,11 @@ const BAND_FIELDS = {
 } as const;
 
 /**
- * Read a numeric field that may arrive as a number, a string, or a `{raw}` wrapper.
+ * Read a numeric field that may arrive as a number, a string, a `{value}` wrapper or a `{raw}` one.
  *
- * Stockbit uses all three shapes across this API, and `Number("")` is 0 — so an empty string
- * silently becoming zero is exactly the failure this guards. Anything not parseable is `null`.
+ * All four shapes are live in this API — the bands use `{value: "3,910"}` while the foreign figures
+ * beside them are bare numbers. Thousands separators are stripped, and `Number("")` being 0 is
+ * exactly the trap this guards: an empty string must be "absent", not a free zero.
  */
 function numberish(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -151,7 +165,11 @@ function numberish(value: unknown): number | null {
     const parsed = Number(trimmed.replace(/,/g, ""));
     return Number.isFinite(parsed) ? parsed : null;
   }
-  if (value && typeof value === "object" && "raw" in value) return numberish((value as { raw: unknown }).raw);
+  if (value && typeof value === "object") {
+    const wrapper = value as Record<string, unknown>;
+    if ("value" in wrapper) return numberish(wrapper.value);
+    if ("raw" in wrapper) return numberish(wrapper.raw);
+  }
   return null;
 }
 

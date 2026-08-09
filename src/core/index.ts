@@ -1,5 +1,7 @@
 /** Public core API — the logic layer shared by MCP tools (and any future CLI / watch daemon). */
 export * from "./marketdetectors.js";
+export * from "./watchlist.js";
+export * from "./screener.js";
 export * from "./brokerdistribution.js";
 export * from "./emitten.js";
 export * from "./pricefeed.js";
