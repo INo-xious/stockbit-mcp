@@ -70,11 +70,11 @@
   <div class="bar"><i style="width:78%"></i></div>
   <div class="meta">
     <div class="stat"><b>7/9</b><span>features settled</span></div>
-    <div class="stat"><b>32</b><span>MCP tools</span></div>
+    <div class="stat"><b>34</b><span>MCP tools</span></div>
     
-    <div class="stat"><b>54</b><span>source files</span></div>
-    <div class="stat"><b>29</b><span>test files</span></div>
-    <div class="stat"><b><code>a2bd8fa</code></b><span>NOT pushed</span></div>
+    <div class="stat"><b>57</b><span>source files</span></div>
+    <div class="stat"><b>31</b><span>test files</span></div>
+    <div class="stat"><b><code>03cae0e</code></b><span>NOT pushed</span></div>
   </div>
 
   <h2>Features</h2>
@@ -223,12 +223,27 @@
   <ul class="plain"><li>The Chartbit daily-price route was added and then removed: it answers HTTP 200 but returns an empty payload for every parameterization tried. The runtime cross-check rejected it and fell back, so no wrong bar was ever produced.</li><li>Two sub-agents are installed for this project: stockbit-verifier (does each feature do what was asked) and stockbit-bug-hunter (what is wrong that nobody asked about).</li><li>2026-08-09: eight shipped defects fixed (morning_scan aborted on every run; top_movers sent a spelling Stockbit does not use; broker_summary sent three non-existent enums; getBars with `to` and no `from` returned a remnant of the requested window while reporting truncated:false). Then backtesting, walk-forward, candlestick patterns, multi-timeframe and universe scan. 496 tests, up from 362.</li></ul>
 
   <h2>Tools registered</h2>
-  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>chart_settings</code> <code>chart_layout_save</code> <code>backtest</code> <code>strategy_compare</code> <code>patterns</code> <code>timeframe_alignment</code> <code>scan</code> <code>price_bands</code> <code>workflow_list</code> <code>workflow_run</code></p>
+  <p><code>broker_summary</code> <code>broker_distribution</code> <code>alert_create</code> <code>alert_list</code> <code>alert_delete</code> <code>alert_check</code> <code>pine_script</code> <code>stockbit_web</code> <code>technicals</code> <code>price_chart</code> <code>quote</code> <code>top_movers</code> <code>trending</code> <code>sectors</code> <code>intraday_prices</code> <code>price_performance</code> <code>orderbook</code> <code>keystats</code> <code>ratios</code> <code>financials</code> <code>sentiment_stream</code> <code>chart_layout</code> <code>chart_settings</code> <code>chart_layout_save</code> <code>backtest</code> <code>strategy_compare</code> <code>patterns</code> <code>timeframe_alignment</code> <code>scan</code> <code>price_bands</code> <code>watchlist</code> <code>screener</code> <code>workflow_list</code> <code>workflow_run</code></p>
 
   <h2>Recent commits</h2>
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>03cae0e</code></td>
+        <td class="date">2026-08-09</td>
+        <td>feat: wire the endpoints the live probes confirmed</td>
+      </tr>
+      <tr>
+        <td><code>fe8bc29</code></td>
+        <td class="date">2026-08-09</td>
+        <td>docs: record the analytics work and what still needs a live session</td>
+      </tr>
+      <tr>
+        <td><code>ea40d1b</code></td>
+        <td class="date">2026-08-09</td>
+        <td>feat(tools): expose the analytics, and say what the data cannot do</td>
+      </tr>
       <tr>
         <td><code>a2bd8fa</code></td>
         <td class="date">2026-08-09</td>
@@ -338,26 +353,11 @@
         <td><code>1b8b31d</code></td>
         <td class="date">2026-08-05</td>
         <td>feat(layout): build and test the Chartbit save payload, without a write route</td>
-      </tr>
-      <tr>
-        <td><code>3e83515</code></td>
-        <td class="date">2026-08-05</td>
-        <td>docs: recover the Chartbit layout format from Stockbit's own bundle</td>
-      </tr>
-      <tr>
-        <td><code>18e9568</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(layout): read the user's own Stockbit drawings as analysis context</td>
-      </tr>
-      <tr>
-        <td><code>82a4375</code></td>
-        <td class="date">2026-08-05</td>
-        <td>feat(alerts): a daemon that fires when nobody is asking</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-09 08:30 UTC from
+    Generated 2026-08-09 11:35 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.
