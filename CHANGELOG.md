@@ -8,6 +8,52 @@ from naming.
 
 ## Unreleased
 
+### Analytics parity with the TradingView MCPs (2026-08-09)
+
+Six new tools — `backtest`, `strategy_compare`, `patterns`, `timeframe_alignment`, `scan`,
+`price_bands` — plus two workflows. 32 tools, 498 tests.
+
+**Eight shipped defects fixed first.** Two of them meant an advertised feature had never worked:
+`morning_scan` aborted on every single run (it fanned out over `steps.movers.data.results`, but
+`top_movers` returns its rows as `data`), and `top_movers` sent a camelCase spelling this project
+invented while Stockbit's own client sends `topgainer` — the endpoint answers 200 with an empty
+list, and the tool's description explained an empty hotlist away as a closed market, so a request
+that never worked looked exactly like one that did. Also: three `broker_summary` enum values that
+do not exist upstream (`BUY`/`SELL` where the modes are `NET`/`GROSS`; `NEGOTIATED`/`CASH` where
+the boards are `NEGO`/`TUNAI`, with `ALL` missing entirely); `getBars` with `to` and no `from`
+returning 4 bars where 24 were asked for while reporting `truncated: false`; doc comments saying
+"shares" where the runtime means lots; `sectors` dropping every field but three, including the
+`parent` its own schema declared; a grammar invariant claimed in a comment and not held; and
+`stockbit-auth status` reporting a dead token as healthy because it read the JWT expiry rather than
+trying a refresh.
+
+**Backtesting.** Entry and exit use the condition grammar the alerts and the Pine emitter already
+share, so one strategy is a local backtest, a live alert and a TradingView script rather than three
+that drift. The execution model is the feature: signals read at the bar close and fill at the
+**next** bar's open, stops win ties on an ambiguous bar, gaps fill at the open rather than the
+level, and an ARA/ARB-locked session cannot be filled at all. Absence of lookahead is proved
+structurally — a backtest over the first N bars must be a prefix of the backtest over all of them.
+
+**Walk-forward**, with two things it would be easy to get wrong: efficiency is measured **per bar**
+(dividing total returns compares a 65% train segment against a 35% test segment, which scored a
+deliberately stationary series at 0.54 and would have graded every honest result "overfit"), and
+`inconclusive` is checked before any other verdict. On ~500 real daily bars it usually will be.
+
+**Warm-up arithmetic, measured rather than assumed.** SMA and Bollinger terminate, so an SMA 50
+needs 51 bars and not the 151 the old flat 3× asked for — five upstream pages instead of thirteen
+per symbol, which is what makes a universe scan viable. Wilder and EMA converge, and 3× is *not*
+enough: the residual at 3× is 2.75 RSI points, the difference between 29.9 and 32.6 and therefore
+between a screen hit and a miss. Raised to a measured 5×.
+
+**One vocabulary.** The overlay/panel preset table was declared three times — twice identically in
+`register.ts` and once hand-rolled inside `price_chart`, which had fallen behind and drew no
+`ema50` and no ATR panel. A chart that silently omits a line the alert it explains references is
+worse than one that refuses the argument.
+
+Still pending live verification (the stored token was already dead): the watchlist and screener
+routes, the two enum fixes, and the ARA/ARB field spellings. See `docs/PENDING-VERIFICATION.md`.
+
+
 ### Fixed — counterparty bars are now fully connected
 
 A counterparty's bar is its TRUE total, but the drawn buyers explain only part of it — 23–44% on a
