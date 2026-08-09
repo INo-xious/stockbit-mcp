@@ -78,9 +78,18 @@ export function registerTools(server: McpServer): void {
       start_date: z.string().optional().describe("Alias for `from`."),
       end_date: z.string().optional().describe("Alias for `to`."),
       limit: z.coerce.number().optional().describe("Max brokers per side (default 50; API default 25 truncates)"),
-      transaction_type: z.enum(["NET", "BUY", "SELL"]).optional().describe("Default NET"),
-      market_board: z.enum(["REGULER", "NEGOTIATED", "CASH"]).optional().describe("Default REGULER (use for bandarmology)"),
-      investor_type: z.enum(["ALL", "FOREIGN", "DOMESTIC"]).optional().describe("Default ALL"),
+      transaction_type: z
+        .enum(core.TRANSACTION_TYPES)
+        .optional()
+        .describe("NET (default) nets each broker's buys against its sells; GROSS does not."),
+      market_board: z
+        .enum(core.MARKET_BOARDS)
+        .optional()
+        .describe(
+          "Default REGULER — the ordinary order book, and what bandarmology means. ALL folds in " +
+            "negotiated blocks and can be several times larger. NEGO and TUNAI select those boards alone.",
+        ),
+      investor_type: z.enum(core.INVESTOR_TYPES).optional().describe("Default ALL"),
     },
     async (a) =>
       runTool(() =>

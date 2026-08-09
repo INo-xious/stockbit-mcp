@@ -260,6 +260,27 @@ test("a missing or invalid segment fails before any request is built", () => {
   );
 });
 
+test("REGRESSION: the hotlist path carries the spelling Stockbit's own client sends", () => {
+  // This project invented `topGainer` for its tool schema and then sent it on the wire. The
+  // endpoint answered 200 with an empty list — not 404 — and the tool's own description explained
+  // an empty hotlist away as a closed market. So a request that never returned a row looked exactly
+  // like a correct one, for the whole life of the tool.
+  //
+  // The friendly name stays in the schema; only the wire spelling is asserted here.
+  assert.equal(new URL(buildUrl("emittenHotlist", { moverType: "topGainer" })).pathname, "/emitten/hotlist/topgainer");
+  assert.equal(new URL(buildUrl("emittenHotlist", { moverType: "topLoser" })).pathname, "/emitten/hotlist/toploser");
+  assert.equal(
+    new URL(buildUrl("emittenHotlist", { moverType: "mostActive" })).pathname,
+    "/emitten/hotlist/mostactive",
+  );
+
+  // `isPermitted` re-validates the path it judges, so the validator has to accept its own output.
+  // Without that, the policy check would reject every hotlist URL the builder produced.
+  for (const wire of ["topgainer", "toploser", "mostactive"]) {
+    assert.equal(isPermitted("GET", `https://exodus.stockbit.com/emitten/hotlist/${wire}`), true, wire);
+  }
+});
+
 test("query params are appended, and null/undefined dropped", () => {
   const url = new URL(
     buildUrl("pricesClose", undefined, { symbol: "BBRI", interval: 1, skip: null, gone: undefined }),

@@ -6,7 +6,12 @@ import {
   normalizeTradeDate,
   todayIso,
 } from "../src/core/dates.ts";
-import { buildBrokerSummaryParams } from "../src/core/marketdetectors.ts";
+import {
+  MARKET_BOARDS,
+  TRANSACTION_TYPES,
+  buildBrokerSummaryParams,
+} from "../src/core/marketdetectors.ts";
+import { buildDistributionParams } from "../src/core/brokerdistribution.ts";
 
 /* ------------------------------ single date ------------------------------ */
 
@@ -165,13 +170,50 @@ test("filters and limit survive alongside a range", () => {
     from: "2026-07-28",
     to: "2026-08-01",
     limit: 10,
-    transactionType: "BUY",
-    marketBoard: "CASH",
+    transactionType: "GROSS",
+    marketBoard: "TUNAI",
     investorType: "FOREIGN",
   });
   assert.equal(p.limit, 10);
-  assert.equal(p.transaction_type, "TRANSACTION_TYPE_BUY");
-  assert.equal(p.market_board, "MARKET_BOARD_CASH");
+  assert.equal(p.transaction_type, "TRANSACTION_TYPE_GROSS");
+  assert.equal(p.market_board, "MARKET_BOARD_TUNAI");
   assert.equal(p.investor_type, "INVESTOR_TYPE_FOREIGN");
   assert.equal("period" in p, false);
+});
+
+test("REGRESSION: the enum vocabulary is the one the endpoint has, not a translation of it", () => {
+  // BUY/SELL, NEGOTIATED and CASH were sent for the life of this tool and do not exist upstream.
+  // A wrong enum here does not 400 — it answers 200 with numbers — so the only evidence a user ever
+  // got was a filter that appeared to do nothing. The correct names were already measured for
+  // broker *distribution* in this same codebase and never carried across.
+  assert.deepEqual([...TRANSACTION_TYPES], ["NET", "GROSS"]);
+  assert.deepEqual([...MARKET_BOARDS], ["REGULER", "ALL", "NEGO", "TUNAI"]);
+
+  for (const dead of ["BUY", "SELL"]) {
+    assert.equal(
+      (TRANSACTION_TYPES as readonly string[]).includes(dead),
+      false,
+      `${dead} is not a transaction type — the two modes are NET and GROSS`,
+    );
+  }
+  for (const dead of ["NEGOTIATED", "CASH"]) {
+    assert.equal(
+      (MARKET_BOARDS as readonly string[]).includes(dead),
+      false,
+      `${dead} is the English word, not the board name — those are NEGO and TUNAI`,
+    );
+  }
+  // ALL was missing entirely, and it is the board that folds negotiated blocks back in.
+  assert.ok((MARKET_BOARDS as readonly string[]).includes("ALL"));
+
+  // The prefix still differs between the two endpoints even though the board names now match.
+  // Sharing one constant would make them look interchangeable, and they are not.
+  assert.equal(
+    buildBrokerSummaryParams({ symbol: "BBRI", marketBoard: "NEGO" }).market_board,
+    "MARKET_BOARD_NEGO",
+  );
+  assert.equal(
+    buildDistributionParams({ symbol: "BBRI", marketBoard: "NEGO" }).market_board,
+    "MARKET_TYPE_NEGO",
+  );
 });

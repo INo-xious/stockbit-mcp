@@ -2,12 +2,29 @@
  * Alert rules: the same condition grammar the Pine emitter uses, evaluated here against Stockbit
  * bars.
  *
- * ## The property that matters
+ * ## The property that matters, stated exactly
  *
- * A rule created here can be emitted as a Pine `alertcondition` and evaluated server-side, and both
- * must agree. They do, because neither owns its indicators — both expand the same overlays and
- * panels through `src/analysis/series.ts`, which carries the Pine expression and the local compute
- * function side by side. "RSI 14 below 30" means one thing in this project.
+ * **For every indicator, a rule created here and the Pine `alertcondition` emitted from it agree.**
+ * Neither surface owns its indicators — both expand the same overlays and panels through
+ * `src/analysis/series.ts`, which carries the Pine expression and the local compute function side by
+ * side, chosen to match. "RSI 14 below 30" means one thing in this project.
+ *
+ * The vocabularies are *not* identical, and it is worth being precise about the one place they
+ * differ rather than claiming a symmetry that does not exist. A Pine signal may also name a support
+ * or resistance constant (`support1`, `resistance2`); an alert may not. That is not an oversight to
+ * be closed by teaching alerts to resolve those names:
+ *
+ *   - In Pine, a level is a **literal baked into the script at emission**, precisely so TradingView
+ *     plots the level derived from Stockbit's bars rather than recomputing a different one from its
+ *     own data. That is the whole reason `pine/emit.ts` emits constants.
+ *   - An alert is evaluated later, against a window that has moved. Resolving `support1` at fire
+ *     time would recompute the pivot clustering over newer bars and get a *different price* — so
+ *     the two surfaces would then share a name while disagreeing on its value, which is worse than
+ *     not sharing it at all.
+ *
+ * The alert equivalent of a Pine level is therefore the numeric literal — `close crossover 4820` —
+ * which `resolveOperand` already accepts and which carries exactly the semantics Pine's constant
+ * does: a fixed price, captured when the rule was written. `technicals` reports the levels to copy.
  *
  * ## Firing
  *

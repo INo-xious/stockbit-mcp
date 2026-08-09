@@ -59,7 +59,15 @@ export function describeForbidden(upstream?: string): string {
   return said && said !== "HTTP 403" ? `${ENTITLEMENT_MESSAGE}\nServer said: ${said}` : ENTITLEMENT_MESSAGE;
 }
 
-/** VALUE returns IDR amounts; VOLUME returns share counts. The other block comes back empty. */
+/**
+ * VALUE returns IDR amounts; VOLUME returns **lots**, not shares. The other block comes back empty.
+ *
+ * One lot is 100 shares, so a comment claiming shares here is not a wording slip — it is a 100x
+ * error waiting for someone to act on it. The runtime has always been right; these two doc comments
+ * said "shares", and the dangerous direction is a maintainer reading the comment, deciding the code
+ * disagrees with it, and "fixing" the code. `test/brokerdistribution.test.ts` now asserts the unit
+ * so that edit fails instead of shipping.
+ */
 export type DistributionDataType = "VALUE" | "VOLUME";
 export type DistributionInvestorType = "ALL" | "FOREIGN" | "DOMESTIC";
 
@@ -143,7 +151,7 @@ const Response = z
 export interface DistributionCounterparty {
   code: string;
   investorType?: string;
-  /** IDR when dataType is VALUE, shares when VOLUME. */
+  /** IDR when dataType is VALUE, LOTS when VOLUME (1 lot = 100 shares). Never shares. */
   amount: number;
 }
 

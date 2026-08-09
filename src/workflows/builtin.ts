@@ -68,7 +68,13 @@ export const BUILTIN_WORKFLOWS: Workflow[] = [
         id: "readings",
         tool: "technicals",
         describe: "Indicators for each leader",
-        forEach: "steps.movers.data.results",
+        // `steps.movers` is the tool envelope `{success, data}`, and `top_movers` returns its rows
+        // as `data` directly — not wrapped in a `results` object. This path said `data.results` for
+        // its whole life, which resolved to undefined, which is not an array, which aborted the run
+        // on every single invocation. Nothing caught it because the engine tests stub a shape of
+        // their own choosing, so they proved the engine works and said nothing about this recipe.
+        // `test/workflows.test.ts` now runs every built-in against the tools' REAL response shapes.
+        forEach: "steps.movers.data",
         limit: 5,
         params: { symbol: "{{item.symbol}}", bars: "{{input.bars}}" },
       },

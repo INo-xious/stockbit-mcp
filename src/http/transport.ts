@@ -38,16 +38,44 @@ export const AUTHENTICATED_ORIGIN = new URL(HOSTS.exodus).origin;
  * Dynamic path segments, by name. A segment's *name in the template* selects its validator, so
  * adding `:symbol` to a route cannot accidentally get a laxer rule than every other `:symbol`.
  */
+/**
+ * Hotlist kinds, mapping the name callers use to the spelling that goes on the wire.
+ *
+ * The two differ, and that is the whole point of this table. Stockbit's own web client requests
+ * `/emitten/hotlist/topgainer` — lowercase, one word. This project sent the camelCase spelling it
+ * had invented for its own tool schema, and the endpoint answered 200 with an empty list rather
+ * than 404, which is indistinguishable from a closed market. The tool description even said so:
+ * "returns an empty list when the market is closed — that is expected, not an error." An always-
+ * empty hotlist had a cover story, so nobody looked.
+ *
+ * Keeping both spellings in one table means the friendly name stays in the tool schema (where it
+ * reads well) and the wire name stays here (where it must be exact), with no third place for them
+ * to disagree.
+ */
+export const MOVER_WIRE = {
+  topGainer: "topgainer",
+  topLoser: "toploser",
+  mostActive: "mostactive",
+} as const;
+
+export type MoverTypeName = keyof typeof MOVER_WIRE;
+
 const SEGMENT_VALIDATORS = {
   symbol: normalizeSymbol,
+  /**
+   * Accepts either spelling and always returns the wire one.
+   *
+   * Idempotent on its own output on purpose: `isPermitted` re-validates the path it is judging, so
+   * a validator that rejected the very form `resolvePath` produced would refuse every request it
+   * built.
+   */
   moverType: (value: string): string => {
-    if (value !== "topGainer" && value !== "topLoser" && value !== "mostActive") {
-      throw new StockbitError(
-        "invalid_param",
-        `Invalid mover type ${JSON.stringify(value)}: expected topGainer, topLoser, or mostActive`,
-      );
-    }
-    return value;
+    if (value in MOVER_WIRE) return MOVER_WIRE[value as MoverTypeName];
+    if ((Object.values(MOVER_WIRE) as readonly string[]).includes(value)) return value;
+    throw new StockbitError(
+      "invalid_param",
+      `Invalid mover type ${JSON.stringify(value)}: expected ${Object.keys(MOVER_WIRE).join(", ")}`,
+    );
   },
 } as const;
 

@@ -4,7 +4,7 @@
  *
  *   stockbit-auth login       # one-time browser login; auto-captures your session (recommended)
  *   stockbit-auth bootstrap   # paste a refresh token manually (fallback if `login` can't run)
- *   stockbit-auth status      # show store backend + whether a token is present
+ *   stockbit-auth status      # show the store backend and verify the token still works
  *   stockbit-auth logout      # clear the stored refresh token
  *
  * `login` opens your existing Chrome/Edge/Brave, you log into Stockbit normally, and the refresh
@@ -135,7 +135,19 @@ async function cmdBootstrap(): Promise<void> {
   logStderr("Bootstrap complete. You can now run stockbit-mcp.");
 }
 
-function cmdStatus(): void {
+/**
+ * Report what is stored, and — unless asked not to — whether it actually works.
+ *
+ * The expiry in the JWT payload is a *claim about time*, not a statement of validity. A refresh
+ * token can be revoked, rotated out from under this store by another process, or invalidated
+ * server-side, and none of that changes a byte of the payload. So this command used to answer
+ * "present, expires in ~1.4 day(s)" for a token that 401s on its first use, which is the most
+ * expensive kind of wrong answer: it sends you off to debug the thing you were about to do.
+ *
+ * One real refresh settles it. `--offline` keeps the old behaviour for when the network is not
+ * available or a round trip is unwanted, and says plainly that it did not check.
+ */
+async function cmdStatus(argv: string[]): Promise<void> {
   const store = getStore();
   const token = store.get();
   logStderr(`Backend: ${store.backend}`);
@@ -143,12 +155,25 @@ function cmdStatus(): void {
     logStderr("Refresh token: NOT set. Run `stockbit-auth login` (or `bootstrap`).");
     return;
   }
+
   const exp = decodeJwt(token)["exp"];
-  if (typeof exp === "number") {
-    const days = ((exp - Date.now() / 1000) / 86400).toFixed(1);
-    logStderr(`Refresh token: present, expires in ~${days} day(s).`);
-  } else {
-    logStderr("Refresh token: present (no exp in payload).");
+  const expiry =
+    typeof exp === "number" ? `expires in ~${((exp - Date.now() / 1000) / 86400).toFixed(1)} day(s)` : "no exp in payload";
+
+  if (argv.includes("--offline")) {
+    logStderr(`Refresh token: present, ${expiry}.`);
+    logStderr("Validity: NOT CHECKED (--offline). An expiry in the payload does not mean the token still works.");
+    return;
+  }
+
+  logStderr(`Refresh token: present, ${expiry}. Checking it against Stockbit…`);
+  try {
+    await forceRefresh();
+    logStderr("Validity: OK — the token refreshed successfully.");
+  } catch (err) {
+    logStderr(`Validity: FAILED — ${err instanceof Error ? err.message : String(err)}`);
+    logStderr("Run `stockbit-auth login` to re-authenticate.");
+    process.exit(1);
   }
 }
 
@@ -190,7 +215,7 @@ async function main(): Promise<void> {
       await cmdDoctor(argv);
       break;
     case "status":
-      cmdStatus();
+      await cmdStatus(argv);
       break;
     case "logout":
       await cmdLogout(argv);
@@ -202,7 +227,8 @@ async function main(): Promise<void> {
       logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");
-      logStderr("  status      show store backend + token expiry");
+      logStderr("  status      show store backend, token expiry, and whether it still works");
+      logStderr("              --offline  skip the live validity check");
       logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
       logStderr("              --keep-profile  keep the browser profile (still logged in)");
       process.exit(2);

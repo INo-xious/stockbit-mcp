@@ -10,6 +10,7 @@ import { getJson } from "../http/client.js";
 import { cached, parseOr, StrOrNum } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
+import type { MoverTypeName } from "../http/transport.js";
 
 /* ----------------------------------- quote ----------------------------------- */
 
@@ -98,26 +99,61 @@ const SectorRow = z
 export interface Sector {
   id: string;
   name: string;
+  /** Stockbit's short label, from `alias1`. Kept under a readable name. */
   alias?: string;
+  /**
+   * The sector this one sits under. Present on subsectors, absent on top-level ones.
+   *
+   * This is the field that makes sector rotation answerable at all — without it there is no way to
+   * roll subsector readings up, and a flat list of 22 names is barely worth a request.
+   */
+  parent?: string;
+  /** The sector's own index ticker, where Stockbit publishes one. */
+  symbol?: string;
+  /** Whatever else the row carried. See the note on `getSectors`. */
+  [key: string]: unknown;
 }
 
+/**
+ * The IDX sector list.
+ *
+ * Every field Stockbit sends is returned. The previous version projected the row down to exactly
+ * `{id, name, alias}` and dropped the rest on the floor — including `parent`, which its own zod
+ * schema already declared, and whatever performance figure the row carries. Naming the survivors is
+ * the wrong default for a response whose shape is not fully mapped: it turns "we have not looked at
+ * this field yet" into "this field does not exist", silently, and the only way to discover the loss
+ * is to compare against the wire by hand.
+ *
+ * Passing the row through also means a performance field can be used the moment it is confirmed
+ * live, without guessing its name here now and shipping a key that is always undefined.
+ */
 export async function getSectors(): Promise<Sector[]> {
   return cached("sectors", CACHE.keystatsTtlMs, async () => {
     const body = await getJson("emittenSectors");
     const parsed = parseOr(z.object({ data: z.array(SectorRow) }).passthrough(), body, "sectors");
-    return parsed.data.map((s) => ({ id: s.id, name: s.name, alias: s.alias1 }));
+    return parsed.data.map((s) => ({ ...s, id: String(s.id), name: s.name, alias: s.alias1 }));
   });
 }
 
 /* --------------------------------- top movers --------------------------------- */
 
-export type MoverType = "topGainer" | "topLoser" | "mostActive";
+export type MoverType = MoverTypeName;
 
+/**
+ * Top gainers / losers / most active.
+ *
+ * The path spelling is resolved by `MOVER_WIRE` in `src/http/transport.ts`, not written here — see
+ * that table for why the two spellings differ and how sending the wrong one hid behind "the market
+ * is closed" for the life of this tool.
+ *
+ * An empty array genuinely is normal outside 09:00–16:00 WIB. It is only a trustworthy answer now
+ * that the request is known to be the one Stockbit's own client makes.
+ */
 export async function getTopMovers(
   type: MoverType,
   limit = 25,
 ): Promise<Array<Record<string, unknown>>> {
-  // Not cached long: movers change during the session. Empty array after-hours is normal.
+  // Not cached long: movers change during the session.
   const body = await getJson("emittenHotlist", { segments: { moverType: type }, params: { limit } });
   return parseOr(ListResponse, body, `hotlist ${type}`).data;
 }

@@ -10,9 +10,34 @@ import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput } from "./dates.js";
 
-export type TransactionType = "NET" | "BUY" | "SELL";
-export type MarketBoard = "REGULER" | "NEGOTIATED" | "CASH";
-export type InvestorType = "ALL" | "FOREIGN" | "DOMESTIC";
+/**
+ * The vocabulary this endpoint actually accepts.
+ *
+ * Three of the values sent here for the life of the project do not exist upstream:
+ *
+ *   - `TRANSACTION_TYPE_BUY` / `_SELL`. The endpoint's two modes are net and gross; there is no
+ *     buy-only or sell-only mode, because every response already carries both sides as
+ *     `brokers_buy` and `brokers_sell`. The alternative to NET is **GROSS**.
+ *   - `MARKET_BOARD_NEGOTIATED` / `_CASH`. The board names are `NEGO` and `TUNAI`, and `ALL` — the
+ *     one that folds negotiated blocks back in, and the one most likely to be wanted — was missing
+ *     entirely.
+ *
+ * The names were guessed by translating the English words. The right ones were measured for the
+ * broker *distribution* endpoint in this same codebase (`DISTRIBUTION_BOARDS` in
+ * `src/core/brokerdistribution.ts`), and that measurement was simply never carried across. Note the
+ * *prefix* still differs between the two endpoints — `MARKET_BOARD_` here, `MARKET_TYPE_` there —
+ * which is exactly why each one keeps its own table instead of sharing a constant that would look
+ * interchangeable.
+ *
+ * A wrong enum here does not 400. It comes back 200 with numbers, which is why this went unnoticed.
+ */
+export const TRANSACTION_TYPES = ["NET", "GROSS"] as const;
+export const MARKET_BOARDS = ["REGULER", "ALL", "NEGO", "TUNAI"] as const;
+export const INVESTOR_TYPES = ["ALL", "FOREIGN", "DOMESTIC"] as const;
+
+export type TransactionType = (typeof TRANSACTION_TYPES)[number];
+export type MarketBoard = (typeof MARKET_BOARDS)[number];
+export type InvestorType = (typeof INVESTOR_TYPES)[number];
 
 export interface BrokerSummaryOptions extends DateRangeInput {
   symbol: string;

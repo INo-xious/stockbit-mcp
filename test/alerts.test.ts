@@ -91,6 +91,40 @@ test("every declared series carries BOTH a Pine expression and a local implement
   }
 });
 
+test("the level asymmetry between alerts and Pine is deliberate, and the numeric literal bridges it", () => {
+  // The module comment used to claim the two grammars were the same. They are the same for every
+  // indicator, and deliberately not for support/resistance: Pine bakes a level in as a constant at
+  // emission so TradingView plots the level derived from Stockbit's bars, while an alert evaluated
+  // later would recompute the pivot clustering over a moved window and get a different price. The
+  // two surfaces sharing a name while disagreeing on its value is worse than not sharing it.
+  const alertRule = rule({ left: "close", op: "crossover", right: "sup1" });
+  assert.throws(
+    () => validateRule(alertRule),
+    /not a declared series/,
+    "an alert must refuse a level name rather than resolve it to a moving target",
+  );
+
+  // Pine accepts it, because there it is a literal written into the script.
+  const pine = buildPine({
+    symbol: "BBRI",
+    kind: "indicator",
+    overlays: [],
+    panels: [],
+    levels: [{ kind: "support", price: 4820, touches: 3 }],
+    signals: [{ name: "breaks support", left: "close", op: "crossunder", right: "sup1" }],
+    alerts: true,
+  });
+  assert.match(pine, /sup1 = 4820/, "Pine captures the level as a constant, not a computation");
+
+  // And the bridge: the same condition as an alert, written the way Pine actually evaluates it.
+  const asLiteral = rule({ left: "close", op: "crossunder", right: 4820 });
+  assert.doesNotThrow(() => validateRule(asLiteral));
+  const bars = series([4900, 4880, 4850, 4830, 4810]);
+  const fired = evaluateRule(asLiteral, bars, NOW);
+  assert.equal(fired.fired, true, "a fixed price is exactly what Pine's constant means");
+  assert.equal(fired.rightValue, 4820);
+});
+
 /* -------------------------------- evaluation is honest -------------------------------- */
 
 test("warming up is reported as warming up, not as a no", () => {

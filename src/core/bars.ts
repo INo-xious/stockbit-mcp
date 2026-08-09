@@ -136,7 +136,13 @@ export interface BarsOptions {
   bars?: number;
   /** Earliest session to include, `YYYY-MM-DD`. Paging walks back until it is covered. */
   from?: string;
-  /** Latest session to include, `YYYY-MM-DD`. Filters after fetching; paging always starts at today. */
+  /**
+   * Latest session to include, `YYYY-MM-DD`.
+   *
+   * Paging always starts at today — that is the only entry point the endpoint has — so a window
+   * ending in the past is reached by walking back through sessions that are then discarded. Those
+   * discarded pages still cost a request each, which is why a far-past window is expensive.
+   */
   to?: string;
 }
 
@@ -177,12 +183,32 @@ interface Walk {
  * Paging stops as soon as the caller's need is met rather than fetching everything and filtering,
  * and MAX_PAGES bounds the worst case — with `truncated` saying so instead of presenting a short
  * series as complete.
+ *
+ * ## Why `to` is part of the stop condition and not just a filter afterwards
+ *
+ * The walk always starts at today, because that is the only place this endpoint can be entered.
+ * When the caller asked for a window that *ends* in the past, every page fetched so far may be
+ * entirely outside it — so counting rows collected answers the wrong question. It used to: the walk
+ * stopped once it held `want` rows of any date, `getBars` then filtered to `<= to`, and a request
+ * for "120 sessions ending last March" returned whatever few rows happened to fall inside, with
+ * `truncated: false` asserting that was all of them. A short series presented as complete is worse
+ * than an error, because every indicator computed from it is quietly wrong rather than absent.
+ *
+ * So coverage counts only the rows that are actually inside the window.
  */
-async function pagedBars(symbol: string, from: string | undefined, want: number): Promise<Walk> {
+async function pagedBars(
+  symbol: string,
+  from: string | undefined,
+  to: string | undefined,
+  want: number,
+): Promise<Walk> {
   const collected: Bar[] = [];
   let page = 1;
   let requests = 0;
   let truncated = false;
+
+  /** Rows that will survive the caller's window filter — the only ones that count toward `want`. */
+  const usable = (): number => (to ? collected.filter((b) => b.date <= to).length : collected.length);
 
   for (;;) {
     const body = await fetchPage(symbol, page);
@@ -194,8 +220,10 @@ async function pagedBars(symbol: string, from: string | undefined, want: number)
     collected.push(...rows.map(toBar));
 
     const oldest = collected[collected.length - 1]?.date;
-    const covered = from ? oldest !== undefined && oldest <= from : collected.length >= want;
+    const covered = from ? oldest !== undefined && oldest <= from : usable() >= want;
     if (covered) break;
+    // No further pages: this is the beginning of the symbol's history, not a ceiling we imposed.
+    // Reporting `truncated` here would blame us for data that does not exist.
     if (!parsed.data.paginate?.next_page) break;
     if (page >= MAX_PAGES) {
       truncated = true;
@@ -220,7 +248,7 @@ export async function getBars(opts: BarsOptions): Promise<BarSeries> {
   }
 
   const want = targetCount({ ...opts, from, to });
-  const walk = await pagedBars(symbol, from, want);
+  const walk = await pagedBars(symbol, from, to, want);
 
   let bars = walk.bars;
   if (from) bars = bars.filter((b) => b.date >= from);

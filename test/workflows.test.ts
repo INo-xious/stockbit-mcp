@@ -291,3 +291,105 @@ test("findWorkflow finds by exact name and refuses anything else", () => {
   assert.equal(findWorkflow("DEEP_DIVE"), undefined);
   assert.equal(findWorkflow("nope"), undefined);
 });
+
+/* ---------------------------- built-ins against REAL shapes ---------------------------- */
+
+/**
+ * What each tool actually hands the workflow engine.
+ *
+ * `invokeTool` in `src/tools/register.ts` calls the real handler, pulls the text block out of the
+ * MCP result and `JSON.parse`s it — so a step's context value is the whole `runTool` envelope,
+ * `{ success: true, data: <what the core function returned> }`. Every path in a built-in therefore
+ * starts `steps.<id>.data`.
+ *
+ * These stubs mirror the core return types, and each is annotated with where it comes from. That
+ * annotation is the point of the fixture: `morning_scan` fanned out over `steps.movers.data.results`
+ * for its entire life and aborted on every run, because `getTopMovers` returns its rows AS `data` —
+ * there is no `results` wrapper. The engine tests above did not catch it and could not have: they
+ * invent a shape and stub it to match, which proves the engine works and proves nothing about
+ * whether a recipe agrees with the tool it calls. This one closes that gap.
+ */
+const REAL_TOOL_SHAPES: Record<string, unknown> = {
+  // core.getQuote → Quote
+  quote: { symbol: "BBRI", companyId: "59", price: "4820", change: "20", percentage: "0.42" },
+  // core.getTopMovers → Array<Record<string, unknown>>. An ARRAY, directly as `data`.
+  top_movers: [{ symbol: "BRMS" }, { symbol: "TLKM" }, { symbol: "ANTM" }],
+  // core.getTrending → Array<Record<string, unknown>>
+  trending: [{ symbol: "BBCA" }],
+  // the technicals handler → { symbol, bars, indicators, levels }
+  technicals: {
+    symbol: "BBRI",
+    bars: 200,
+    indicators: { rsi14: 54.2, sma20: 4790 },
+    levels: { support: [4500], resistance: [5000] },
+  },
+  // the price_chart handler → a saved-file summary
+  price_chart: { symbol: "BBRI", savedTo: "/tmp/BBRI.svg", bars: 120 },
+  // core.getBrokerSummary → BrokerSummary
+  broker_summary: { symbol: "BBRI", buyers: [{ code: "XL", netLots: 100 }], sellers: [] },
+  // the broker_distribution handler → a saved-file summary
+  broker_distribution: { symbol: "BBRI", savedTo: "/tmp/BBRI-sankey.svg" },
+  // the alert_check handler → { checked, dryRun, fired, evaluations }
+  alert_check: {
+    checked: 2,
+    dryRun: false,
+    fired: [{ ruleId: "r1", symbol: "BBRI", name: "golden cross", fired: true }],
+    evaluations: [{ ruleId: "r1", symbol: "BBRI", fired: true }],
+  },
+  // the pine_script handler → written script paths
+  pine_script: { symbol: "BBRI", scripts: [{ pane: "price", savedTo: "/tmp/BBRI.pine" }] },
+};
+
+/** The envelope `invokeTool` produces, so a built-in's `steps.<id>.data` path resolves for real. */
+function realShapeRecorder() {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const invoke = async (tool: string, args: Record<string, unknown>) => {
+    calls.push({ tool, args });
+    if (!(tool in REAL_TOOL_SHAPES)) throw new Error(`no real-shape fixture for tool ${tool}`);
+    return { success: true, data: REAL_TOOL_SHAPES[tool] };
+  };
+  return { calls, invoke };
+}
+
+/** Inputs good enough to satisfy every built-in's required list. */
+const SAMPLE_INPUT: Record<string, unknown> = { symbol: "BBRI", bars: 200, from: "2026-01-02", to: "2026-08-05" };
+
+for (const workflow of BUILTIN_WORKFLOWS) {
+  test(`built-in ${workflow.name} runs to completion against the tools' real response shapes`, async () => {
+    const { invoke } = realShapeRecorder();
+    const run = await runWorkflow(workflow, SAMPLE_INPUT, invoke);
+
+    const broken = run.steps.filter((s) => s.error);
+    assert.deepEqual(
+      broken.map((s) => `${s.id}: ${s.error}`),
+      [],
+      `${workflow.name} has step(s) that cannot run against what its tools actually return`,
+    );
+    assert.equal(run.ok, true, `${workflow.name} did not complete`);
+    assert.equal(run.failedAt, undefined);
+  });
+}
+
+test("a fan-out step in a built-in actually fans out — it does not resolve to an empty pass", async () => {
+  // The specific defect: `forEach` resolving to undefined aborts, but a `forEach` pointing at an
+  // empty array would run zero items and still report ok. Both read as "nothing to do" in a result
+  // and neither is what the recipe means, so assert the fan-out produced calls.
+  for (const workflow of BUILTIN_WORKFLOWS) {
+    const fanSteps = workflow.steps.filter((s) => s.forEach);
+    if (fanSteps.length === 0) continue;
+
+    const { invoke, calls } = realShapeRecorder();
+    const run = await runWorkflow(workflow, SAMPLE_INPUT, invoke);
+
+    for (const step of fanSteps) {
+      const result = run.steps.find((s) => s.id === step.id);
+      assert.ok(result, `${workflow.name}.${step.id} did not run at all`);
+      assert.ok(
+        (result.results?.length ?? 0) > 0,
+        `${workflow.name}.${step.id} fans out over ${step.forEach} and got nothing — ` +
+          `the path does not match what ${step.tool} returns`,
+      );
+      assert.ok(calls.some((c) => c.tool === step.tool));
+    }
+  }
+});

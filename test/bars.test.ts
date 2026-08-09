@@ -147,3 +147,28 @@ test("from after to is rejected before any request goes out", async () => {
   await assert.rejects(() => getBars({ symbol: "BBRI", from: day(1), to: day(30) }), /must not be after/);
   assert.equal(urls.length, 0, "an impossible range should not cost a request");
 });
+
+test("`to` without `from` returns a FULL window ending at `to`, not a remnant of one", async () => {
+  // The walk can only be entered at today, so a window ending in the past is reached by paging back
+  // through sessions that are then discarded. Counting every row collected — including the discarded
+  // ones — satisfied the request long before it held enough rows inside the window: this asked for
+  // 24 sessions and got 4, and reported `truncated: false` while doing it. Every indicator computed
+  // from those 4 bars would have been quietly wrong rather than absent.
+  const series = await getBars({ symbol: "BBRI", to: day(20), bars: 24 });
+
+  assert.equal(series.bars.length, 24, "the full requested count must be inside the window");
+  assert.equal(series.bars[series.bars.length - 1].date, day(20), "the newest bar is `to` itself");
+  assert.equal(series.bars[0].date, day(43), "and the window extends back 24 sessions from there");
+  assert.equal(series.truncated, false);
+  assert.ok(series.bars.every((b) => b.date <= day(20)), "nothing after `to` may survive");
+});
+
+test("`to` without `from` still reports truncation honestly when history runs out", async () => {
+  // The fake market has 96 sessions. Asking for 50 ending at the 70th-oldest cannot be satisfied,
+  // and the honest answer is a short series that says so — not a silent one.
+  const series = await getBars({ symbol: "BBRI", to: day(70), bars: 50 });
+
+  assert.ok(series.bars.length < 50, "the data to satisfy this does not exist");
+  assert.equal(series.bars[series.bars.length - 1].date, day(70));
+  assert.ok(series.bars.every((b) => b.date <= day(70)));
+});
