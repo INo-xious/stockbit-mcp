@@ -7,8 +7,9 @@
  * have to be running a debugger port or an extension, and the user's everyday browser is running
  * neither. So detection is per-platform and honest about its own resolution:
  *
- *   - **macOS** — AppleScript can ask Chrome, Edge, Brave and Safari for the URL of every tab in
- *     every window. This is exact: a Stockbit tab buried behind twenty others is still found.
+ *   - **macOS** — AppleScript can ask Chrome, Edge, Brave, Vivaldi, Arc and Safari for the URL of
+ *     every tab in every window, for whichever of them are actually running. This is exact: a
+ *     Stockbit tab buried behind twenty others is still found.
  *   - **Windows** — there is no equivalent without UI Automation. `tasklist /V` reports each
  *     process's window title, and a browser's window title is *the active tab's* title. So an
  *     inactive Stockbit tab is invisible to this check.
@@ -181,38 +182,39 @@ async function windowsPresence(): Promise<BrowserPresence> {
 /**
  * Ask each *already-running* browser for its tab URLs.
  *
- * The `running of application` guard is load-bearing: addressing a non-running app by name in
- * AppleScript launches it, which would make the check itself the reason a browser is open.
+ * The System Events roll-call is load-bearing, and `running of application n` is not enough on its
+ * own. Asking whether an app is running still makes Launch Services resolve it *by name* first, and
+ * when nothing by that name is installed macOS puts up its "Where is…?" locate panel — a modal
+ * dialog, one per missing browser. The surrounding `try` cannot suppress it either: the panel is
+ * presented by the system rather than raised as an AppleScript error, so there is nothing to catch.
+ * On a Mac with only Chrome and Safari, the old name-first loop meant four dialogs per detection.
+ *
+ * Reading the process list first avoids the resolution entirely. An uninstalled browser is never a
+ * running process, so its name is never handed to Launch Services. This also keeps the property the
+ * old guard was protecting — detection still never launches anything — and costs one Apple event
+ * instead of six speculative lookups.
+ *
+ * If automation permission is denied, System Events yields nothing and the result is empty, which
+ * `macPresence` already reads as "not exact" rather than "no browser running".
  */
 const MAC_SCRIPT = `
 set found to {}
-set names to {"Google Chrome", "Microsoft Edge", "Brave Browser", "Vivaldi", "Arc"}
+tell application "System Events" to set liveApps to name of every process
+set names to {"Google Chrome", "Microsoft Edge", "Brave Browser", "Vivaldi", "Arc", "Safari"}
 repeat with n in names
   try
-    if running of application n then
-      set found to found & {n & "|RUNNING"}
-      tell application n
+    if liveApps contains (n as text) then
+      set found to found & {(n as text) & "|RUNNING"}
+      tell application (n as text)
         repeat with w in windows
           repeat with t in tabs of w
-            set found to found & {n & "|" & (URL of t)}
+            set found to found & {(n as text) & "|" & (URL of t)}
           end repeat
         end repeat
       end tell
     end if
   end try
 end repeat
-try
-  if running of application "Safari" then
-    set found to found & {"Safari|RUNNING"}
-    tell application "Safari"
-      repeat with w in windows
-        repeat with t in tabs of w
-          set found to found & {"Safari|" & (URL of t)}
-        end repeat
-      end repeat
-    end tell
-  end if
-end try
 set AppleScript's text item delimiters to linefeed
 return found as text
 `;
