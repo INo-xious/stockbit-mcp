@@ -30,9 +30,19 @@ import {
 import { addRule, loadRules, newRuleId, removeRule, updateRule } from "../alerts/store.js";
 import { StockbitError } from "../http/errors.js";
 import { detectStockbit, ensureStockbitOpen, installedBrowsers, stockbitUrl } from "../desktop/browser.js";
+import {
+  OVERLAY_NAMES,
+  PANEL_NAMES,
+  defineSeries,
+  overlaysFrom,
+  panelsFrom,
+} from "../analysis/series.js";
 import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
+
+/** Sub-panel titles, matching the periods `PANEL_PRESETS` declares. */
+const PANE_LABELS = { rsi: "RSI(14)", macd: "MACD(12,26,9)", atr: "ATR(14)" } as const;
 
 export function registerTools(server: McpServer): void {
   /**
@@ -234,20 +244,6 @@ export function registerTools(server: McpServer): void {
 
   /* ----------------------------------- alerts ----------------------------------- */
 
-  const OVERLAY_SPECS: Record<string, Overlay> = {
-    sma20: { kind: "sma", period: 20 },
-    sma50: { kind: "sma", period: 50 },
-    sma200: { kind: "sma", period: 200 },
-    ema20: { kind: "ema", period: 20 },
-    ema50: { kind: "ema", period: 50 },
-    bollinger: { kind: "bollinger", period: 20, k: 2 },
-  };
-  const PANEL_SPECS: Record<string, Panel> = {
-    rsi: { kind: "rsi", period: 14 },
-    atr: { kind: "atr", period: 14 },
-    macd: { kind: "macd", fast: 12, slow: 26, signal: 9 },
-  };
-
   server.tool(
     "alert_create",
     "Create a price or indicator alert on an IDX stock, stored on this machine.\n" +
@@ -266,10 +262,10 @@ export function registerTools(server: McpServer): void {
       op: z.enum(["crossover", "crossunder", "cross", ">", "<", ">=", "<="]),
       right: z.union([z.string(), z.coerce.number()]),
       overlays: z
-        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "ema50", "bollinger"]))
+        .array(z.enum(OVERLAY_NAMES))
         .optional()
         .describe("Price series the condition references"),
-      panels: z.array(z.enum(["rsi", "macd", "atr"])).optional().describe("Oscillators the condition references"),
+      panels: z.array(z.enum(PANEL_NAMES)).optional().describe("Oscillators the condition references"),
       cooldown_minutes: z.coerce.number().optional().describe("Minimum minutes between fires. Default 0 (once per bar)."),
       note: z.string().optional().describe("Free text for your own reference"),
     },
@@ -279,8 +275,8 @@ export function registerTools(server: McpServer): void {
           id: newRuleId(),
           symbol: normalizeSymbol(a.symbol),
           name: a.name,
-          overlays: (a.overlays ?? []).map((k) => OVERLAY_SPECS[k]),
-          panels: (a.panels ?? []).map((k) => PANEL_SPECS[k]),
+          overlays: overlaysFrom(a.overlays),
+          panels: panelsFrom(a.panels),
           left: a.left,
           op: a.op,
           right: a.right,
@@ -426,10 +422,10 @@ export function registerTools(server: McpServer): void {
       kind: z.enum(["indicator", "strategy"]).optional().describe("Default indicator. strategy adds orders and is backtestable."),
       title: z.string().optional().describe("Script title shown in TradingView"),
       overlays: z
-        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "ema50", "bollinger"]))
+        .array(z.enum(OVERLAY_NAMES))
         .optional()
         .describe("Price overlays. Default sma20 + sma50."),
-      panels: z.array(z.enum(["rsi", "macd", "atr"])).optional().describe("Oscillators, each as its own script. Default rsi."),
+      panels: z.array(z.enum(PANEL_NAMES)).optional().describe("Oscillators, each as its own script. Default rsi."),
       include_levels: z
         .boolean()
         .optional()
@@ -458,20 +454,6 @@ export function registerTools(server: McpServer): void {
     },
     async (a) =>
       runTool(async () => {
-        const overlayMap: Record<string, Overlay> = {
-          sma20: { kind: "sma", period: 20 },
-          sma50: { kind: "sma", period: 50 },
-          sma200: { kind: "sma", period: 200 },
-          ema20: { kind: "ema", period: 20 },
-          ema50: { kind: "ema", period: 50 },
-          bollinger: { kind: "bollinger", period: 20, k: 2 },
-        };
-        const panelMap: Record<string, Panel> = {
-          rsi: { kind: "rsi", period: 14 },
-          atr: { kind: "atr", period: 14 },
-          macd: { kind: "macd", fast: 12, slow: 26, signal: 9 },
-        };
-
         const kind = a.kind ?? "indicator";
         const wantLevels = a.include_levels !== false;
 
@@ -492,8 +474,8 @@ export function registerTools(server: McpServer): void {
           symbol: normalizeSymbol(a.symbol),
           kind,
           title: a.title,
-          overlays: (a.overlays ?? ["sma20", "sma50"]).map((k) => overlayMap[k]),
-          panels: (a.panels ?? ["rsi"]).map((k) => panelMap[k]),
+          overlays: overlaysFrom(a.overlays ?? ["sma20", "sma50"]),
+          panels: panelsFrom(a.panels ?? ["rsi"]),
           levels,
           levelsFrom: from,
           levelsTo: to,
@@ -657,10 +639,10 @@ export function registerTools(server: McpServer): void {
       from: z.string().optional().describe("Earliest session, YYYY-MM-DD"),
       to: z.string().optional().describe("Latest session, YYYY-MM-DD"),
       overlays: z
-        .array(z.enum(["sma20", "sma50", "sma200", "ema20", "bollinger"]))
+        .array(z.enum(OVERLAY_NAMES))
         .optional()
         .describe("Price overlays. Default sma20 + sma50."),
-      panels: z.array(z.enum(["rsi", "macd"])).optional().describe("Sub-panels below price. Default rsi."),
+      panels: z.array(z.enum(PANEL_NAMES)).optional().describe("Sub-panels below price. Default rsi."),
       show_levels: z.boolean().optional().describe("Draw support/resistance from pivot clustering. Default true."),
       show_volume: z.boolean().optional().describe("Default true"),
       annotations: z
@@ -696,42 +678,37 @@ export function registerTools(server: McpServer): void {
       runImageTool(async () => {
         const series = await core.getBars({ symbol: a.symbol, bars: a.bars ?? 120, from: a.from, to: a.to });
         const bars = series.bars;
-        const close = bars.map((b) => b.close);
 
-        const wanted = a.overlays ?? ["sma20", "sma50"];
-        const overlays: Array<{ label: string; series: core.Series; dashed?: boolean; color?: string }> = [];
-        if (wanted.includes("sma20")) overlays.push({ label: "SMA 20", series: core.sma(close, 20) });
-        if (wanted.includes("sma50")) overlays.push({ label: "SMA 50", series: core.sma(close, 50) });
-        if (wanted.includes("sma200")) overlays.push({ label: "SMA 200", series: core.sma(close, 200) });
-        if (wanted.includes("ema20")) overlays.push({ label: "EMA 20", series: core.ema(close, 20) });
-        if (wanted.includes("bollinger")) {
-          const bb = core.bollinger(close, 20, 2);
-          overlays.push(
-            { label: "BB upper", series: bb.upper, dashed: true, color: "#8b949e" },
-            { label: "BB lower", series: bb.lower, dashed: true, color: "#8b949e" },
-          );
-        }
+        // Drawn from the same registry the alerts and the Pine emitter use. This block used to
+        // recompute each indicator inline — a third implementation of one vocabulary, and one that
+        // had quietly fallen behind: it drew no ema50 and no ATR panel, so a chart asked for the
+        // overlays of an alert rule came back missing lines with no error. A chart that disagrees
+        // with the alert it is supposed to explain is worse than no chart.
+        const defs = defineSeries(
+          overlaysFrom(a.overlays ?? ["sma20", "sma50"]),
+          panelsFrom(a.panels ?? ["rsi"]),
+        );
+        const plot = (d: (typeof defs)[number]) => ({
+          label: d.label,
+          series: d.compute(bars),
+          color: d.color,
+          // A band edge or a basis reads as context, not as a signal line.
+          dashed: (d.alpha ?? 0) > 0,
+        });
+
+        const overlays = defs.filter((d) => d.pane === "price" && d.color && d.label).map(plot);
 
         const panels: SubPanel[] = [];
-        for (const p of a.panels ?? ["rsi"]) {
-          if (p === "rsi") {
-            panels.push({
-              label: "RSI(14)",
-              range: [0, 100],
-              guides: [30, 70],
-              series: [{ label: "RSI", series: core.rsi(close, 14) }],
-            });
-          } else {
-            const m = core.macd(close);
-            panels.push({
-              label: "MACD(12,26,9)",
-              histogram: m.histogram,
-              series: [
-                { label: "MACD", series: m.macd },
-                { label: "signal", series: m.signal, color: "#e3b341" },
-              ],
-            });
-          }
+        for (const pane of ["rsi", "macd", "atr"] as const) {
+          const members = defs.filter((d) => d.pane === pane && d.color);
+          if (members.length === 0) continue;
+          const histogram = members.find((d) => d.style === "histogram");
+          panels.push({
+            label: PANE_LABELS[pane],
+            ...(pane === "rsi" ? { range: [0, 100] as [number, number], guides: [30, 70] } : {}),
+            ...(histogram ? { histogram: histogram.compute(bars) } : {}),
+            series: members.filter((d) => d !== histogram).map(plot),
+          });
         }
 
         const annotations: Annotation[] = [];

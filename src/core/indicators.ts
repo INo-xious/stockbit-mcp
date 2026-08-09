@@ -45,6 +45,43 @@ export function sma(values: number[], period: number): Series {
 }
 
 /**
+ * Rolling maximum over a trailing window of `period` values, inclusive of the current one.
+ *
+ * Matches Pine's `ta.highest(source, n)`, which is why the window includes the current bar — an
+ * exclusive window would make a Donchian breakout fire on the bar that *set* the high, since the
+ * high it is being compared against would be the previous one.
+ *
+ * A plain scan of the window rather than a monotonic deque: `period` here is tens, not thousands,
+ * and the deque version is the kind of clever that gets an off-by-one on eviction that no test
+ * notices because both versions agree on smooth data.
+ */
+export function highest(values: number[], period: number): Series {
+  requirePeriod(period, "highest");
+  const out: Series = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i++) {
+    let best = values[i - period + 1];
+    for (let j = i - period + 2; j <= i; j++) if (values[j] > best) best = values[j];
+    // NOT rounded. Every other indicator here rounds because it computes a new number; a maximum
+    // IS one of the inputs, and rounding it to 4dp can push it a hair BELOW the bar that set it —
+    // which makes `high > dcUpper` true on the very bar the channel is supposed to contain.
+    out[i] = best;
+  }
+  return out;
+}
+
+/** Rolling minimum, the mirror of `highest`. Matches Pine's `ta.lowest(source, n)`. */
+export function lowest(values: number[], period: number): Series {
+  requirePeriod(period, "lowest");
+  const out: Series = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i++) {
+    let best = values[i - period + 1];
+    for (let j = i - period + 2; j <= i; j++) if (values[j] < best) best = values[j];
+    out[i] = best; // see `highest` — a minimum is an observed value, not a computed one.
+  }
+  return out;
+}
+
+/**
  * Exponential moving average.
  *
  * Seeded with the SMA of the first `period` values rather than with `values[0]`. Seeding from a

@@ -47,11 +47,11 @@
  */
 import type { Bar } from "../core/bars.js";
 import {
-  PRICE_REFS,
+  compileCondition,
   defineSeries,
-  evaluateAt,
   isOperator,
-  isPriceRef,
+  resolveOperand,
+  warmupFor,
   type Operator,
   type Overlay,
   type Panel,
@@ -109,34 +109,6 @@ export function describeCondition(rule: Pick<AlertRule, "left" | "op" | "right">
 }
 
 /**
- * Resolve one side of a condition into a series aligned to `bars`.
- *
- * A number becomes a constant series rather than a special case in the comparator, so crossovers
- * against a fixed price (`close crossover 4820`) work with the same code path as crossovers against
- * another series.
- */
-function resolveOperand(
-  operand: string | number,
-  bars: Bar[],
-  defs: ReturnType<typeof defineSeries>,
-  side: string,
-): Array<number | null> {
-  if (typeof operand === "number") {
-    if (!Number.isFinite(operand)) throw new Error(`${side} must be a finite number, got ${operand}`);
-    return new Array(bars.length).fill(operand);
-  }
-  if (isPriceRef(operand)) return bars.map((b) => PRICE_REFS[operand](b));
-  const def = defs.find((d) => d.id === operand);
-  if (!def) {
-    throw new Error(
-      `${side} references "${operand}", which is not a declared series. ` +
-        `Available: ${[...defs.map((d) => d.id), ...Object.keys(PRICE_REFS)].join(", ")}`,
-    );
-  }
-  return def.compute(bars);
-}
-
-/**
  * Check a rule against a window of bars, oldest first.
  *
  * `now` is injected rather than read from the clock so cooldown behaviour is testable without
@@ -149,24 +121,22 @@ export function evaluateRule(rule: AlertRule, bars: Bar[], now: Date): AlertEval
   if (bars.length === 0) return { ...base, fired: false, reason: "no-data" };
 
   const defs = defineSeries(rule.overlays, rule.panels);
-  const left = resolveOperand(rule.left, bars, defs, "left");
-  const right = resolveOperand(rule.right, bars, defs, "right");
+  const condition = compileCondition(rule, bars, defs);
 
   const i = bars.length - 1;
   const barDate = bars[i].date;
-  const leftValue = left[i] ?? null;
-  const rightValue = right[i] ?? null;
+  const leftValue = condition.left[i] ?? null;
+  const rightValue = condition.right[i] ?? null;
   const withValues = { ...base, barDate, leftValue, rightValue };
 
   // Warm-up is reported before the condition is judged: "not enough history" and "condition not
-  // met" are different answers, and only one of them is worth waiting on.
-  const crossing = rule.op === "crossover" || rule.op === "crossunder" || rule.op === "cross";
-  const needed = crossing ? [left[i], right[i], left[i - 1], right[i - 1]] : [left[i], right[i]];
-  if (needed.some((v) => v === null || v === undefined)) {
+  // met" are different answers, and only one of them is worth waiting on. Backtest and scan get
+  // this same distinction from `compileCondition` rather than each re-deriving it.
+  if (condition.warmingUpAt(i)) {
     return { ...withValues, fired: false, reason: "warming-up" };
   }
 
-  if (!evaluateAt(rule.op, left, right, i)) {
+  if (!condition.holdsAt(i)) {
     return { ...withValues, fired: false, reason: "condition-false" };
   }
 
@@ -184,15 +154,15 @@ export function evaluateRule(rule: AlertRule, bars: Bar[], now: Date): AlertEval
   return { ...withValues, fired: true };
 }
 
-/** How many bars a rule needs before it can say anything, so a caller can fetch enough. */
+/**
+ * How many bars a rule needs before it can say anything, so a caller can fetch enough.
+ *
+ * The arithmetic lives in `warmupFor` beside the registry that knows how each series settles — a
+ * scan asking "how many bars must I buy for this screen" is asking the same question and must get
+ * the same answer.
+ */
 export function warmupBars(rule: Pick<AlertRule, "overlays" | "panels">): number {
-  let longest = 1;
-  for (const o of rule.overlays) longest = Math.max(longest, o.period);
-  for (const p of rule.panels) longest = Math.max(longest, p.kind === "macd" ? p.slow + p.signal : p.period);
-  // Wilder smoothing converges rather than terminating, so a bare warm-up window gives a value that
-  // is still drifting. Three times the longest period is the usual rule of thumb, plus a bar for
-  // the crossing comparison.
-  return longest * 3 + 1;
+  return warmupFor(rule.overlays, rule.panels);
 }
 
 /** Reject a rule that could never evaluate, at creation rather than at fire time. */

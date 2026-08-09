@@ -181,6 +181,17 @@ export function declaredSeries(spec: PineSpec): SeriesDef[] {
   return defineSeries(spec.overlays ?? [], spec.panels ?? []);
 }
 
+/**
+ * A `SeriesDef` colour as Pine writes it.
+ *
+ * The registry stores a plain hex because the SVG chart renderer consumes the same field directly.
+ * Pine's `color.new(hex, transparency)` wrapping belongs here, in the emitter that needs it, rather
+ * than in the registry where it would force the chart to parse a Pine expression back apart.
+ */
+function pineColor(def: { color: string; alpha?: number }): string {
+  return `color.new(${def.color}, ${def.alpha ?? 0})`;
+}
+
 /** Identifiers a signal is allowed to name: declared series, price builtins, and level constants. */
 function operandExpr(
   operand: string | number,
@@ -295,7 +306,7 @@ export function buildPine(spec: PineSpec): string {
   if (plotted.length) {
     lines.push("// ---- plots ----");
     for (const s of plotted) {
-      lines.push(`plot(${s.id}, title = ${pineString(s.label)}, color = ${s.color}, linewidth = 2)`);
+      lines.push(`plot(${s.id}, title = ${pineString(s.label)}, color = ${pineColor(s)}, linewidth = 2)`);
     }
   }
   for (const [id, level] of levelIds) {
@@ -464,7 +475,7 @@ export function buildPineScripts(spec: PineSpec): PineScript[] {
     lines.push("");
     for (const s of only) {
       const style = s.style === "histogram" ? ", style = plot.style_histogram" : "";
-      lines.push(`plot(${s.id}, title = ${pineString(s.label)}, color = ${s.color}${style}, linewidth = 2)`);
+      lines.push(`plot(${s.id}, title = ${pineString(s.label)}, color = ${pineColor(s)}${style}, linewidth = 2)`);
     }
     for (const guide of PANEL_GUIDES[panel.kind] ?? []) {
       lines.push(`hline(${guide}, title = ${pineString(String(guide))}, color = color.new(#8b949e, 40), linestyle = hline.style_dashed)`);
