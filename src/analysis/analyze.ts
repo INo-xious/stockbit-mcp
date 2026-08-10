@@ -638,32 +638,101 @@ export function patternPillar(bars: Bar[], sinceBars = 10): Pillar {
   };
 }
 
-/** The ratio bands. Ordered ceilings; anything above the last falls through to `above`. */
+/**
+ * Read Stockbit's named financial items out of a keystats or ratios payload.
+ *
+ * These metrics are NOT flat fields. They arrive as a list of named items, and the two endpoints
+ * disagree about the shape of a row:
+ *
+ *   keystats: { fitem_name: "Current PE Ratio (TTM)", fitem_value: "8.00" }
+ *   ratios:   { fitem: { name: "Current PE Ratio (TTM)", value: "8.00" } }
+ *
+ * The first version of this pillar looked up keys called `per` and `pbv`, which cannot match
+ * anything here — the names are *values*, not keys. Every stock therefore reported valuation as
+ * `missing`, and because "missing" is an honest outcome in this design, nothing looked wrong:
+ * BBRI came back with the pillar dropped and its weight redistributed, which is exactly what a
+ * genuinely unavailable metric would look like. Only running it against a real bank, whose PE and
+ * PBV obviously exist, exposed it. Fixtures cannot catch this class of bug — they encode the shape
+ * the author already believed.
+ */
+function financialItems(payload: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  const groups = (payload as { closure_fin_items_results?: unknown[] } | null)?.closure_fin_items_results;
+  if (!Array.isArray(groups)) return out;
+  for (const group of groups) {
+    const rows = (group as { fin_name_results?: unknown[] } | null)?.fin_name_results;
+    if (!Array.isArray(rows)) continue;
+    for (const raw of rows) {
+      const row = raw as { fitem_name?: unknown; fitem_value?: unknown; fitem?: { name?: unknown; value?: unknown } };
+      const name = typeof row.fitem_name === "string" ? row.fitem_name : row.fitem?.name;
+      const value = row.fitem_value ?? row.fitem?.value;
+      if (typeof name === "string" && value != null) out.set(name.toLowerCase(), String(value));
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse one of those values.
+ *
+ * They are strings carrying presentation: `"17.30%"`, `"1,390.55"`, `"48,988 B"`. A literal `"-"`
+ * means the metric does not apply to this issuer — banks have no inventory turnover — and must read
+ * as absent rather than as zero, which would score as excellent liquidity.
+ */
+function parseFinValue(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const text = raw.trim();
+  if (text === "" || text === "-" || text === "N/A") return null;
+  const cleaned = text.replace(/,/g, "").replace(/%$/, "");
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** First item whose name matches, in preference order. Names are matched exactly, lowercased. */
+function findMetric(sources: Array<Map<string, string>>, names: string[]): number | null {
+  for (const name of names) {
+    for (const source of sources) {
+      const value = parseFinValue(source.get(name.toLowerCase()));
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * The ratio bands. Ordered ceilings; anything above the last falls through to `above`.
+ *
+ * `names` are Stockbit's own item labels, in preference order — TTM before annualised, because a
+ * trailing twelve months is the more conservative read of a single good quarter.
+ */
 const VALUATION_METRICS: Array<{
   key: string;
-  candidates: string[];
+  names: string[];
   score: (v: number) => number;
-  note?: string;
 }> = [
   {
     key: "per",
-    candidates: ["per", "pe", "peratio", "priceearningratio", "priceearningsratio", "petbm", "pe_ttm"],
+    names: ["Current PE Ratio (TTM)", "Current PE Ratio (Annualised)", "Forward PE Ratio"],
     // A negative PER means losses, which is information — and it is not "infinitely cheap".
     score: (v) => (v <= 0 ? -40 : band(v, [[8, 60], [15, 25], [25, 0], [40, -30]], -60)),
   },
   {
     key: "pbv",
-    candidates: ["pbv", "pb", "pricebookvalue", "pricetobook", "pbratio", "pricebook"],
+    names: ["Current Price to Book Value"],
     score: (v) => (v <= 0 ? -30 : band(v, [[1, 50], [2, 20], [4, 0]], -40)),
   },
   {
     key: "roe",
-    candidates: ["roe", "returnonequity"],
+    names: ["Return on Equity (TTM)"],
     score: (v) => band(v, [[0, -50], [10, 0], [20, 25]], 50),
   },
   {
     key: "der",
-    candidates: ["der", "debttoequity", "debtequityratio", "debttoequityratio"],
+    // "Debt to Equity Ratio" counts interest-bearing debt only. For a bank that is ~0.01 while
+    // Total Liabilities/Equity is ~5.6, because deposits are liabilities and not debt. The narrow
+    // measure is the right one for a solvency band; the broad one would score every bank as
+    // distressed.
+    names: ["Debt to Equity Ratio (Quarter)", "LT Debt/Equity (Quarter)"],
     score: (v) => band(v, [[0.5, 20], [1.5, 0], [3, -20]], -40),
   },
 ];
@@ -690,9 +759,16 @@ export function valuationPillar(keystats: unknown, ratios: unknown): Pillar {
   ];
   const scores: number[] = [];
   const notFound: string[] = [];
+  const sources = [financialItems(ratios), financialItems(keystats)];
+
+  // Stockbit ships the index's own median PE in the same payload. It does not feed the score —
+  // that would silently change what the bands mean — but it is the one peer reference available
+  // here, and it turns "PE 8.0" into "PE 8.0 against a market median of 8.0", which is the
+  // comparison the absolute bands cannot make.
+  const marketPer = findMetric(sources, ["IHSG PE Ratio TTM (Median)"]);
 
   for (const metric of VALUATION_METRICS) {
-    const value = findNumber(ratios, metric.candidates) ?? findNumber(keystats, metric.candidates);
+    const value = findMetric(sources, metric.names);
     if (value === null) {
       notFound.push(metric.key.toUpperCase());
       continue;
@@ -704,6 +780,19 @@ export function valuationPillar(keystats: unknown, ratios: unknown): Pillar {
   }
 
   if (notFound.length > 0) notes.push(`Not found in the payload: ${notFound.join(", ")}.`);
+
+  const per = typeof evidence.per === "number" ? evidence.per : null;
+  if (marketPer !== null) {
+    evidence.marketPerMedian = round(marketPer, 3);
+    if (per !== null && marketPer > 0) {
+      evidence.perVsMarket = round(per / marketPer, 3);
+      const stance = per < marketPer * 0.9 ? "below" : per > marketPer * 1.1 ? "above" : "in line with";
+      notes.push(
+        `PE ${round(per, 2)} is ${stance} the IHSG median of ${round(marketPer, 2)}. ` +
+          "This is context only — it does not feed the score, and the index median is not a sector peer group.",
+      );
+    }
+  }
 
   if (scores.length === 0) {
     return {

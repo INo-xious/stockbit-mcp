@@ -376,34 +376,96 @@ test("findNumber survives a cycle", () => {
   assert.equal(findNumber(a, ["per"]), null);
 });
 
+/**
+ * Build a payload in the shape Stockbit ACTUALLY returns.
+ *
+ * These fixtures used to be flat (`{ per: 6, pbv: 0.8 }`) and every test passed, because the parser
+ * made the same wrong assumption. The real payload nests named items, so valuation was `missing` for
+ * every stock on the live API while the suite stayed green. Fixtures written from the same belief as
+ * the code cannot falsify that belief — this helper exists so the shape is stated in exactly one
+ * place and a future test cannot quietly reintroduce the flat one.
+ *
+ * `wrap` selects between the two real row shapes: keystats flattens, ratios nests under `fitem`.
+ */
+function finPayload(items: Record<string, string | number>, wrap: "flat" | "fitem" = "fitem"): unknown {
+  return {
+    closure_fin_items_results: [
+      {
+        fin_name_results: Object.entries(items).map(([name, value]) =>
+          wrap === "flat"
+            ? { fitem_name: name, fitem_value: String(value) }
+            : { fitem: { id: "0", name, value: String(value) } },
+        ),
+      },
+    ],
+  };
+}
+
+const PER = "Current PE Ratio (TTM)";
+const PBV = "Current Price to Book Value";
+const ROE = "Return on Equity (TTM)";
+const DER = "Debt to Equity Ratio (Quarter)";
+
 test("cheap fundamentals score above expensive ones", () => {
-  const cheap = valuationPillar({}, { per: 6, pbv: 0.8, roe: 25, der: 0.3 });
-  const expensive = valuationPillar({}, { per: 60, pbv: 8, roe: -5, der: 4 });
+  const cheap = valuationPillar({}, finPayload({ [PER]: 6, [PBV]: 0.8, [ROE]: 25, [DER]: 0.3 }));
+  const expensive = valuationPillar({}, finPayload({ [PER]: 60, [PBV]: 8, [ROE]: -5, [DER]: 4 }));
 
   assert.ok((cheap.score as number) > 0, `cheap scored ${cheap.score}`);
   assert.ok((expensive.score as number) < 0, `expensive scored ${expensive.score}`);
   assert.equal(cheap.status, "ok");
 });
 
+test("both real row shapes are read — keystats flattens, ratios nests under fitem", () => {
+  // The two endpoints disagree about the row shape. Reading only one of them is the bug that made
+  // valuation vanish, so both must be pinned.
+  const nested = valuationPillar({}, finPayload({ [PER]: 6, [PBV]: 0.8, [ROE]: 25, [DER]: 0.3 }, "fitem"));
+  const flat = valuationPillar(finPayload({ [PER]: 6, [PBV]: 0.8, [ROE]: 25, [DER]: 0.3 }, "flat"), {});
+  assert.equal(nested.evidence.per, 6);
+  assert.equal(flat.evidence.per, 6, "the keystats row shape must parse too");
+  assert.equal(flat.score, nested.score);
+});
+
+test("presentation in the value is parsed, and a dash means absent rather than zero", () => {
+  // Values arrive as display strings: "17.30%", "1,390.55". A literal "-" means the metric does not
+  // apply to this issuer — a bank has no inventory turnover — and zero would score as excellent.
+  const p = valuationPillar({}, finPayload({ [PER]: "8.00", [ROE]: "17.30%", [PBV]: "1,234.50", [DER]: "-" }));
+  assert.equal(p.evidence.roe, 17.3, "a percent suffix must be stripped, not parsed as NaN");
+  assert.equal(p.evidence.pbv, 1234.5, "a thousands separator must not truncate the number");
+  assert.equal(p.evidence.der, undefined, "a dash must not become 0");
+  assert.match(p.notes.join(" "), /Not found in the payload: DER/);
+});
+
 test("a loss-making company is not treated as infinitely cheap", () => {
-  const loss = valuationPillar({}, { per: -12 });
+  const loss = valuationPillar({}, finPayload({ [PER]: -12 }));
   assert.ok((loss.score as number) < 0);
 });
 
 test("a thin valuation read is degraded, not passed off as a full one", () => {
-  const thin = valuationPillar({}, { per: 10 });
+  const thin = valuationPillar({}, finPayload({ [PER]: 10 }));
   assert.equal(thin.status, "degraded");
   assert.match(thin.notes.join(" "), /Not found in the payload: PBV, ROE, DER/);
 
-  const full = valuationPillar({}, { per: 10, pbv: 1, roe: 15, der: 0.5 });
+  const full = valuationPillar({}, finPayload({ [PER]: 10, [PBV]: 1, [ROE]: 15, [DER]: 0.5 }));
   assert.equal(full.status, "ok");
 });
 
 test("ratios win over keystats when both carry the same metric", () => {
   // Two sibling unmapped endpoints are searched with the same names; the precedence must be pinned,
   // not left to whichever argument happens to be first.
-  const p = valuationPillar({ per: 60 }, { per: 6 });
+  const p = valuationPillar(finPayload({ [PER]: 60 }, "flat"), finPayload({ [PER]: 6 }));
   assert.equal(p.evidence.per, 6);
+});
+
+test("the IHSG median is reported as context and never folded into the score", () => {
+  // It is the only peer reference in the payload, but it is the whole market rather than a sector,
+  // so letting it move the score would quietly change what the absolute bands mean.
+  const withMedian = valuationPillar({}, finPayload({ [PER]: 8, "IHSG PE Ratio TTM (Median)": 7.99 }));
+  const without = valuationPillar({}, finPayload({ [PER]: 8 }));
+
+  assert.equal(withMedian.evidence.marketPerMedian, 7.99);
+  assert.equal(withMedian.score, without.score, "context must not move the score");
+  assert.match(withMedian.notes.join(" "), /in line with the IHSG median/);
+  assert.match(withMedian.notes.join(" "), /does not feed the score/);
 });
 
 test("no locatable metric makes valuation missing, and it always says it has no peer denominator", () => {
@@ -719,8 +781,9 @@ function fakeDeps(opts: FakeOptions = {}) {
         return brokerSummary([500, 100, 50, 30, 20], [200, 150, 120, 100, 80]);
       }),
     priceBands: (symbol) => guard("priceBands", () => ({ ...NO_BANDS, symbol })),
-    keystats: () => guard("keystats", () => ({ per: 10, pbv: 1.2 })),
-    ratios: () => guard("ratios", () => ({ roe: 18, der: 0.6 })),
+    // Real shapes: keystats flattens its rows, ratios nests them under `fitem`.
+    keystats: () => guard("keystats", () => finPayload({ [PER]: 10, [PBV]: 1.2 }, "flat")),
+    ratios: () => guard("ratios", () => finPayload({ [ROE]: 18, [DER]: 0.6 })),
     sentiment: (_symbol, limit) =>
       guard("sentiment", () => {
         seen.sentimentLimit = limit;
