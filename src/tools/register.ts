@@ -43,6 +43,7 @@ import { walkForward, type Fold } from "../analysis/robustness.js";
 import { PRESET_IDS, presetSpec, type StrategySpec } from "../analysis/strategy.js";
 import { detectPatterns, type PatternId } from "../analysis/patterns.js";
 import { alignment } from "../analysis/timeframe.js";
+import { analyze, type AnalyzeDeps } from "../analysis/analyze.js";
 import { scan, symbolOf, type UniverseSource } from "../analysis/scan.js";
 import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
@@ -1419,6 +1420,75 @@ export function registerTools(server: McpServer): void {
           };
         }
         return core.runScreenerTemplate(a.template_id, a.type ?? "TEMPLATE_TYPE_CUSTOM", a.limit);
+      }),
+  );
+
+  /* ---------------------------------- synthesis ---------------------------------- */
+
+  server.tool(
+    "analyze",
+    "Weigh several readings of one IDX stock into a single lean — bullish, neutral or bearish — with " +
+      "a confidence score and the evidence behind both.\n" +
+      "CONFIDENCE IS NOT A PROBABILITY. It measures how complete and internally consistent the " +
+      "evidence is — how many pillars were readable, whether they agree, how far the composite sits " +
+      "from neutral, and how fresh the data is. It STOPS AT 90 by construction, because nothing in " +
+      "this data source could justify claiming more about a future price.\n" +
+      "Four weighted pillars: broker flow and positioning (0.35 — the signal no other data source " +
+      "has), trend across daily/weekly/monthly (0.30), valuation (0.20), candlestick patterns (0.15). " +
+      "A pillar that cannot be read is reported as MISSING, contributes nothing, and its weight is " +
+      "redistributed — it never lands as a neutral vote, because 'we could not see it' and 'we looked " +
+      "and it was balanced' are different answers.\n" +
+      "WHAT IT CANNOT DO: there is no analyst consensus or price target anywhere in this server, so " +
+      "nothing here reflects what analysts forecast. Valuation is scored against ABSOLUTE bands, not " +
+      "sector peers — treat it as weak for banks, property and cyclicals. Community sentiment is " +
+      "counted, never scored.\n" +
+      "FLOOR-LOCKED STOCKS: when the last close sits on the auto-rejection floor, broker " +
+      "accumulation-versus-distribution carries no information; the flow pillar is downgraded and says " +
+      "so. Read that as unreliable, not as bearish.\n" +
+      "COST: about 27 upstream requests at the default 260 bars — 22 bar pages (12 rows each) plus " +
+      "five single-shot reads — issued sequentially. Use `technicals` or `timeframe_alignment` if you " +
+      "only want the numbers.",
+    {
+      symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      bars: z.coerce
+        .number()
+        .optional()
+        .describe("Daily sessions to pull (default 260 ≈ one trading year; 500 also fills the monthly view)"),
+      broker_period: z
+        .enum(core.BROKER_SUMMARY_PERIODS)
+        .optional()
+        .describe("Broker-flow window (default LAST_7_DAYS). YEAR_TO_DATE costs the same one request."),
+      pattern_window: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Sessions of candlesticks to read (default 10). Must be at least 1."),
+      include_sentiment: z
+        .boolean()
+        .optional()
+        .describe("Fetch the community post count for context (default true). Never scored."),
+    },
+    async (a) =>
+      runTool(() => {
+        const deps: AnalyzeDeps = {
+          bars: (symbol, count) => core.getBars({ symbol, bars: count }),
+          brokerSummary: (symbol, period) => core.getBrokerSummary({ symbol, period }),
+          priceBands: (symbol) => core.getPriceBands(symbol),
+          keystats: (symbol) => core.getKeystats(symbol),
+          ratios: (symbol) => core.getRatios(symbol),
+          sentiment: (symbol, limit) => core.getSentimentStream(symbol, limit),
+        };
+        return analyze(
+          {
+            symbol: a.symbol,
+            bars: a.bars,
+            brokerPeriod: a.broker_period,
+            patternWindow: a.pattern_window,
+            includeSentiment: a.include_sentiment,
+          },
+          deps,
+        );
       }),
   );
 

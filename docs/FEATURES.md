@@ -1,6 +1,6 @@
 # Features and how to use them
 
-26 tools over Stockbit's private API, plus a standalone alert daemon. Everything reads; one tool
+35 tools over Stockbit's private API, plus a standalone alert daemon. Everything reads; one tool
 writes (`chart_layout_save`) and it requires explicit confirmation.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
@@ -10,6 +10,68 @@ to 2026-07-31").
 **Conventions used everywhere:** symbols are IDX tickers (`BBRI`, `TLKM`, `GOTO`; `IHSG` is the
 composite index). Money is IDR. **Volume is LOTS** — 1 lot = 100 shares. Dates are `YYYY-MM-DD`.
 Empty results on a weekend or public holiday are normal, not errors.
+
+---
+
+
+## One verdict from all of it (added 2026-08-10)
+
+### `analyze`
+Weighs several readings of one stock into a single lean, with a confidence score and the evidence
+behind both.
+
+> "analyze BBRI"
+> "analyze GOTO using year-to-date broker flow"
+
+Every other tool here answers one question from one source, and `deep_dive` fetches five of them
+without weighing any — the workflow engine deliberately cannot compute. This is the tool that
+actually combines them.
+
+**Four weighted pillars:**
+
+| pillar | weight | what it reads |
+|---|---|---|
+| Broker flow & positioning | 0.35 | foreign net flow as a share of traded value, plus whether accumulation is concentrated while distribution is diffuse |
+| Trend & timeframe alignment | 0.30 | the daily / weekly / monthly votes from `timeframe_alignment`, normalised |
+| Valuation | 0.20 | PER, PBV, ROE, DER against absolute bands |
+| Candlestick patterns | 0.15 | recent detections from `patterns`, weighted by shape fidelity and recency |
+
+Broker flow leads because it is the one signal no other data source has, and because it reports
+positioning rather than restating price.
+
+**Confidence is not a probability.** It measures how complete and internally consistent the evidence
+is — how much of it was readable (30), whether the pillars agree (30), how far the composite sits
+from neutral (20), and how fresh the price data is (10). It therefore **stops at 90**, because
+nothing in this data source could justify claiming more about a future price. Read it as "how much
+this reading is worth", never as "how likely the price is to go up".
+
+**A pillar that cannot be read is `missing`** — it contributes nothing, its weight is redistributed
+across the pillars that were read, and it costs confidence. It never lands as a neutral vote,
+because *"we could not see it"* and *"we looked and it was balanced"* are different answers and
+averaging them turns the first into the second.
+
+**When nothing at all could be read, this errors rather than answering.** A dead session token makes
+every source fail, and a `lean: "neutral"` with a confidence of 15 would look like an analysis while
+actually being a login prompt — the same shape as the `top_movers` bug that hid for months. You get
+the real cause instead, which for an expired token is "run `stockbit-auth login`".
+
+**What it cannot do**, stated in every response's `limits`:
+
+- **No analyst consensus or price targets.** That data class is not in the route table, so nothing
+  here reflects what analysts forecast.
+- **Valuation is absolute, not peer-relative.** `ratios` can say what BBRI's PBV is; nothing here can
+  ask "and is that cheap *for a bank*". Treat this pillar as weak for banks, property and cyclicals.
+- **Community sentiment is counted, never scored.** Turning Indonesian-language retail posts into a
+  directional number needs a classifier this server does not have, and a keyword tally would be
+  noise wearing a label.
+
+**Floor-locked stocks** get a downgraded flow pillar that says so: when the last close sits on the
+auto-rejection floor, every broker on both sides fills at one price and accumulation-versus-
+distribution carries no information. Read that as unreliable, not as bearish.
+
+Cost is about 22 upstream requests at the default 260 bars, issued **sequentially** — a fan-out of
+concurrent first-calls is what invalidated the stored session token on 2026-08-05. Use `technicals`
+or `timeframe_alignment` if you only want the numbers.
 
 ---
 

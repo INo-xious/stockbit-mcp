@@ -8,6 +8,55 @@ from naming.
 
 ## Unreleased
 
+### `analyze` — the synthesis layer (2026-08-10)
+
+One new tool. 35 tools, 544 tests. No new route, no new request shape: it composes sources the
+server already reads, so the closed route table and ADR-0002's boundary are untouched.
+
+**The gap it fills.** Every other tool answers one question from one source. `deep_dive` fetches
+five of them and weighs none, because the workflow engine deliberately refuses to compute — steps
+are declarative, there are no conditionals and no arithmetic over results. So nothing here has ever
+turned six readings into a position on them. Four weighted pillars now do: broker flow (0.35), trend
+across timeframes (0.30), valuation (0.20), candlestick patterns (0.15). Broker flow leads because
+it is the only pillar no other data source in the world can serve.
+
+**Confidence is capped at 90 by construction, and the cap is the honest part.** It scores evidence
+quality — completeness (30), agreement (30), distance from neutral (20), freshness (10) — and is
+explicitly not a probability that price moves the way the lean points. A scale running to 100 invites
+exactly the reading the data cannot support.
+
+There is a second reason the word needed care. `Detection.confidence` in `patterns.ts` already means
+something else — how closely a candle matches its textbook proportions — and that module is emphatic
+it is not a probability either. The two must never be summed or averaged. Pattern confidence is used
+only as a within-pillar ranking weight and cannot reach `Confidence.value`; a test asserts the cap
+holds when every pillar is saturated.
+
+**A missing pillar is not a neutral vote.** Its weight is redistributed across what was readable and
+it costs completeness, so a three-pillar report stays on the −100…+100 scale while reading as the
+thinner report it is. Folding it in as a zero instead would drag every lean toward neutral and
+nothing in the output would show why. The same distinction runs through the pillars themselves: an
+**unreadable timeframe abstains** rather than voting flat, because `alignment()` scores both
+"genuinely flat" and "the averages could not be computed" as 0 and only the second is an abstention.
+
+**A total failure errors instead of answering.** This is the correction the first stdio smoke test
+forced: against a dead token every source threw, and the tool returned `success: true` with
+`lean: "neutral"` and a confidence of 15 — a result that looks like an analysis and is actually a
+login prompt. That is the `top_movers` failure shape exactly, where an always-empty list was
+indistinguishable from a working tool. Partial failure still degrades per source and names what it
+lost; only a report with nothing in it throws, and it rethrows the **original** error so an expired
+token is reported as an expired token rather than as "no valuation metric could be located".
+
+**Two limits are structural and are stated in every response** rather than left for a reader to
+discover: there is no analyst consensus anywhere in this server, and valuation is scored against
+absolute bands because Stockbit's industry aggregate is not in the route table — so "is that cheap
+*for a bank*" cannot be asked, and the pillar is systematically wrong in a predictable direction for
+banks, property and cyclicals. Community sentiment is fetched and **counted, never scored**: a
+keyword tally over ~30 Indonesian-language retail posts would be noise wearing a label.
+
+**The fetches are sequential on purpose.** Concurrent first-calls are what outran the refresh lock
+and invalidated the stored token on 2026-08-05. A test asserts no two upstream reads overlap —
+mutation-checked by rewriting them as `Promise.all`, which fails it.
+
 ### Analytics parity with the TradingView MCPs (2026-08-09)
 
 Six new tools — `backtest`, `strategy_compare`, `patterns`, `timeframe_alignment`, `scan`,
