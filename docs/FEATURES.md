@@ -61,6 +61,9 @@ the real cause instead, which for an expired token is "run `stockbit-auth login`
   here reflects what analysts forecast.
 - **Valuation is absolute, not peer-relative.** `ratios` can say what BBRI's PBV is; nothing here can
   ask "and is that cheap *for a bank*". Treat this pillar as weak for banks, property and cyclicals.
+  The one reference it does report is the **IHSG median PE**, which ships in the same payload — so
+  you get "PE 8.0 against a market median of 7.99". That is context only, never part of the score:
+  the index is not a sector, and letting it move the number would change what the bands mean.
 - **Community sentiment is counted, never scored.** Turning Indonesian-language retail posts into a
   directional number needs a classifier this server does not have, and a keyword tally would be
   noise wearing a label.
