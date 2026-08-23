@@ -52,11 +52,16 @@ const SEKURITAS = ORIGINS.sekuritas;
 /* --------------------------- the permitted set, asserted --------------------------- */
 
 test("the permitted request set on EXODUS is exactly this list", () => {
-  // Locked deliberately: adding a route must show up as a change to this assertion, so a new
-  // authenticated request shape cannot land without a reviewer seeing it.
+  // A snapshot, and the point of it is that changing it is deliberate. `POST /screener/templates`
+  // appears TWICE because two route keys share it: `screenerRun` evaluates and persists nothing,
+  // `screenerSave` creates a saved screen, and the only difference on the wire is one body field.
   assert.deepEqual(permittedRequests("exodus"), [
     "DELETE /chartbit/charts/:layoutId",
     "DELETE /chartbit/settings/:templateName",
+    "DELETE /screener/favorites",
+    "DELETE /screener/templates/:templateId",
+    "DELETE /watchlist/:watchlistId",
+    "DELETE /watchlist/:watchlistId/company/:companyId/item",
     "GET /analyst-ratings/:symbol",
     "GET /analyst-ratings/:symbol/consensus",
     "GET /auth/eipo/webview/link",
@@ -157,10 +162,16 @@ test("the permitted request set on EXODUS is exactly this list", () => {
     "POST /chartbit/settings",
     "POST /emitten-metadata/shareholders/token",
     "POST /login/refresh",
+    "POST /screener/favorites",
+    "POST /screener/templates",
     "POST /screener/templates",
     "POST /stream/v3/trending",
+    "POST /watchlist",
+    "POST /watchlist/:watchlistId/company/item",
     "PUT /chartbit/charts/:layoutId",
     "PUT /chartbit/settings/:templateName",
+    "PUT /watchlist/:watchlistId",
+    "PUT /watchlist/favorite/:watchlistId",
   ]);
 });
 
@@ -296,8 +307,30 @@ const ORDER_WRITES = ["orderAmend", "orderBuy", "orderCancel", "orderSell"];
  */
 const EIPO_ORDER_WRITES = ["eipoOrderPlace", "eipoOrderVerify"];
 
-/** ADR-0006. Watchlist and screener edits. Empty until that increment. */
-const ACCOUNT_WRITES: string[] = [];
+/**
+ * ADR-0006. Watchlist and screener edits.
+ *
+ * None of these touches money, and each is one action a person can reverse in the Stockbit app —
+ * which is exactly why they are listed rather than waved through. They change what LATER answers
+ * are about: several tools take "the user's watchlist" as the universe they sweep, so a symbol
+ * quietly added changes the result of every scan that follows.
+ *
+ * `screenerSave` is the row worth looking at twice. It is the same method and path as
+ * `screenerRun`, which is filed below as a POST that reads, and the only difference on the wire is
+ * one body field. Two route keys is what keeps the write from riding along under the read.
+ */
+const ACCOUNT_WRITES = [
+  "screenerFavoriteAdd",
+  "screenerFavoriteRemove",
+  "screenerSave",
+  "screenerTemplateDelete",
+  "watchlistAddItem",
+  "watchlistCreate",
+  "watchlistDelete",
+  "watchlistFavorite",
+  "watchlistRemoveItem",
+  "watchlistRename",
+];
 
 /**
  * POSTs that read.
@@ -392,6 +425,28 @@ test("the e-IPO writes touch only e-IPO, and only this account's own subscriptio
   }
   assert.equal(buildUrl("eipoOrderPlace"), `${SEKURITAS}/eipo/order`);
   assert.equal(buildUrl("eipoOrderVerify"), `${SEKURITAS}/eipo/order/verify`);
+});
+
+test("the account writes touch only watchlists and the screener", () => {
+  // The same containment property the chart and e-IPO classes have. Nothing in this class can reach
+  // a portfolio, an order, the settings blob, or the stream.
+  for (const name of ACCOUNT_WRITES) {
+    const route = ROUTES[name as RouteName];
+    assert.ok(
+      route.template.startsWith("/watchlist") || route.template.startsWith("/screener/"),
+      `${name} (${route.method} ${route.template}) mutates something outside the lists`,
+    );
+    assert.equal(route.host, "exodus", `${name} must be on the market-data host`);
+  }
+});
+
+test("saving a screen and running one are separate rows on the same path", () => {
+  // The whole reason `screenerSave` exists as its own key. If these ever collapse into one row, a
+  // write is filed under a read and the class list above stops meaning anything.
+  assert.equal(ROUTES.screenerRun.template, ROUTES.screenerSave.template);
+  assert.equal(ROUTES.screenerRun.method, ROUTES.screenerSave.method);
+  assert.ok(READ_SHAPED_POSTS.includes("screenerRun"));
+  assert.ok(ACCOUNT_WRITES.includes("screenerSave"));
 });
 
 test("the writes that would matter most are absent, by every verb", () => {

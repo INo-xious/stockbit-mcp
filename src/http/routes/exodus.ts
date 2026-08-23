@@ -258,10 +258,55 @@ export const EXODUS_ROUTES = {
    */
   screenerRun: { host: "exodus", method: "POST", template: "/screener/templates", auth: "main" },
   screenerFavorites: { host: "exodus", method: "GET", template: "/screener/favorites", auth: "main" },
+
+  /**
+   * The screener WRITES. ADR-0006.
+   *
+   * `screenerSave` is the same method and path as `screenerRun` and is a SEPARATE row on purpose.
+   * The only difference on the wire is one body field — `save: "1"` instead of `"0"` — and a route
+   * table that could not tell them apart would file a write under the read-shaped POST that runs an
+   * ad-hoc screen. Two keys means the write class in `test/transport.test.ts` names it as a
+   * mutation, which is the whole point of that list.
+   */
+  screenerSave: { host: "exodus", method: "POST", template: "/screener/templates", auth: "main" },
+  screenerTemplateDelete: {
+    host: "exodus",
+    method: "DELETE",
+    template: "/screener/templates/:templateId",
+    auth: "main",
+  },
+  screenerFavoriteAdd: { host: "exodus", method: "POST", template: "/screener/favorites", auth: "main" },
+  screenerFavoriteRemove: { host: "exodus", method: "DELETE", template: "/screener/favorites", auth: "main" },
   screenerFinItems: { host: "exodus", method: "GET", template: "/screener/finitem-watchlist", auth: "main" },
 
   /* ------------------------------- watchlist ------------------------------- */
   watchlistSymbols: { host: "exodus", method: "GET", template: "/watchlist/:watchlistId/symbols", auth: "main" },
+
+  /**
+   * The watchlist WRITES. ADR-0006.
+   *
+   * The mildest mutations in this project, and still gated. A watchlist is a statement of what the
+   * user is paying attention to — several tools read it as the universe to scan — so an entry
+   * silently added or a list silently deleted changes what every later answer is about. None of
+   * them touches money, which is why they are reversible by hand and why `watchlist_delete` is the
+   * only one that asks twice.
+   */
+  watchlistCreate: { host: "exodus", method: "POST", template: "/watchlist", auth: "main" },
+  watchlistRename: { host: "exodus", method: "PUT", template: "/watchlist/:watchlistId", auth: "main" },
+  watchlistDelete: { host: "exodus", method: "DELETE", template: "/watchlist/:watchlistId", auth: "main" },
+  watchlistAddItem: {
+    host: "exodus",
+    method: "POST",
+    template: "/watchlist/:watchlistId/company/item",
+    auth: "main",
+  },
+  watchlistRemoveItem: {
+    host: "exodus",
+    method: "DELETE",
+    template: "/watchlist/:watchlistId/company/:companyId/item",
+    auth: "main",
+  },
+  watchlistFavorite: { host: "exodus", method: "PUT", template: "/watchlist/favorite/:watchlistId", auth: "main" },
 
   /* -------------------------------- chartbit -------------------------------- */
   /**

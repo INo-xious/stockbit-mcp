@@ -103,3 +103,20 @@ that exchange has been captured:
 web e-IPO flow first, then subscribe for the minimum lot on an open offering with the user watching,
 then read `eipo_my_order` and the mutation log together.
 
+### Watchlist and screener edits
+
+Every one of these is verified by reading the account back, so a wrong body shape shows up as
+`not-visible` rather than as a false success. What is not known:
+
+| | What is guessed | How it fails |
+|---|---|---|
+| `POST /watchlist` body | `{name, description}` | The list does not appear on the re-listing → `not-visible`. |
+| `PUT /watchlist/:id` body | `{name}` | The name does not change → `not-visible`. |
+| `POST /watchlist/:id/company/item` body | `{company_id}`, resolved from the ticker through the quote endpoint | The symbol is not in the list afterwards → `not-visible`. |
+| `POST /screener/templates` with `save: "1"` | That `"1"` is what persists, against the `"0"` that does not. `"0"` IS observed; `"1"` is inferred from the same bundle reducer. | Nothing new appears on the template listing → `not-visible`. |
+| `POST`/`DELETE /screener/favorites` body | `{template_id}` | The `favorite` flag on the listing does not change → `not-visible`. |
+
+`screener_save` refuses a name that already exists rather than posting it, because whether Stockbit
+replaces or duplicates has not been observed and those are very different outcomes for someone who
+curated a screen. That refusal can be relaxed once one save over an existing name has been watched.
+

@@ -42,6 +42,15 @@ const WRITES = [
   "order_buy",
   "order_cancel",
   "order_sell",
+  "screener_delete",
+  "screener_favorite",
+  "screener_save",
+  "watchlist_add",
+  "watchlist_create",
+  "watchlist_delete",
+  "watchlist_favorite",
+  "watchlist_remove",
+  "watchlist_rename",
 ];
 
 /** A server stub that records registrations without needing a transport. */
@@ -120,5 +129,23 @@ test("the tools that can change something are exactly these, and everything else
   // deliberate edit to a list that says why it exists.
   for (const name of ["order_buy", "order_sell", "order_amend", "order_cancel"]) {
     assert.ok(writes.includes(name), `${name} must be registered as a write`);
+  }
+});
+
+test("destructiveHint is graded rather than uniform", () => {
+  // Marking every write destructive teaches a client to ignore the flag, which makes the deletions
+  // LESS visible rather than more. So the ones that cannot be undone in the Stockbit app in a few
+  // taps are marked true and the rest are not, and this asserts the grading rather than the count.
+  const server = new McpServer({ name: "stockbit-mcp", version: "test" });
+  registerTools(server);
+  const tools = (server as unknown as {
+    _registeredTools: Record<string, { annotations?: { destructiveHint?: boolean } }>;
+  })._registeredTools;
+
+  for (const name of ["order_buy", "order_sell", "watchlist_delete", "screener_delete", "eipo_order"]) {
+    assert.equal(tools[name].annotations?.destructiveHint, true, `${name} should warn the client`);
+  }
+  for (const name of ["watchlist_add", "watchlist_create", "watchlist_rename", "screener_save"]) {
+    assert.equal(tools[name].annotations?.destructiveHint, false, `${name} is reversible in two taps`);
   }
 });
