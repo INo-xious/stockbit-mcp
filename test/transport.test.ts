@@ -165,14 +165,45 @@ test("the permitted request set on EXODUS is exactly this list", () => {
 });
 
 test("the permitted request set on CARINA is exactly this list", () => {
-  // The trading host. Every row here is part of the unlock chain; the account reads and the order
-  // writes are separate increments and each has to edit this list to arrive.
+  // The trading host: the unlock chain, and the account reads that describe money. Every row is a
+  // GET except the four that manage the session itself — the order writes are a separate increment
+  // and have to edit this list, and ORDER_WRITES below, to arrive.
   assert.deepEqual(permittedRequests("carina"), [
+    "GET /account",
+    "GET /balance/cash",
+    "GET /balance/cash/info",
+    "GET /formula/v2",
+    "GET /history/detail",
+    "GET /history/performance/portfolio/:performanceKind",
+    "GET /history/performance/trade",
+    "GET /history/realized",
+    "GET /history/realized/detail",
+    "GET /history/v3",
+    "GET /order/v2/detail",
+    "GET /order/v2/list",
+    "GET /portfolio/v2/detail",
+    "GET /portfolio/v2/list",
+    "GET /portfolio/v2/summary",
+    "GET /stock/tradable",
+    "GET /trading/info",
+    "GET /v2/sub-account/list",
     "POST /auth/logout",
     "POST /auth/pin/validate",
     "POST /auth/refresh",
     "POST /auth/v2/login",
   ]);
+});
+
+test("every carina account read is a GET, and carries the securities credential", () => {
+  // Two claims in one. A non-GET here would be an order route arriving as an ordinary row, and a
+  // route on this host carrying the MAIN token would be the market-data credential sent to the
+  // brokerage — a token presented somewhere it was never issued for.
+  const session = new Set(["carinaAuthLogin", "carinaAuthLogout", "carinaAuthPinValidate", "carinaAuthRefresh"]);
+  for (const [name, route] of Object.entries(ROUTES)) {
+    if (route.host !== "carina" || session.has(name)) continue;
+    assert.equal(route.method, "GET", `${name} is a ${route.method} on carina and is not part of the unlock chain`);
+    assert.equal(route.auth, "securities", `${name} must carry the securities credential, not ${route.auth}`);
+  }
 });
 
 test("the permitted request set on API-SEKURITAS is exactly this list", () => {
@@ -859,6 +890,22 @@ test("the guard would catch a bypass (negative control)", () => {
   );
 });
 
+/**
+ * Strip comments, so a guard about CODE is not tripped by prose explaining an endpoint.
+ *
+ * A path inside a doc comment cannot reach the wire, and the modules that call these routes are
+ * exactly the ones that should be naming them in their documentation. The alternative — wording
+ * every comment around the strings it forbids — leaves the guard passing for the wrong reason.
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+/** Path-shaped string literals in `source`, matched the way the guard below matches them. */
+function declaredPaths(source: string): string[] {
+  return [...stripComments(source).matchAll(/["'`](\/[a-z0-9][a-z0-9\-/]*)/gi)].map((m) => m[1]);
+}
+
 test("no module outside the route tables declares a URL path for a Stockbit route", () => {
   // Catches the shape the M0 refactor removed: a call site holding its own path string, which is how
   // an off-table route reaches the wire even with the bearer correctly centralized. The route files
@@ -867,15 +914,22 @@ test("no module outside the route tables declares a URL path for a Stockbit rout
   const routePaths = Object.values(ROUTES).map((route) => route.template.split("/")[1]);
   for (const file of sourceFiles(SRC)) {
     if (file === TRANSPORT || file.startsWith(ROUTE_DIR)) continue;
-    const source = readFileSync(file, "utf8");
-    for (const match of source.matchAll(/["'`](\/[a-z0-9][a-z0-9\-/]*)/gi)) {
-      const path = match[1];
+    for (const path of declaredPaths(readFileSync(file, "utf8"))) {
       if (routePaths.includes(path.split("/")[1])) {
         offenders.push(`${file.slice(SRC.length + 1)}: ${path}`);
       }
     }
   }
   assert.deepEqual(offenders, [], "declare the path in src/http/routes/, not at the call site");
+});
+
+test("the path guard reads code, not prose (negative control)", () => {
+  // Both halves matter. Without the first this guard could be silently disarmed by the comment
+  // stripper; without the second, documenting an endpoint where it is used becomes a test failure,
+  // which is how the comments end up saying less than they should.
+  assert.deepEqual(declaredPaths('const url = "/portfolio/v2/list";'), ["/portfolio/v2/list"]);
+  assert.deepEqual(declaredPaths('/** Reads `/portfolio/v2/list`. */\nconst x = 1;'), []);
+  assert.deepEqual(declaredPaths('// see `/order/v2/buy`\nconst y = 2;'), []);
 });
 
 test("AUTHENTICATED_ORIGIN still names the market-data host", () => {

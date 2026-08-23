@@ -248,6 +248,51 @@ export const BUILTIN_WORKFLOWS: Workflow[] = [
       },
     ],
   },
+
+  {
+    name: "portfolio_review",
+    description:
+      "Look at what the account ACTUALLY holds, then at each holding properly: who has been on " +
+      "each side of the tape in it, and what the weighted reading says about it now. The one " +
+      "workflow whose subject is the user's own money rather than a screen of candidates.",
+    // No inputs. The holdings are whatever the account holds — a recipe that let a caller pass a
+    // symbol list would be `deep_dive` run several times, and would invite reviewing a position
+    // the account does not actually have.
+    inputs: [],
+    steps: [
+      {
+        id: "portfolio",
+        tool: "portfolio",
+        describe: "Every holding, its average price, and what it is worth now",
+        params: {},
+      },
+      {
+        id: "cash",
+        tool: "cash_balance",
+        describe: "Cash, and the buying power that is not the same number",
+        // Optional: a review of the positions is still worth having if the balance endpoint is
+        // down, and this step failing must not throw away the fan-outs below.
+        optional: true,
+        params: {},
+      },
+      {
+        id: "flow",
+        tool: "broker_summary",
+        describe: "Who accumulated and who distributed, per holding",
+        forEach: "steps.portfolio.data.holdings",
+        limit: 5,
+        params: { symbol: "{{item.symbol}}" },
+      },
+      {
+        id: "verdict",
+        tool: "analyze",
+        describe: "The weighted reading for each holding, with its confidence",
+        forEach: "steps.portfolio.data.holdings",
+        limit: 5,
+        params: { symbol: "{{item.symbol}}" },
+      },
+    ],
+  },
 ];
 
 export function findWorkflow(name: string): Workflow | undefined {

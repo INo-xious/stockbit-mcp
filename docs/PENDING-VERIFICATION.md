@@ -13,28 +13,45 @@
 | `period` contradiction | **Resolved, and the catalogue was the wrong one.** Six preset windows work, including `YEAR_TO_DATE` — which aggregates Jan→Aug in a single request. Now exposed on the tool. |
 | ARA/ARB field names | **Confirmed, and the shape was not what was assumed.** The bands arrive as `{"value":"3,910"}` while the foreign figures beside them are bare numbers. `price_bands` now reports `missing: []` on a live call. |
 | Watchlist | **Confirmed and wired.** 5 lists, 116 symbols in the default one. The index returns `data` as an array; the detail wraps rows in `data.result` — they are not interchangeable. |
-| Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Five custom screens on the probed account. |
+| `/charts/{SYMBOL}` | **Resolved: the spelling was the problem.** The web client calls `/charts/{SYM}/daily?timeframe=1w\|1m\|3m\|ytd\|1y\|3y\|5y` — LOWERCASE, with `is_include_previous_historical=true` on `ytd` and `1w`. Every earlier probe sent an uppercase spelling (`1D`, `DAILY`, `TIMEFRAME_DAILY`) and was rejected, which is why the route looked real-but-unusable for months. Wired and covered by tests; a whole series now costs one request instead of the 12-row paged walk. |\n| Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Five custom screens on the probed account. |
 
 ## Still open
-
-### `/charts/{SYMBOL}` — the one worth chasing
-
-Real: `GET /charts/BBRI` returns 400 with `errors: [{ key: "Timeframe" }]`, and a 400 naming a
-parameter means the route exists. But every timeframe spelling tried was rejected — `timeframe`,
-`tf`, `interval`, `resolution`, each with `daily`, `1D`, `D`, `DAILY`, `TIMEFRAME_DAILY`.
-
-Left unwired rather than guessed at further, the same way `/chartbit/{symbol}/price/daily` was.
-
-**Why it matters more than anything else on this list:** bars cost 12 rows a page today, which is
-the constraint behind every cost number in `scan`, `backtest` and `timeframe_alignment`. A route
-returning a whole series in one request would relax it by roughly 40x.
-
-**How to settle it:** open a Stockbit chart in a browser with DevTools recording, and read the exact
-call off the Network panel. That is one observation and it ends the guessing — which is precisely
-how the Chartbit layout format was recovered.
 
 ### Unmapped orderbook fields
 
 `iepiev` (pre-opening indicative price/volume), `has_foreign_bs`, `total_bid_offer`, `market_data`,
 `autoreject_*`. `iepiev` in particular is worth a look during the pre-opening auction (08:45 WIB) —
 a previous pass listed it as "unobserved" rather than absent.
+
+### The whole trading host — `carina.stockbit.com`
+
+**Nothing on this host has been observed live.** Reading it needs a securities session, which needs
+the account owner's six-digit PIN at their own terminal — this project never stores one, so there is
+no capture and no fixture taken from a real response. Everything in `src/trading/account.ts` is
+projected against candidate key names read off Stockbit's web bundle.
+
+That is why those reads behave differently from every other family here:
+
+- **Unrecognised fields are dropped, and only their NAMES are reported** (`unmappedKeys`). Elsewhere
+  this project returns the raw row; on a brokerage response an unmapped field is as likely to be an
+  account number as a metric, and a tool result is text a model relays.
+- **`readFrom` names the wire key every value was read from**, so a wrong guess shows up as a field
+  that is absent next to a pile of unknown key names — never as a confident wrong number.
+- **A thousand-separated number is refused rather than parsed.** The two Indonesian conventions
+  disagree about which separator is decimal, and a money figure read under the wrong one is off by a
+  factor of a thousand while still looking like money.
+
+What to settle first, in order of what goes wrong if it is wrong:
+
+| | What is guessed | How it fails |
+|---|---|---|
+| Lots vs shares | Which of `lot`/`lots`/`balance`/`shares`/`quantity` holds which | Silently 100× out; a wrong position size still looks like a position size. `derived` marks anything computed rather than read. |
+| Commission | `buy_fee`/`sell_fee` on `/formula/v2`, and whether a value like `0.0015` is a fraction or a percentage (split at 0.05) | A net proceed quoted on the wrong rate — the one number a user checks before agreeing to an order. `fees.source: "default"` means it could not be read at all. |
+| `order/v2/detail` parameter | `order_id` | Most likely a 400 or the whole list, so it is visible; a wrong order returned under the right id would not be. |
+| Order status vocabulary | `status`, `order_status`, `state` and the words in them | An order reported as open that is not, or vice versa. |
+| Account identity keys | `name`, `account_number`, `rdn`, `sid` | Masked before they leave, so a miss loses information rather than leaking it. |
+| `/history/v3` period tokens | Not guessed — passed through verbatim | The server rejects an unknown token, which is the right place for it to fail. |
+
+**How to settle it:** run `stockbit-auth trading-login` on the account owner's machine, then call the
+ten read tools once each and record the actual key names. That is one session and it converts every
+row above into a fact.

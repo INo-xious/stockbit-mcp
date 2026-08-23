@@ -248,6 +248,7 @@ test("every built-in workflow is internally consistent", () => {
   const registered = new Set([
     "quote", "technicals", "price_chart", "broker_summary", "broker_distribution",
     "alert_check", "top_movers", "pine_script", "strategy_compare", "scan", "patterns",
+    "analyze", "portfolio", "cash_balance",
   ]);
   for (const workflow of BUILTIN_WORKFLOWS) {
     assert.doesNotThrow(() => validateWorkflow(workflow, registered), `${workflow.name} is invalid`);
@@ -360,6 +361,43 @@ const REAL_TOOL_SHAPES: Record<string, unknown> = {
   },
   // detectPatterns, wrapped by the tool
   patterns: { symbol: "BBRI", detections: [{ pattern: "hammer", index: 118, date: "2026-08-05" }], count: 1 },
+  // analyze → AnalysisReport
+  analyze: {
+    symbol: "BBRI",
+    asOf: "2026-08-05",
+    lean: "bullish",
+    score: 21,
+    confidence: { value: 62, basis: [] },
+    pillars: [{ name: "brokerFlow", state: "read", score: 30, weight: 0.35 }],
+    context: { sentiment: null, bands: null, lastClose: 4820, priceDate: "2026-08-05" },
+    warnings: [],
+    limits: ["No analyst consensus exists in this data source."],
+    cost: { pagesFetched: 3, upstreamRequests: 5, elapsedMs: 900 },
+    disclaimer: "Not investment advice.",
+  },
+  // trading/account.getPortfolio → Portfolio. `holdings` is the array portfolio_review fans out over,
+  // and `symbol` on a holding is OPTIONAL — a row whose ticker key was not recognised has none. A
+  // fan-out that then interpolates `{{item.symbol}}` passes undefined, which the engine drops, and
+  // the step fails at the tool's own schema rather than silently reading the wrong stock.
+  portfolio: {
+    holdings: [
+      { symbol: "BBRI", lots: 25, shares: 2500, averagePrice: 4100, readFrom: { lots: "lot" }, unmappedKeys: [] },
+      { symbol: "TLKM", lots: 30, shares: 3000, readFrom: { shares: "balance" }, unmappedKeys: [] },
+    ],
+    totals: { marketValueIdr: 19025000, readFrom: {}, unmappedKeys: [] },
+    count: 2,
+    rowsFrom: "list",
+    envelope: "data",
+    payloadKeys: ["list"],
+  },
+  // trading/account.getCashBalance → CashBalance
+  cash_balance: {
+    cashIdr: 5000000,
+    buyingPowerIdr: 12500000,
+    readFrom: { cashIdr: "cash" },
+    unmappedKeys: [],
+    envelope: "data",
+  },
 };
 
 /** The envelope `invokeTool` produces, so a built-in's `steps.<id>.data` path resolves for real. */
