@@ -19,6 +19,18 @@
 import { z } from "zod";
 import * as account from "../trading/account.js";
 import { PERFORMANCE_KINDS } from "../trading/account.js";
+import { previewOrder, type OrderTicket } from "../trading/preview.js";
+import {
+  amendOrder,
+  cancelOrder,
+  orderLogPath,
+  placeBuy,
+  placeSell,
+  type OrderResult,
+} from "../trading/orders.js";
+import { TICKET_TTL_MS } from "../trading/tickets.js";
+import { hasStoredSession } from "../auth/session.js";
+import { tradingPolicy } from "../settings.js";
 import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
@@ -222,4 +234,191 @@ export function registerTradingTools(define: Definer): void {
     {},
     async () => runTool(() => account.getAccount()),
   );
+
+  /* ------------------------------- order entry ------------------------------- */
+
+  define.read(
+    "trading_status",
+    "Whether this server may place an order right now, and why not if it may not.\n" +
+      "Read it before offering to trade anything. Trading is OFF by default and the user turns it " +
+      "on themselves with `stockbit-auth trading-enable`; nothing this server does can turn it on, " +
+      "and no argument to any tool can override it.\n" +
+      "`policy.reason` is written for the user — relay it rather than paraphrasing. " +
+      "`policy.autoConfirmIgnored`, when present, means autoConfirm was configured but is not being " +
+      "honoured because no per-order value cap is set.\n" +
+      "This tool reads local configuration and makes no request, so it works with no trading session.",
+    {},
+    async () =>
+      runTool(async () => {
+        const policy = tradingPolicy();
+        return {
+          policy,
+          sessionStored: hasStoredSession("securities"),
+          ticketTtlSeconds: TICKET_TTL_MS / 1000,
+          orderLog: orderLogPath(),
+          protocol:
+            "Two steps, always: order_preview builds a ticket and returns its `summary`; the user reads that " +
+            "summary and agrees to THAT order; order_buy/order_sell/order_amend/order_cancel take the ticket " +
+            "id and confirm: true. The write tools take no price and no quantity, so what is placed is what " +
+            "was shown.",
+        };
+      }),
+  );
+
+  define.read(
+    "order_preview",
+    "Price an order and check it, WITHOUT sending anything. This is step one of two and the only " +
+      "way to get a ticket id.\n" +
+      "RELAY `summary` VERBATIM to the user. It is one paragraph carrying the lots, the price, the " +
+      "gross, the commission and its source, the net, the last trade, the distance from it, and " +
+      "today's auto-rejection band. Do not summarise it further and do not round its numbers — the " +
+      "user is agreeing to those figures.\n" +
+      "Then ASK, in plain words, and wait. Only after they agree do you call the matching write " +
+      "tool with this ticket id and confirm: true. Never set confirm on their behalf.\n" +
+      `The ticket expires in ${TICKET_TTL_MS / 1000} seconds because it was priced against a market ` +
+      "that moves. An expired ticket is refused, not silently repriced.\n" +
+      "CHECKS: `checks` each carry `ok` and a `detail` written for a person. `ok: false` blocks the " +
+      "order. A check marked `unverified` PASSED BY DEFAULT because its input could not be read — " +
+      "it means 'not contradicted', never 'confirmed', and `warnings` names every one of them.\n" +
+      "A ticket is returned even when checks fail: the user asked what would happen, and the " +
+      "answer is why it will not work.\n" +
+      "For amend and cancel, pass `order_id` from the `orders` tool; the symbol and the untouched " +
+      "terms are read from the open order.",
+    {
+      action: z.enum(["buy", "sell", "amend", "cancel"]).describe("What the order would do"),
+      symbol: z.string().optional().describe("IDX ticker. Required for buy and sell; read from the order otherwise."),
+      price: z.coerce.number().optional().describe("Limit price in rupiah. Must sit on the IDX tick grid."),
+      lots: z.coerce.number().optional().describe("Lots — 1 lot is 100 shares. The wire takes shares; this does the arithmetic."),
+      order_id: z.string().optional().describe("The order to amend or cancel, from the `orders` tool"),
+    },
+    async (a) =>
+      runTool(() =>
+        previewOrder({
+          action: a.action as OrderTicket["action"],
+          symbol: a.symbol ? String(a.symbol) : undefined,
+          price: a.price as number | undefined,
+          lots: a.lots as number | undefined,
+          orderId: a.order_id ? String(a.order_id) : undefined,
+        }),
+      ),
+  );
+
+  const writeArgs = {
+    ticket_id: z.string().describe("The id from order_preview. This tool takes no price and no quantity."),
+    confirm: z
+      .boolean()
+      .optional()
+      .describe("Must be true. The user must have agreed to THIS ticket's summary, in words, first."),
+  };
+
+  const submit = (
+    run: (options: { ticketId: string; confirm?: boolean; elicit?: Definer["elicit"] }) => Promise<OrderResult>,
+  ) =>
+    async (a: Record<string, unknown>) =>
+      runTool(async () => {
+        const result = await run({
+          ticketId: String(a.ticket_id),
+          confirm: a.confirm === true,
+          // Passed through, not called here: when the client supports it the human is asked directly,
+          // on top of the confirmation the caller already had to pass.
+          elicit: define.elicit ? define.elicit.bind(define) : undefined,
+        });
+        return { ...result, message: describeOutcome(result), ...auditNote(result) };
+      });
+
+  define.write(
+    "order_buy",
+    "PLACE A REAL BUY ORDER on the Indonesian exchange with the user's own money. There is no undo.\n" +
+      "Step two of two. Call `order_preview` first, relay its `summary` to the user in words, ask " +
+      "them, and pass `confirm: true` only after they have agreed to that specific order. Setting " +
+      "confirm without asking is placing an order the user did not agree to.\n" +
+      "This tool takes a ticket id and nothing else — no price, no quantity — so what reaches the " +
+      "exchange is exactly what the user was shown.\n" +
+      "READ `outcome` BEFORE REPORTING ANYTHING. `ok` is the only class that means the order is on " +
+      "the book and was seen there. `not-visible`, `outcome-unknown` and `landed-despite-error` all " +
+      "mean the state is uncertain — relay `message` verbatim and DO NOT RESEND. A resend is how " +
+      "one intention becomes two orders.",
+    writeArgs,
+    submit(placeBuy),
+    { destructiveHint: true, idempotentHint: false },
+  );
+
+  define.write(
+    "order_sell",
+    "PLACE A REAL SELL ORDER on the Indonesian exchange, against the user's actual position. There " +
+      "is no undo.\n" +
+      "Same two-step protocol as `order_buy`: preview, relay the summary, ask, then pass the ticket " +
+      "id with `confirm: true`. The ticket is what defines the order; this tool takes no terms.\n" +
+      "READ `outcome` before reporting. Anything other than `ok` means the state is uncertain — " +
+      "relay `message` verbatim and never resend.",
+    writeArgs,
+    submit(placeSell),
+    { destructiveHint: true, idempotentHint: false },
+  );
+
+  define.write(
+    "order_amend",
+    "CHANGE a working order's price or size on the exchange. Preview it first with " +
+      "`action: \"amend\"` and the `order_id`, relay the summary, ask, then pass the ticket id with " +
+      "`confirm: true`.\n" +
+      "An amend can fill at the new terms the instant it is accepted, so it is a real order " +
+      "decision and not an edit, and there is no undo. If `outcome` is not `ok`, the order may " +
+      "still be working at its OLD terms or at the new ones — relay `message`, read `orders` " +
+      "before acting, and do not resend.",
+    writeArgs,
+    submit(amendOrder),
+    { destructiveHint: true, idempotentHint: false },
+  );
+
+  define.write(
+    "order_cancel",
+    "CANCEL a working order. Preview it first with `action: \"cancel\"` and the `order_id`, then " +
+      "pass the ticket id with `confirm: true`.\n" +
+      "A cancel races the market: an order can fill between the preview and the cancel arriving, in " +
+      "which case there is nothing to cancel and the fill stands — which is why a cancel has no " +
+      "undo either. `outcome: \"ok\"` means the order is gone from the book or marked cancelled; " +
+      "anything else means read `orders` before telling the user what they own, and do not resend.",
+    writeArgs,
+    submit(cancelOrder),
+    { destructiveHint: true, idempotentHint: false },
+  );
+}
+
+/**
+ * One sentence per outcome class, written for a person.
+ *
+ * Kept here rather than in `src/trading/orders.ts` for the reason ADR-0003 gives: the core returns
+ * facts, the tool layer turns them into the words a model will repeat. A model that reads only this
+ * sentence must still end up telling the user the truth — which is why none of the uncertain
+ * branches contain the word "placed" on its own.
+ */
+function describeOutcome(result: OrderResult): string {
+  const what = `${result.action.toUpperCase()} ${result.shares ?? ""} shares of ${result.symbol}`.replace(/\s+/g, " ");
+  switch (result.outcome) {
+    case "ok":
+      return `${what} is on the book${result.orderId ? ` as order ${result.orderId}` : ""}, confirmed by reading the orders back.`;
+    case "rejected":
+      return `${what} was REJECTED and is not working. ${result.error ?? ""}`.trim();
+    case "write-failed":
+      return `${what} was refused before it reached the exchange, so nothing is on the book. ${result.error ?? ""}`.trim();
+    case "not-found-after-error":
+      return (
+        `The request for ${what} errored (${result.error}) and the order list read back clean, so it does not ` +
+        "appear to have been placed. Check `orders` before trying again."
+      );
+    default:
+      // Every remaining class is an uncertain one, and each carries its own sentence already.
+      return result.outcomeUnknown ?? `The outcome of ${what} could not be established. Do not resend it.`;
+  }
+}
+
+/** Says plainly when the attempt is NOT in the audit log, rather than implying that it is. */
+function auditNote(result: OrderResult): { auditLog: string } | { auditGap: string } {
+  return result.logged
+    ? { auditLog: result.logPath }
+    : {
+        auditGap:
+          `This attempt could NOT be written to ${result.logPath}. The order itself is unaffected, but there ` +
+          "is no audit line for it — tell the user.",
+      };
 }

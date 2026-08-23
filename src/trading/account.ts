@@ -626,17 +626,24 @@ export async function listOrders(opts: { symbol?: string } = {}): Promise<OrderL
   const stockCode = opts.symbol ? normalizeSymbol(opts.symbol) : undefined;
   return cached(`carina:orders:${stockCode ?? "all"}`, TTL.orders, async () => {
     const body = await listOrdersRaw({ stockCode });
-    const payload = payloadOf(body, "orders");
-    const { rows, from, payloadKeys } = rowsOf(payload.value, "orders");
-    return {
-      orders: rows.map(projectOrder),
-      count: rows.length,
-      rowsFrom: from,
-      envelope: payload.from,
-      payloadKeys,
-      request: { ...(stockCode ? { stockCode } : {}) },
-    };
+    return { ...readOrderList(body), request: { ...(stockCode ? { stockCode } : {}) } };
   });
+}
+
+/**
+ * Project an already-fetched order list. Pure, so the write path can read its own snapshot with the
+ * same projection the display tool uses instead of inventing a second one.
+ */
+export function readOrderList(body: unknown): Omit<OrderList, "request"> {
+  const payload = payloadOf(body, "orders");
+  const { rows, from, payloadKeys } = rowsOf(payload.value, "orders");
+  return {
+    orders: rows.map(projectOrder),
+    count: rows.length,
+    rowsFrom: from,
+    envelope: payload.from,
+    payloadKeys,
+  };
 }
 
 /**

@@ -523,7 +523,7 @@ function fakeDefiner(): { definer: Definer; reads: Map<string, ToolHandler>; wri
   return { definer, reads, writes };
 }
 
-test("ten reads, no writes — nothing in this family can place an order", async () => {
+test("the reads and the writes are exactly these, and nothing drifts between them", async () => {
   const { definer, reads, writes } = fakeDefiner();
   registerTradingTools(definer);
   assert.deepEqual(
@@ -533,15 +533,20 @@ test("ten reads, no writes — nothing in this family can place an order", async
       "cash_balance",
       "order_detail",
       "order_history",
+      "order_preview",
       "orders",
       "portfolio",
       "position",
       "stock_tradable",
       "trade_performance",
       "trading_info",
+      "trading_status",
     ],
   );
-  assert.deepEqual(writes, [], "order entry is ADR-0004 and arrives through define.write, not here");
+  // The four that move money, and only those four. `order_preview` is a read on purpose: it prices
+  // and checks an order and sends nothing, so a saved workflow recipe may reach it — and a recipe
+  // that reaches the preview still cannot reach anything that places what it priced.
+  assert.deepEqual([...writes].sort(), ["order_amend", "order_buy", "order_cancel", "order_sell"]);
 });
 
 test("the arguments a model sends reach the wire", async () => {
@@ -558,20 +563,45 @@ test("the arguments a model sends reach the wire", async () => {
   assert.ok(lastUrl("/history/performance/portfolio/").pathname.endsWith("/cumulative-return"));
 });
 
-test("every tool description tells the model the fields are not observed", () => {
-  const { definer } = fakeDefiner();
-  const descriptions: string[] = [];
-  const capturing: Definer = {
-    read: (_name, description) => {
-      descriptions.push(description);
+/** Every registered description, by tool name and by whether it was a read or a write. */
+function descriptions(): { reads: Map<string, string>; writes: Map<string, string> } {
+  const reads = new Map<string, string>();
+  const writes = new Map<string, string>();
+  registerTradingTools({
+    read: (name, description) => {
+      reads.set(name, description);
     },
-    write: definer.write,
-    writeNames: definer.writeNames,
-  };
-  registerTradingTools(capturing);
-  assert.equal(descriptions.length, 10);
-  for (const description of descriptions) {
-    assert.match(description, /PENDING VERIFICATION/);
-    assert.match(description, /trading-login/, "and how to get a session, since none of these work without one");
+    write: (name, description) => {
+      writes.set(name, description);
+    },
+    writeNames: () => [...writes.keys()],
+  });
+  return { reads, writes };
+}
+
+test("every account read tells the model its fields are not observed", () => {
+  const { reads } = descriptions();
+  // The two exceptions are named rather than filtered by a pattern. `trading_status` reads local
+  // configuration and makes no request; `order_preview` carries its own, longer warning about
+  // checks that could not be verified, and repeating the projection note there would bury it.
+  const exempt = new Set(["trading_status", "order_preview"]);
+  for (const [name, description] of reads) {
+    if (exempt.has(name)) continue;
+    assert.match(description, /PENDING VERIFICATION/, name);
+    assert.match(description, /trading-login/, `${name} must say how to get a session`);
+  }
+  assert.equal(reads.size - exempt.size, 10);
+});
+
+test("every write description says there is no undo, and forbids a resend", () => {
+  // These four are the only tools in this project that cannot be taken back. A model reads the
+  // description and nothing else before deciding how to talk about the result, so the two facts
+  // that matter most have to be in it.
+  const { writes } = descriptions();
+  assert.equal(writes.size, 4);
+  for (const [name, description] of writes) {
+    assert.match(description, /no undo/i, `${name} must say the order cannot be taken back`);
+    assert.match(description, /confirm: true/, `${name} must state the confirmation requirement`);
+    assert.match(description, /resend|RESEND/, `${name} must forbid resending on an uncertain outcome`);
   }
 });

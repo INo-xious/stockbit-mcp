@@ -191,18 +191,33 @@ test("the permitted request set on CARINA is exactly this list", () => {
     "POST /auth/pin/validate",
     "POST /auth/refresh",
     "POST /auth/v2/login",
+    "POST /order/v2/amend",
+    "POST /order/v2/buy",
+    "POST /order/v2/cancel",
+    "POST /order/v2/sell",
   ]);
 });
 
-test("every carina account read is a GET, and carries the securities credential", () => {
-  // Two claims in one. A non-GET here would be an order route arriving as an ordinary row, and a
-  // route on this host carrying the MAIN token would be the market-data credential sent to the
-  // brokerage — a token presented somewhere it was never issued for.
+test("every carina route is a GET unless it is named as a session or an order route", () => {
+  // Two claims in one. A non-GET that is not on either list below would be a write arriving as an
+  // ordinary row — the bulk-amend and bulk-cancel endpoints exist on this host and have no tool, no
+  // argument for one, and therefore no route. And a route here carrying the MAIN token would be the
+  // market-data credential sent to the brokerage, presented somewhere it was never issued for.
   const session = new Set(["carinaAuthLogin", "carinaAuthLogout", "carinaAuthPinValidate", "carinaAuthRefresh"]);
+  const orders = new Set(["orderBuy", "orderSell", "orderAmend", "orderCancel"]);
+  // The two token-exchange rows are the exception and are asserted by name: the login carries no
+  // credential of ours because it is what mints one, and the refresh carries the refresh token in
+  // the BODY rather than a header. Both are spelled out so a third exception cannot arrive quietly.
+  assert.equal(ROUTES.carinaAuthLogin.auth, "none");
+  assert.equal(ROUTES.carinaAuthRefresh.auth, "refreshSecurities");
+
   for (const [name, route] of Object.entries(ROUTES)) {
-    if (route.host !== "carina" || session.has(name)) continue;
-    assert.equal(route.method, "GET", `${name} is a ${route.method} on carina and is not part of the unlock chain`);
-    assert.equal(route.auth, "securities", `${name} must carry the securities credential, not ${route.auth}`);
+    if (route.host !== "carina") continue;
+    if (name !== "carinaAuthLogin" && name !== "carinaAuthRefresh") {
+      assert.equal(route.auth, "securities", `${name} must carry the securities credential, not ${route.auth}`);
+    }
+    if (session.has(name) || orders.has(name)) continue;
+    assert.equal(route.method, "GET", `${name} is a ${route.method} on carina and is on neither named list`);
   }
 });
 
@@ -250,8 +265,14 @@ const CHARTBIT_WRITES = [
   "chartbitSettingsCreate",
 ];
 
-/** ADR-0004. Orders on carina. Empty until the order increment lands. */
-const ORDER_WRITES: string[] = [];
+/**
+ * ADR-0004. The four routes that move money.
+ *
+ * Four, and only these four. `/order/v2/amend/bulk`, `/order/v2/bulk-cancel` and the whole
+ * day-trade family exist on this host and are deliberately absent: each would need its own argument
+ * about what a confirmation means when one "yes" covers several orders, and none has been made.
+ */
+const ORDER_WRITES = ["orderAmend", "orderBuy", "orderCancel", "orderSell"];
 
 /** ADR-0004. e-IPO subscription orders, under the same trading switch. Empty until that increment. */
 const EIPO_ORDER_WRITES: string[] = [];

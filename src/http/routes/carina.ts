@@ -106,4 +106,28 @@ export const CARINA_ROUTES = {
   /** Who the account is. Masked before it leaves `src/trading/account.ts`. */
   account: { host: "carina", method: "GET", template: "/account", auth: "securities" },
   subAccountList: { host: "carina", method: "GET", template: "/v2/sub-account/list", auth: "securities" },
+
+  /* -------------------------------- orders -------------------------------- */
+
+  /**
+   * The four routes that move money. ADR-0004.
+   *
+   * Every other write in this project can be undone: a chart layout is snapshotted and restored, a
+   * watchlist entry is added back. An order cannot. Once the exchange has it, the only thing that
+   * exists is another order — which is why `src/trading/orders.ts` NEVER auto-cancels on a failed
+   * verification, and why an outcome it could not read is reported as unknown rather than guessed.
+   *
+   * Declaring them here does not enable them. `trading.enabled` in `~/.stockbit/settings.json` is
+   * off by default, `STOCKBIT_TRADING=off` overrides it in the one direction it can, and every one
+   * of these needs a per-order confirmation on top. The route table's job is only to say that the
+   * URL exists and which credential it takes.
+   *
+   * The four kept OUT are as deliberate as the four in: `/order/v2/amend/bulk`,
+   * `/order/v2/bulk-cancel` and the day-trade family have no tool, no argument for one, and
+   * therefore no row.
+   */
+  orderBuy: { host: "carina", method: "POST", template: "/order/v2/buy", auth: "securities" },
+  orderSell: { host: "carina", method: "POST", template: "/order/v2/sell", auth: "securities" },
+  orderAmend: { host: "carina", method: "POST", template: "/order/v2/amend", auth: "securities" },
+  orderCancel: { host: "carina", method: "POST", template: "/order/v2/cancel", auth: "securities" },
 } as const satisfies Record<string, RouteSpec>;

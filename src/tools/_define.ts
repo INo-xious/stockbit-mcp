@@ -51,6 +51,19 @@ export interface Definer {
   ): void;
   /** The names registered as writes, for the guard test and for `server.ts`'s instructions. */
   writeNames(): string[];
+  /**
+   * Ask the human directly, when the client can.
+   *
+   * MCP elicitation is the only channel in this protocol that reaches a person rather than a model.
+   * For an order that matters: `confirm: true` says a model decided the user agreed, and this says
+   * the user themselves clicked yes. Both are required — this is an additional gate, never a
+   * replacement for the confirmation the caller passes.
+   *
+   * Optional so a caller can be constructed without one (tests build a Definer by hand), and it
+   * answers "unavailable" rather than throwing when the client advertises no elicitation support,
+   * because a client that cannot ask must not become a client that cannot trade.
+   */
+  elicit?(message: string): Promise<"accepted" | "declined" | "unavailable">;
 }
 
 /**
@@ -103,5 +116,42 @@ export function makeDefiner(server: McpServer, handlers: Map<string, ToolHandler
     writeNames() {
       return [...writes].sort();
     },
+
+    async elicit(message: string) {
+      const inner = (server as unknown as { server?: ElicitCapableServer }).server;
+      if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) return "unavailable";
+      try {
+        const result = await inner.elicitInput({
+          message,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              confirm: {
+                type: "boolean",
+                title: "Place this order?",
+                description: "Yes places it on the exchange. There is no undo.",
+              },
+            },
+            required: ["confirm"],
+          },
+        });
+        // Anything short of an explicit yes is a no. A cancelled dialog is not an agreement, and
+        // neither is an accept whose content did not actually carry the box being ticked.
+        return result.action === "accept" && result.content?.confirm === true ? "accepted" : "declined";
+      } catch {
+        // The client claimed the capability and then failed to answer. Treating that as consent
+        // would be the worst reading of it.
+        return "unavailable";
+      }
+    },
   };
+}
+
+/** The slice of the low-level server this module uses, so the SDK's shape is named in one place. */
+interface ElicitCapableServer {
+  getClientCapabilities?(): { elicitation?: unknown } | undefined;
+  elicitInput?(params: {
+    message: string;
+    requestedSchema: Record<string, unknown>;
+  }): Promise<{ action: string; content?: Record<string, unknown> }>;
 }

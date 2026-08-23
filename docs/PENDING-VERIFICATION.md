@@ -55,3 +55,33 @@ What to settle first, in order of what goes wrong if it is wrong:
 **How to settle it:** run `stockbit-auth trading-login` on the account owner's machine, then call the
 ten read tools once each and record the actual key names. That is one session and it converts every
 row above into a fact.
+
+### Order entry — the first real order is a live gate, not a test run
+
+The order apparatus is written, tested against a fake account that lies in every way a real one can,
+and **off by default**. What it has never done is send a real order, and three things about the wire
+are still read rather than observed:
+
+| | What is guessed | What settles it |
+|---|---|---|
+| `platform_order_type` | **Not sent at all.** It is in Stockbit's own body and its vocabulary is unknown; an invented enum member is how a request gets accepted meaning something other than what the user was shown. | The HAR. If it is required, the first attempt is a 400 that names it. |
+| `split_order` | Sent as `false`. A boolean whose meaning is not in question. | The HAR. |
+| The error envelope | `rejected` vs `write-failed` is decided by matching the message against /reject\|insufficient\|invalid/. | The HAR, plus one deliberately-rejected order. |
+| The order-list shape | Whether a placed order comes back carrying our `ui_ref`. Verification falls back to an id diff when it does not. | One placed order, read back. |
+
+**The protocol for the first live order** (the ADR-0003 precedent, with the user watching the web UI):
+
+1. With trading disabled, call `order_buy` — it must refuse, and `~/.stockbit/order-mutations.log`
+   must record nothing but the refusal.
+2. The user places and cancels **one 1-lot order in the Stockbit web UI with DevTools recording a
+   HAR**. That fixes `platform_order_type`, the error envelope and the list/detail shapes before this
+   code sends anything.
+3. `stockbit-auth trading-enable --max-order-value <small>`.
+4. `order_preview` a BUY of 1 lot of a liquid, low-priced stock, far below the market but above ARB.
+   Read the summary aloud. The user says yes. `order_buy confirm:true`.
+5. Compare the `orderId` and status against what the web UI shows.
+6. `order_preview` a cancel of it, then `order_cancel`. Read the mutation log together.
+7. `stockbit-auth trading-disable`, and confirm the refusal returns.
+
+Amend gets the same treatment on another session.
+
