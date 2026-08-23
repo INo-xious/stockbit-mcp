@@ -4,8 +4,17 @@
  * Two halves, and the second is the one that matters. A permitted-route test proves the policy
  * accepts the right list; it does not prove every request goes through the policy. Before M0,
  * `src/auth/session.ts` called `fetch` with a bearer outside `src/http/` entirely — a route test
- * would have passed straight over that hole. So the bypass guard below reads the source tree and
- * fails if any module other than the transport builds a credentialed request.
+ * would have passed straight over that hole. So the bypass guards below read the source tree and
+ * fail if any module other than the transport builds a credentialed request.
+ *
+ * ## What changed when a second and third host arrived
+ *
+ * "The approved origin" is now three approved origins carrying three different credentials, and
+ * that turns a new class of mistake into a real risk: a carina path reachable on exodus, or an
+ * exodus path reachable with the trading token. Neither fails loudly on the wire — carina answers a
+ * foreign path with a well-formed 404 envelope that reads exactly like "this symbol has no data".
+ * So the snapshot is per host, `isPermitted` is asserted to be host-scoped in both directions, and
+ * every route's auth kind is checked against its host.
  */
 // Isolate the token store BEFORE importing modules that read it.
 import { mkdtempSync } from "node:fs";
@@ -20,25 +29,36 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   AUTHENTICATED_ORIGIN,
+  ORIGINS,
   ROUTES,
+  SEGMENT_NAMES,
   authenticatedRequest,
   buildUrl,
+  domainOf,
   isPermitted,
+  isRefreshRoute,
   permittedRequests,
   resolvePath,
+  type Host,
+  type RouteName,
 } from "../src/http/transport.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
+const EXODUS = ORIGINS.exodus;
+const CARINA = ORIGINS.carina;
+const SEKURITAS = ORIGINS.sekuritas;
 
 /* --------------------------- the permitted set, asserted --------------------------- */
 
-test("the permitted request set is exactly this list", () => {
+test("the permitted request set on EXODUS is exactly this list", () => {
   // Locked deliberately: adding a route must show up as a change to this assertion, so a new
   // authenticated request shape cannot land without a reviewer seeing it.
-  assert.deepEqual(permittedRequests(), [
-    // Chartbit READS only. ADR-0002 rejects Chartbit writes and keeps its reads in scope; the test
-    // below asserts every declared Chartbit route is a GET and that no write path is reachable.
+  assert.deepEqual(permittedRequests("exodus"), [
+    "GET /auth/eipo/webview/link",
+    // The RETIRED per-symbol Chartbit pair. Still declared because `src/core/layout.ts` and
+    // `src/core/layoutwrite.ts` still call them; the Chartbit increment removes route, module and
+    // tool together rather than leaving any of the three pointing at nothing.
     "GET /chartbit/:symbol/layout",
     "GET /chartbit/initial/:symbol",
     "GET /chartbit/template",
@@ -60,16 +80,18 @@ test("the permitted request set is exactly this list", () => {
     "GET /order-trade/broker/distribution",
     "GET /paywall/eligibility/check",
     // The screener, all READS. Running a saved screen is a plain GET — an earlier research pass
-    // assumed a POST and concluded this needed its own ADR; it does not. Creating or saving a
-    // screen is account state and is deliberately absent.
+    // assumed a POST and concluded this needed its own ADR; it does not.
     "GET /screener/metric",
     "GET /screener/preset",
     "GET /screener/templates",
     "GET /screener/templates/:templateId",
     "GET /screener/universe",
+    // A GET that returns a CREDENTIAL: the first hop of the trading unlock. Authorised by the main
+    // session, so holding it does not by itself unlock trading — the PIN is the second factor.
+    "GET /sekuritas/auth/token",
     "GET /stream/v3/symbol/:symbol",
     "GET /user-setting/configurations",
-    // The user's own watchlists. Reads only: adding to or removing from a list is account state.
+    // The user's own watchlists. Reads only so far.
     "GET /watchlist",
     "GET /watchlist/:watchlistId",
     "POST /chartbit/:symbol/layout",
@@ -78,42 +100,227 @@ test("the permitted request set is exactly this list", () => {
   ]);
 });
 
-test("the permitted writes are exactly these three", () => {
-  // This assertion is the tripwire. Before ADR-0003 it read `["loginRefresh"]`, and editing it is
-  // the deliberate act that lets a mutation into the project — which is what it is for. A write
-  // beyond session refresh and chart persistence needs the argument made again, not a quiet edit.
-  const writes = Object.entries(ROUTES).filter(([, route]) => route.method !== "GET");
-  assert.deepEqual(
-    writes.map(([name]) => name).sort(),
-    ["chartbitSaveLayout", "chartbitSaveTemplate", "loginRefresh"],
-    "a new non-GET route is a change of posture, not a feature (ADR-0002, ADR-0003)",
-  );
-  assert.equal(buildUrl("loginRefresh"), `${AUTHENTICATED_ORIGIN}/login/refresh`);
-  assert.equal(buildUrl("chartbitSaveLayout", { symbol: "BBRI" }), `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`);
-  assert.equal(buildUrl("chartbitSaveTemplate"), `${AUTHENTICATED_ORIGIN}/chartbit/template`);
+test("the permitted request set on CARINA is exactly this list", () => {
+  // The trading host. Every row here is part of the unlock chain; the account reads and the order
+  // writes are separate increments and each has to edit this list to arrive.
+  assert.deepEqual(permittedRequests("carina"), [
+    "POST /auth/logout",
+    "POST /auth/pin/validate",
+    "POST /auth/refresh",
+    "POST /auth/v2/login",
+  ]);
 });
 
-test("every write touches ONLY the session or the user's chart", () => {
-  // The property that survived ADR-0003: mutation is confined to chart persistence. Nothing here
-  // may post to a portfolio, an order, a watchlist, a profile, or the settings blob.
-  const allowed = ["/login/refresh", "/chartbit/:symbol/layout", "/chartbit/template"];
-  for (const [name, route] of Object.entries(ROUTES)) {
-    if (route.method === "GET") continue;
+test("the permitted request set on API-SEKURITAS is exactly this list", () => {
+  assert.deepEqual(permittedRequests("sekuritas"), [
+    "GET /partner/refresh_token",
+    "POST /partner/eipo/access_token",
+  ]);
+});
+
+/* ------------------------------- the write classes ------------------------------- */
+
+/**
+ * Every non-GET route, sorted into named classes, each citing the ADR that admitted it.
+ *
+ * This is the tripwire. Before ADR-0003 the whole list read `["loginRefresh"]`, and editing it is
+ * the deliberate act that lets a mutation into the project — which is what it is for. The classes
+ * exist so that "a new write appeared" is not one undifferentiated fact: a session refresh, a chart
+ * save and an order are three different arguments, and each has to be made in its own place.
+ */
+const SESSION_WRITES = [
+  // Mutate session state only. No account data is touched by any of these.
+  "carinaAuthLogin",
+  "carinaAuthLogout",
+  "carinaAuthPinValidate",
+  "carinaAuthRefresh",
+  "eipoAccessToken",
+  "loginRefresh",
+];
+
+/** ADR-0003. The retired per-symbol pair, removed together with its module in the Chartbit increment. */
+const CHARTBIT_WRITES = ["chartbitSaveLayout", "chartbitSaveTemplate"];
+
+/** ADR-0004. Orders on carina. Empty until the order increment lands. */
+const ORDER_WRITES: string[] = [];
+
+/** ADR-0004. e-IPO subscription orders, under the same trading switch. Empty until that increment. */
+const EIPO_ORDER_WRITES: string[] = [];
+
+/** ADR-0006. Watchlist and screener edits. Empty until that increment. */
+const ACCOUNT_WRITES: string[] = [];
+
+/**
+ * POSTs that read.
+ *
+ * A verb is not a posture: Stockbit uses POST for several pure reads because the query does not fit
+ * in a URL. They are listed separately so "this is a POST" never has to mean "this mutates", and so
+ * that a genuine write cannot hide in the crowd by being called a read-shaped one.
+ */
+const READ_SHAPED_POSTS: string[] = [];
+
+test("every non-GET route belongs to exactly one named write class", () => {
+  const declared = [
+    ...SESSION_WRITES,
+    ...CHARTBIT_WRITES,
+    ...ORDER_WRITES,
+    ...EIPO_ORDER_WRITES,
+    ...ACCOUNT_WRITES,
+    ...READ_SHAPED_POSTS,
+  ].sort();
+  assert.deepEqual(
+    new Set(declared).size,
+    declared.length,
+    "a route named in two classes means two different arguments claim the same mutation",
+  );
+
+  const actual = Object.entries(ROUTES)
+    .filter(([, route]) => route.method !== "GET")
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(
+    actual,
+    declared,
+    "a new non-GET route is a change of posture, not a feature — put it in a class and cite its ADR",
+  );
+});
+
+test("the session writes touch the session and nothing else", () => {
+  // The property ADR-0002 protects, restated now that there are three credential chains: everything
+  // in this class mints, renews, validates or ends a token. None of it can move money or edit
+  // account data, and the paths are the proof.
+  const allowed = [
+    "/login/refresh",
+    "/auth/v2/login",
+    "/auth/refresh",
+    "/auth/pin/validate",
+    "/auth/logout",
+    "/partner/eipo/access_token",
+  ];
+  for (const name of SESSION_WRITES) {
     assert.ok(
-      allowed.includes(route.template),
-      `${name} (${route.method} ${route.template}) mutates something no ADR has approved`,
+      allowed.includes(ROUTES[name as RouteName].template),
+      `${name} is filed as a session write but its path is not one`,
     );
   }
-  // The settings blob holds the user's real chart configuration and is READ-ONLY here.
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), false);
-  // Deleting a named layout destroys it; only creating one was approved.
-  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false);
+  assert.equal(buildUrl("loginRefresh"), `${EXODUS}/login/refresh`);
+  assert.equal(buildUrl("carinaAuthLogin"), `${CARINA}/auth/v2/login`);
+  assert.equal(buildUrl("eipoAccessToken"), `${SEKURITAS}/partner/eipo/access_token`);
+});
+
+test("the chart writes touch only the user's chart", () => {
+  const allowed = ["/chartbit/:symbol/layout", "/chartbit/template"];
+  for (const name of CHARTBIT_WRITES) {
+    assert.ok(allowed.includes(ROUTES[name as RouteName].template), `${name} mutates something ADR-0003 did not approve`);
+  }
+  assert.equal(buildUrl("chartbitSaveLayout", { symbol: "BBRI" }), `${EXODUS}/chartbit/BBRI/layout`);
+  assert.equal(buildUrl("chartbitSaveTemplate"), `${EXODUS}/chartbit/template`);
+});
+
+test("the writes that would matter most are absent, by every verb", () => {
+  // Named individually rather than left to the class assertion, because these are the specific
+  // things a reader wants to see refused: posting as the user, following someone, day-trade and
+  // smart orders (deliberately out of scope), and the settings blob that holds the real chart
+  // configuration.
+  const forbidden: Array<[string, string, string]> = [
+    ["POST", EXODUS, "/stream/write"],
+    ["POST", EXODUS, "/stream/like/1"],
+    ["POST", EXODUS, "/stream/reply"],
+    ["POST", EXODUS, "/stream/follow"],
+    ["POST", EXODUS, "/user-setting/configurations"],
+    ["POST", CARINA, "/order/day-trade/v1/buy"],
+    ["POST", CARINA, "/order/v2/bulk-cancel"],
+    ["POST", SEKURITAS, "/smart-order/bracket-order/v1/order"],
+    ["DELETE", SEKURITAS, "/smart-order/stop-order/v1/order/1"],
+  ];
+  for (const [method, origin, path] of forbidden) {
+    assert.equal(isPermitted(method, `${origin}${path}`), false, `${method} ${origin}${path} must be rejected`);
+  }
+});
+
+test("a path on one host is not thereby permitted on another", () => {
+  // The failure this prevents is quiet, not loud: carina answers an exodus path with a well-formed
+  // 404 envelope, which a parser reads as "this symbol has no data" rather than "wrong host".
+  assert.equal(isPermitted("GET", `${CARINA}/emitten/BBRI/info`), false, "a market-data path on the trading host");
+  assert.equal(isPermitted("GET", `${EXODUS}/order/v2/list`), false, "a trading path on the market-data host");
+  assert.equal(isPermitted("POST", `${EXODUS}/auth/v2/login`), false, "the PIN login is carina's alone");
+  assert.equal(isPermitted("POST", `${SEKURITAS}/login/refresh`), false);
+  assert.equal(isPermitted("GET", `${SEKURITAS}/keystats/BBRI`), false);
+  // And the positive control, so the above is not passing because everything is rejected.
+  assert.equal(isPermitted("GET", `${EXODUS}/emitten/BBRI/info`), true);
+  assert.equal(isPermitted("POST", `${CARINA}/auth/v2/login`), true);
+});
+
+test("every route's auth kind is consistent with its host", () => {
+  // A carina route drawing on the market-data token would send the wrong credential to the right
+  // place — a 401 at best, and at worst a token presented to a host it was not issued for.
+  const allowedByHost: Record<Host, string[]> = {
+    exodus: ["main", "refreshMain"],
+    carina: ["securities", "refreshSecurities", "none"],
+    sekuritas: ["eipo", "refreshEipo", "none"],
+  };
+  for (const [name, route] of Object.entries(ROUTES)) {
+    assert.ok(
+      allowedByHost[route.host].includes(route.auth),
+      `${name} is on ${route.host} but draws on the ${route.auth} credential`,
+    );
+  }
+});
+
+test("only the three refresh routes carry a refresh credential", () => {
+  const refreshRoutes = Object.entries(ROUTES)
+    .filter(([, route]) => route.auth.startsWith("refresh"))
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(refreshRoutes, ["carinaAuthRefresh", "eipoRefreshToken", "loginRefresh"]);
+  for (const name of refreshRoutes) assert.equal(isRefreshRoute(name as RouteName), true);
+  // A refresh route must never 401-retry through a refresh: that recurses on a dead token.
+  assert.equal(isRefreshRoute("emittenInfo"), false);
+});
+
+test("each route's token domain is the one its host's session actually holds", () => {
+  assert.equal(domainOf("emittenInfo"), "main");
+  assert.equal(domainOf("loginRefresh"), "main");
+  assert.equal(domainOf("carinaAuthRefresh"), "securities");
+  assert.equal(domainOf("carinaAuthPinValidate"), "securities");
+  assert.equal(domainOf("eipoRefreshToken"), "eipo");
+  // The two token-exchange endpoints take no credential of OURS — they take a grant, in the body.
+  assert.equal(domainOf("carinaAuthLogin"), null);
+  assert.equal(domainOf("eipoAccessToken"), null);
+});
+
+test("every method in the table is one the client knows how to send", () => {
+  for (const [name, route] of Object.entries(ROUTES)) {
+    assert.ok(
+      ["GET", "POST", "PUT", "DELETE"].includes(route.method),
+      `${name} declares method ${route.method}, which no client verb sends`,
+    );
+  }
 });
 
 test("every declared route builds a URL the policy accepts", () => {
+  const segments = {
+    symbol: "BBRI",
+    moverType: "topGainer",
+    watchlistId: "6252652",
+    templateId: "5951939",
+    companyId: "459",
+    postId: "12345",
+    sectorId: "7",
+    insiderId: "88",
+    layoutId: "4242",
+    brokerCode: "YP",
+    underwriterCode: "AI",
+    indexCode: "IDX30",
+    orderId: "ORD-123_abc",
+    username: "someone.here",
+    templateName: "My Layout 2",
+    emittenType: "company",
+    performanceKind: "total-equity",
+    actionType: "dividend",
+  };
   for (const [name, route] of Object.entries(ROUTES)) {
-    const segments = { symbol: "BBRI", moverType: "topGainer", watchlistId: "6252652", templateId: "5951939" };
-    const url = buildUrl(name as keyof typeof ROUTES, segments);
+    const url = buildUrl(name as RouteName, segments);
     assert.ok(
       isPermitted(route.method, url),
       `${route.method} ${url} was built by the transport but rejected by its own policy`,
@@ -121,32 +328,62 @@ test("every declared route builds a URL the policy accepts", () => {
   }
 });
 
-test("the ONLY writable Chartbit path is the layout, and only by POST", () => {
-  // ADR-0003 opened exactly one door. Everything around it stays shut, including verbs on the very
-  // path we now POST to — DELETE on a layout would destroy it rather than replace it.
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`), true);
+test("the segment validator table and the segment names agree", () => {
+  // A template naming a segment with no validator would throw at call time rather than at review
+  // time; a validator nothing uses is dead weight that looks like coverage.
+  assert.deepEqual(
+    [...SEGMENT_NAMES].sort(),
+    [
+      "actionType",
+      "brokerCode",
+      "companyId",
+      "emittenType",
+      "indexCode",
+      "insiderId",
+      "layoutId",
+      "moverType",
+      "orderId",
+      "performanceKind",
+      "postId",
+      "sectorId",
+      "symbol",
+      "templateId",
+      "templateName",
+      "underwriterCode",
+      "username",
+      "watchlistId",
+    ],
+  );
+  const used = new Set(
+    Object.values(ROUTES).flatMap((route) =>
+      route.template.split("/").filter((p) => p.startsWith(":")).map((p) => p.slice(1)),
+    ),
+  );
+  for (const name of used) {
+    assert.ok(SEGMENT_NAMES.includes(name as never), `route template uses :${name} with no validator`);
+  }
+});
+
+test("the ONLY writable Chartbit path is the layout pair, and only by POST", () => {
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/BBRI/layout`), true);
 
   for (const method of ["PUT", "PATCH", "DELETE"]) {
     assert.equal(
-      isPermitted(method, `${AUTHENTICATED_ORIGIN}/chartbit/BBRI/layout`),
+      isPermitted(method, `${EXODUS}/chartbit/BBRI/layout`),
       false,
       `${method} on a layout is not what ADR-0003 approved`,
     );
   }
   for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
-    // `/chartbit/template` is deliberately absent here — its GET is permitted and its writes are
-    // asserted separately below.
     for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings"]) {
-      assert.equal(isPermitted(method, `${AUTHENTICATED_ORIGIN}${path}`), false, `${method} ${path} must be rejected`);
+      assert.equal(isPermitted(method, `${EXODUS}${path}`), false, `${method} ${path} must be rejected`);
     }
   }
-  // The template LIST is readable; writing or deleting a template would mutate account data and has
-  // no ADR behind it. Same for the settings blob, which holds the user's real chart configuration.
-  assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/chartbit/template`), true);
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/chartbit/template`), true, "creating a named layout is approved");
-  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/chartbit/template/mine`), false, "deleting one is not");
-  assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), true);
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/user-setting/configurations`), false);
+  assert.equal(isPermitted("GET", `${EXODUS}/chartbit/template`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/template`), true, "creating a named layout is approved");
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/template/mine`), false, "deleting one is not");
+  assert.equal(isPermitted("GET", `${EXODUS}/user-setting/configurations`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/user-setting/configurations`), false);
 });
 
 test("a GET route refuses a body rather than silently dropping it", async () => {
@@ -182,15 +419,76 @@ test("a write sends its body as JSON and still refuses redirects", async () => {
   }
 });
 
+/* --------------------------- credential placement --------------------------- */
+
+test("carina's refresh carries its token in the BODY and sends no bearer", async () => {
+  // This is the one thing about the trading chain that differs from the main session, and getting
+  // it wrong is a 401 with nothing in the message to suggest where to look.
+  const realFetch = globalThis.fetch;
+  let seen: RequestInit | undefined;
+  let seenUrl = "";
+  globalThis.fetch = (async (url: unknown, init: RequestInit) => {
+    seenUrl = String(url);
+    seen = init;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await authenticatedRequest("carinaAuthRefresh", { token: "RTOK" });
+    assert.equal(seenUrl, `${CARINA}/auth/refresh`);
+    assert.equal(seen?.body, JSON.stringify({ refresh_token: "RTOK" }));
+    assert.equal(new Headers(seen?.headers).get("authorization"), null, "no bearer on this route");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("the e-IPO refresh carries its token as a QUERY parameter and sends no bearer", async () => {
+  const realFetch = globalThis.fetch;
+  let seenUrl = "";
+  let seen: RequestInit | undefined;
+  globalThis.fetch = (async (url: unknown, init: RequestInit) => {
+    seenUrl = String(url);
+    seen = init;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await authenticatedRequest("eipoRefreshToken", { token: "ETOK" });
+    assert.equal(new URL(seenUrl).searchParams.get("token"), "ETOK");
+    assert.equal(new Headers(seen?.headers).get("authorization"), null);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a token-exchange route sends no credential of ours at all", async () => {
+  // `carinaAuthLogin` takes a grant and a PIN in its body. Attaching the market-data bearer would
+  // present a token to a host it was never issued for.
+  const realFetch = globalThis.fetch;
+  let seen: RequestInit | undefined;
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    seen = init;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await authenticatedRequest("carinaAuthLogin", { body: { login_token: "G", pin: "000000" } });
+    assert.equal(new Headers(seen?.headers).get("authorization"), null);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 /* ------------------------------- what the policy rejects ------------------------------- */
 
-test("the bearer never leaves the approved origin", () => {
+test("the bearer never leaves the approved origins", () => {
   const offOrigin = [
     "https://evil.test/emitten/BBRI/info",
     // Suffix and prefix attacks on a hostname compare that was not origin-parsed.
     "https://exodus.stockbit.com.evil.test/emitten/BBRI/info",
     "https://notexodus.stockbit.com/emitten/BBRI/info",
+    "https://carina.stockbit.com.evil.test/auth/refresh",
     "https://stockbit.com/emitten/BBRI/info",
+    // The legacy MAS broker backend: real, referenced by the bundle, and deliberately never approved.
+    "https://trading.masonline.id/order/v2/buy",
     // Scheme and port are part of the origin.
     "http://exodus.stockbit.com/emitten/BBRI/info",
     "https://exodus.stockbit.com:8443/emitten/BBRI/info",
@@ -198,19 +496,21 @@ test("the bearer never leaves the approved origin", () => {
     "https://exodus.stockbit.com@evil.test/emitten/BBRI/info",
     // Right origin, but credentials embedded in the URL.
     "https://user:pass@exodus.stockbit.com/emitten/BBRI/info",
-    "https://user@exodus.stockbit.com/keystats/BBRI",
+    "https://user@carina.stockbit.com/auth/refresh",
     "not-a-url",
   ];
   for (const url of offOrigin) {
-    assert.equal(isPermitted("GET", url), false, `${url} must not receive the bearer`);
+    assert.equal(isPermitted("GET", url), false, `${url} must not receive a credential`);
+    assert.equal(isPermitted("POST", url), false, `${url} must not receive a credential`);
   }
 });
 
 test("method is checked per path, not globally", () => {
   // The refresh path is POST-only and the read paths are GET-only; neither generalizes.
-  assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}/login/refresh`), false);
-  assert.equal(isPermitted("POST", `${AUTHENTICATED_ORIGIN}/emitten/BBRI/info`), false);
-  assert.equal(isPermitted("DELETE", `${AUTHENTICATED_ORIGIN}/emitten/BBRI/info`), false);
+  assert.equal(isPermitted("GET", `${EXODUS}/login/refresh`), false);
+  assert.equal(isPermitted("POST", `${EXODUS}/emitten/BBRI/info`), false);
+  assert.equal(isPermitted("DELETE", `${EXODUS}/emitten/BBRI/info`), false);
+  assert.equal(isPermitted("GET", `${CARINA}/auth/refresh`), false);
 });
 
 test("unknown and near-miss paths are rejected", () => {
@@ -226,19 +526,19 @@ test("unknown and near-miss paths are rejected", () => {
     "/marketdetectors",
   ];
   for (const path of rejected) {
-    assert.equal(isPermitted("GET", `${AUTHENTICATED_ORIGIN}${path}`), false, `${path} must be rejected`);
+    assert.equal(isPermitted("GET", `${EXODUS}${path}`), false, `${path} must be rejected`);
   }
 });
 
 test("a dynamic segment cannot widen the path", () => {
   // Each of these is a path the *table* would otherwise seem to allow at `/keystats/:symbol`.
   const hostile = [
-    `${AUTHENTICATED_ORIGIN}/keystats/BBRI/../../login/refresh`,
-    `${AUTHENTICATED_ORIGIN}/keystats/BBRI%2F..%2F..%2Flogin%2Frefresh`,
-    `${AUTHENTICATED_ORIGIN}/keystats/..`,
-    `${AUTHENTICATED_ORIGIN}/keystats/BBRI?x=1#/../y`.replace("?x=1#/../y", "/%2e%2e"),
-    `${AUTHENTICATED_ORIGIN}/keystats/bbri`, // lowercase never reaches the wire
-    `${AUTHENTICATED_ORIGIN}/keystats/`,
+    `${EXODUS}/keystats/BBRI/../../login/refresh`,
+    `${EXODUS}/keystats/BBRI%2F..%2F..%2Flogin%2Frefresh`,
+    `${EXODUS}/keystats/..`,
+    `${EXODUS}/keystats/BBRI/%2e%2e`,
+    `${EXODUS}/keystats/bbri`, // lowercase never reaches the wire
+    `${EXODUS}/keystats/`,
   ];
   for (const url of hostile) {
     assert.equal(isPermitted("GET", url), false, `${url} must be rejected`);
@@ -291,8 +591,6 @@ test("REGRESSION: the hotlist path carries the spelling Stockbit's own client se
   // endpoint answered 200 with an empty list — not 404 — and the tool's own description explained
   // an empty hotlist away as a closed market. So a request that never returned a row looked exactly
   // like a correct one, for the whole life of the tool.
-  //
-  // The friendly name stays in the schema; only the wire spelling is asserted here.
   assert.equal(new URL(buildUrl("emittenHotlist", { moverType: "topGainer" })).pathname, "/emitten/hotlist/topgainer");
   assert.equal(new URL(buildUrl("emittenHotlist", { moverType: "topLoser" })).pathname, "/emitten/hotlist/toploser");
   assert.equal(
@@ -301,13 +599,12 @@ test("REGRESSION: the hotlist path carries the spelling Stockbit's own client se
   );
 
   // `isPermitted` re-validates the path it judges, so the validator has to accept its own output.
-  // Without that, the policy check would reject every hotlist URL the builder produced.
   for (const wire of ["topgainer", "toploser", "mostactive"]) {
-    assert.equal(isPermitted("GET", `https://exodus.stockbit.com/emitten/hotlist/${wire}`), true, wire);
+    assert.equal(isPermitted("GET", `${EXODUS}/emitten/hotlist/${wire}`), true, wire);
   }
 });
 
-test("query params are appended, and null/undefined dropped", () => {
+test("query params are appended, null/undefined dropped, and arrays REPEATED", () => {
   const url = new URL(
     buildUrl("pricesClose", undefined, { symbol: "BBRI", interval: 1, skip: null, gone: undefined }),
   );
@@ -316,6 +613,12 @@ test("query params are appended, and null/undefined dropped", () => {
   assert.equal(url.searchParams.get("interval"), "1");
   assert.equal(url.searchParams.has("skip"), false);
   assert.equal(url.searchParams.has("gone"), false);
+
+  // Repeated, not comma-joined: broker activity reads only the first of a joined list, so the
+  // joined form returns a confident, narrower answer rather than an error.
+  const repeated = new URL(buildUrl("pricesClose", undefined, { market_type: ["RG", "TN"] }));
+  assert.deepEqual(repeated.searchParams.getAll("market_type"), ["RG", "TN"]);
+  assert.equal(repeated.search.includes("RG%2CTN"), false);
 });
 
 /* ------------------------- redirects are a rejection, not a hop ------------------------- */
@@ -388,6 +691,8 @@ function sourceFiles(dir: string): string[] {
 
 /** The sole module permitted to attach a Stockbit credential to a request. */
 const TRANSPORT = join(SRC, "http", "transport.ts");
+/** The route tables. They declare paths — that is their job — but issue nothing. */
+const ROUTE_DIR = join(SRC, "http", "routes");
 
 test("only the transport constructs a bearer credential", () => {
   const offenders: string[] = [];
@@ -413,11 +718,11 @@ test("no module outside the transport calls fetch with a Stockbit host", () => {
   for (const file of sourceFiles(SRC)) {
     if (file === TRANSPORT) continue;
     const source = readFileSync(file, "utf8");
-    // Inspect each fetch call's first argument. `src/auth/login.ts` legitimately fetches the local
+    // Inspect each fetch call's first argument. `src/auth/launch.ts` legitimately fetches the local
     // Chrome DevTools endpoint on 127.0.0.1 with no credential; that must keep passing.
     for (const match of source.matchAll(/\bfetch\s*\(([^,)]*)/g)) {
       const target = match[1];
-      if (/stockbit\.com|HOSTS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target)) {
+      if (/stockbit\.com|HOSTS\.|ORIGINS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target)) {
         offenders.push(`${file.slice(SRC.length + 1)}: fetch(${target.trim()}`);
       }
     }
@@ -434,28 +739,33 @@ test("the guard would catch a bypass (negative control)", () => {
   // Proves the patterns above are not vacuous — if these stop matching, the guards are asleep.
   const bearerBypass = 'const h = { authorization: `Bearer ${token}` };';
   const fetchBypass = 'await fetch(`${HOSTS.exodus}/portfolio`, { method: "DELETE" });';
+  const originBypass = 'await fetch(`${ORIGINS.carina}/order/v2/buy`, { method: "POST" });';
   assert.ok(/["'`]\s*Bearer\s+\$\{/i.test(bearerBypass) || /authorization:\s*`Bearer/i.test(bearerBypass));
-  assert.ok(
-    [...fetchBypass.matchAll(/\bfetch\s*\(([^,)]*)/g)].some(([, target]) =>
-      /stockbit\.com|HOSTS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target),
-    ),
-  );
+  for (const sample of [fetchBypass, originBypass]) {
+    assert.ok(
+      [...sample.matchAll(/\bfetch\s*\(([^,)]*)/g)].some(([, target]) =>
+        /stockbit\.com|HOSTS\.|ORIGINS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target),
+      ),
+      sample,
+    );
+  }
   // And that the allowed CDP call is not a false positive.
   const cdpCall = "const r = await fetch(`http://127.0.0.1:${port}/json/version`);";
   assert.ok(
     [...cdpCall.matchAll(/\bfetch\s*\(([^,)]*)/g)].every(
-      ([, target]) => !/stockbit\.com|HOSTS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target),
+      ([, target]) => !/stockbit\.com|HOSTS\.|ORIGINS\.|AUTH\.refreshUrl|AUTHENTICATED_ORIGIN/.test(target),
     ),
   );
 });
 
-test("no module outside the transport declares a URL path for a Stockbit route", () => {
-  // Catches the shape this refactor removed: a call site holding its own path string, which is how
-  // an off-table route reaches the wire even with the bearer correctly centralized.
+test("no module outside the route tables declares a URL path for a Stockbit route", () => {
+  // Catches the shape the M0 refactor removed: a call site holding its own path string, which is how
+  // an off-table route reaches the wire even with the bearer correctly centralized. The route files
+  // are excluded because declaring paths is precisely their job, and they issue nothing.
   const offenders: string[] = [];
   const routePaths = Object.values(ROUTES).map((route) => route.template.split("/")[1]);
   for (const file of sourceFiles(SRC)) {
-    if (file === TRANSPORT) continue;
+    if (file === TRANSPORT || file.startsWith(ROUTE_DIR)) continue;
     const source = readFileSync(file, "utf8");
     for (const match of source.matchAll(/["'`](\/[a-z0-9][a-z0-9\-/]*)/gi)) {
       const path = match[1];
@@ -464,5 +774,13 @@ test("no module outside the transport declares a URL path for a Stockbit route",
       }
     }
   }
-  assert.deepEqual(offenders, [], "declare the path in the transport's ROUTES table, not at the call site");
+  assert.deepEqual(offenders, [], "declare the path in src/http/routes/, not at the call site");
+});
+
+test("AUTHENTICATED_ORIGIN still names the market-data host", () => {
+  // A dozen call sites and tests say this and mean exodus. It is kept as an alias precisely so that
+  // adding two more hosts did not silently repoint them.
+  assert.equal(AUTHENTICATED_ORIGIN, ORIGINS.exodus);
+  assert.notEqual(ORIGINS.exodus, ORIGINS.carina);
+  assert.notEqual(ORIGINS.carina, ORIGINS.sekuritas);
 });

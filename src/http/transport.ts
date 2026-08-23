@@ -1,43 +1,70 @@
 /**
  * The authenticated-request boundary. **This is the only module in the codebase that may attach a
- * Stockbit credential to an outbound request**, and `test/transport.test.ts` fails CI if another
- * one starts doing so.
+ * Stockbit credential to an outbound request**, and `test/transport.test.ts` fails the suite if
+ * another one starts doing so.
  *
- * The invariant is ADR-0002's: no mutation of Stockbit account data, enforced as an exact
- * host + method + path policy rather than by method alone. "GET only" was never the real property —
- * the process legitimately POSTs `/login/refresh`. So instead of a rule about verbs, there is a
- * closed table of permitted request shapes below, and a request that does not match one is not
- * sent.
+ * The invariant is ADR-0002's: no mutation of Stockbit account data that no ADR has approved,
+ * enforced as an exact host + method + path policy rather than by method alone. "GET only" was never
+ * the real property — the process legitimately POSTs `/login/refresh`. So instead of a rule about
+ * verbs, there is a closed table of permitted request shapes, and a request that does not match one
+ * is not sent.
  *
- * Two properties make that policy a control rather than a convention:
+ * Three properties make that policy a control rather than a convention:
  *
  *   1. **Closed route table.** Callers name a route; they do not pass a path. There is no
  *      caller-supplied host — the `base` override this module replaced let any call site point a
  *      bearer-carrying request at any origin.
- *   2. **No redirect following.** A 3xx that relocates a bearer-carrying request is a rejection,
- *      not a hop. Undici would otherwise replay the Authorization header at the new location.
+ *   2. **The host is part of the route, and part of the check.** Three backends now carry three
+ *      different credentials. `isPermitted` resolves the host from the URL's origin and matches
+ *      only that host's rows, so an exodus path cannot be reached on carina with a carina token —
+ *      which matters because carina answers a foreign path with a well-formed 404 envelope that
+ *      reads like "this symbol has no data".
+ *   3. **No redirect following.** A 3xx that relocates a bearer-carrying request is a rejection,
+ *      not a hop. Undici would otherwise replay the Authorization header at the new location, and
+ *      for a WRITE it would apply the mutation somewhere nobody approved.
  *
- * Outbound *notification* delivery (M3) is a separate path that never carries this credential and
- * pins its own origins independently. It does not belong here.
+ * Outbound *notification* delivery is a separate path that never carries this credential and pins
+ * its own origins independently. It does not belong here.
  */
 import { HOSTS, RATE, defaultHeaders } from "../config.js";
 import { StockbitError } from "./errors.js";
 import { normalizeSymbol } from "../symbol.js";
+import { EXODUS_ROUTES } from "./routes/exodus.js";
+import { CARINA_ROUTES } from "./routes/carina.js";
+import { SEKURITAS_ROUTES } from "./routes/sekuritas.js";
+import type { AuthKind, Host, HttpMethod, RouteSpec } from "./routes/_spec.js";
+
+export type { AuthKind, Host, HttpMethod, RouteSpec } from "./routes/_spec.js";
 
 /* ------------------------------------ host policy ------------------------------------ */
 
 /**
- * The single origin permitted to receive the Stockbit bearer. Compared by parsed `URL.origin`, so
- * scheme and port are part of the check and `exodus.stockbit.com.evil.test` cannot match.
+ * The origins permitted to receive a Stockbit credential, one per host.
+ *
+ * Compared by parsed `URL.origin`, so scheme and port are part of the check and
+ * `exodus.stockbit.com.evil.test` cannot match.
  */
-export const AUTHENTICATED_ORIGIN = new URL(HOSTS.exodus).origin;
+export const ORIGINS: Record<Host, string> = {
+  exodus: new URL(HOSTS.exodus).origin,
+  carina: new URL(HOSTS.carina).origin,
+  sekuritas: new URL(HOSTS.sekuritas).origin,
+};
+
+/**
+ * The exodus origin, under its historical name.
+ *
+ * Kept because a dozen call sites and tests say `AUTHENTICATED_ORIGIN` and mean "market data". It
+ * is no longer *the* authenticated origin — there are three — so new code should name the host.
+ */
+export const AUTHENTICATED_ORIGIN = ORIGINS.exodus;
+
+/** Reverse lookup: which host an origin belongs to, or undefined for one we never approved. */
+function hostForOrigin(origin: string): Host | undefined {
+  return (Object.keys(ORIGINS) as Host[]).find((host) => ORIGINS[host] === origin);
+}
 
 /* ------------------------------------ route table ------------------------------------ */
 
-/**
- * Dynamic path segments, by name. A segment's *name in the template* selects its validator, so
- * adding `:symbol` to a route cannot accidentally get a laxer rule than every other `:symbol`.
- */
 /**
  * Hotlist kinds, mapping the name callers use to the spelling that goes on the wire.
  *
@@ -60,6 +87,30 @@ export const MOVER_WIRE = {
 
 export type MoverTypeName = keyof typeof MOVER_WIRE;
 
+/**
+ * The corporate-action kinds that appear as a path segment.
+ *
+ * A closed table for the same reason `MOVER_WIRE` is one: these go into the URL, and Stockbit
+ * answers an unknown action with an empty list rather than a 404. A typo would look like a quiet
+ * calendar.
+ */
+export const CORPACTION_TYPES = [
+  "bonus",
+  "dividend",
+  "economic",
+  "ipo",
+  "pubex",
+  "reversesplit",
+  "rightissue",
+  "rups",
+  "stock_dividend",
+  "stocksplit",
+  "tenderoffer",
+  "warrant",
+] as const;
+
+export type CorpactionType = (typeof CORPACTION_TYPES)[number];
+
 /** A Stockbit numeric id, as a path segment. Digits only — never a caller-supplied path fragment. */
 function numericId(name: string) {
   return (value: string): string => {
@@ -70,16 +121,77 @@ function numericId(name: string) {
   };
 }
 
+/**
+ * A segment matched against a fixed pattern.
+ *
+ * Every validator is **idempotent on its own output**, because `isPermitted` re-validates the path
+ * it is judging: one that rejected the very form `resolvePath` produced would refuse every request
+ * the builder made.
+ */
+function pattern(name: string, re: RegExp, expected: string) {
+  return (value: string): string => {
+    if (!re.test(value)) {
+      throw new StockbitError("invalid_param", `Invalid ${name} ${JSON.stringify(value)}: expected ${expected}`);
+    }
+    return value;
+  };
+}
+
+/** A segment drawn from a closed list. Case-sensitive: these are wire spellings, not friendly names. */
+function oneOf(name: string, values: readonly string[]) {
+  return (value: string): string => {
+    if (!values.includes(value)) {
+      throw new StockbitError(
+        "invalid_param",
+        `Invalid ${name} ${JSON.stringify(value)}: expected one of ${values.join(", ")}`,
+      );
+    }
+    return value;
+  };
+}
+
+/**
+ * Dynamic path segments, by name. A segment's *name in the template* selects its validator, so
+ * adding `:symbol` to a route cannot accidentally get a laxer rule than every other `:symbol`.
+ */
 const SEGMENT_VALIDATORS = {
   symbol: normalizeSymbol,
   watchlistId: numericId("watchlist id"),
   templateId: numericId("screener template id"),
+  companyId: numericId("company id"),
+  postId: numericId("stream post id"),
+  sectorId: numericId("sector id"),
+  insiderId: numericId("insider id"),
+  layoutId: numericId("chart layout id"),
   /**
-   * Accepts either spelling and always returns the wire one.
+   * A broker code: two to four uppercase alphanumerics (YP, CC, BK, …).
    *
-   * Idempotent on its own output on purpose: `isPermitted` re-validates the path it is judging, so
-   * a validator that rejected the very form `resolvePath` produced would refuse every request it
-   * built.
+   * Narrow on purpose — this goes into a bearer-carrying path, and the codes are a fixed IDX
+   * vocabulary rather than free text.
+   */
+  brokerCode: pattern("broker code", /^[A-Z0-9]{2,4}$/, "2–4 uppercase letters or digits, e.g. YP"),
+  underwriterCode: pattern("underwriter code", /^[A-Z0-9]{2,6}$/, "2–6 uppercase letters or digits"),
+  indexCode: pattern("index code", /^[A-Z0-9]{2,20}$/, "an uppercase index code, e.g. IDX30"),
+  /**
+   * A Stockbit order id. Deliberately loose (any URL-safe token up to 64 chars) until one has been
+   * observed — and then tightened. A looser rule than reality is survivable here because the
+   * charset excludes every path metacharacter; a *tighter* rule than reality would refuse the
+   * user's real order.
+   */
+  orderId: pattern("order id", /^[A-Za-z0-9_-]{1,64}$/, "an order id (letters, digits, _ or -)"),
+  username: pattern("username", /^[A-Za-z0-9_.]{1,40}$/, "a Stockbit username"),
+  /**
+   * A named chart template. Stockbit's own client enforces this charset client-side and the server
+   * rejects anything else, so matching it here turns a 400 into a message that names the rule.
+   */
+  templateName: pattern("template name", /^[A-Za-z0-9 ]{1,40}$/, "letters, digits and spaces only"),
+  /** The financial-statement subject kind (`company`, `bank`, …) in the v2 emitten paths. */
+  emittenType: pattern("emitten type", /^[a-z_]{2,20}$/, "a lowercase emitten type, e.g. company"),
+  /** Which portfolio performance series to return. */
+  performanceKind: pattern("performance kind", /^[a-z-]{2,40}$/, "a lowercase performance kind"),
+  actionType: oneOf("corporate action type", CORPACTION_TYPES),
+  /**
+   * Accepts either hotlist spelling and always returns the wire one.
    */
   moverType: (value: string): string => {
     if (value in MOVER_WIRE) return MOVER_WIRE[value as MoverTypeName];
@@ -93,148 +205,93 @@ const SEGMENT_VALIDATORS = {
 
 type SegmentName = keyof typeof SEGMENT_VALIDATORS;
 
-interface RouteSpec {
-  readonly method: "GET" | "POST";
-  /** Absolute path; `:name` marks one dynamic segment validated by `SEGMENT_VALIDATORS[name]`. */
-  readonly template: string;
+/** Every segment name the transport knows how to validate. Asserted against the table in tests. */
+export const SEGMENT_NAMES = Object.keys(SEGMENT_VALIDATORS) as SegmentName[];
+
+/**
+ * Merge the three host tables into one, refusing a duplicate route name.
+ *
+ * A silently-shadowed name would be the worst kind of bug this table can have: the call site would
+ * still compile, still send a request, and send it to the wrong host with the wrong credential.
+ */
+function mergeRoutes<T extends Record<string, RouteSpec>[]>(...tables: T): Record<string, RouteSpec> {
+  const merged: Record<string, RouteSpec> = {};
+  for (const table of tables) {
+    for (const [name, spec] of Object.entries(table)) {
+      if (name in merged) {
+        throw new Error(
+          `Duplicate route name ${JSON.stringify(name)}: ${merged[name].host} and ${spec.host} both declare it. ` +
+            "One would silently shadow the other and send the wrong credential to the wrong host.",
+        );
+      }
+      merged[name] = spec;
+    }
+  }
+  return merged;
 }
 
 /**
- * Every authenticated request this project is permitted to make.
+ * Every authenticated request this project is permitted to make, across all three hosts.
  *
- * Market-data reads are `GET`. `loginRefresh` is the sole write and mutates session state only —
- * it lives in this table as an ordinary declared route rather than as the special case
- * `src/auth/session.ts` used to make of it with a direct `fetch`.
- *
- * Adding a row is a deliberate act reviewable in a diff. Anything absent — every `/chartbit/*`
- * write, every other host — is rejected here rather than by convention.
+ * Adding a row is a deliberate act reviewable in a diff. Anything absent — every undeclared write,
+ * every other host — is rejected here rather than by convention.
  */
 export const ROUTES = {
-  /* -- session (the only write) -- */
-  loginRefresh: { method: "POST", template: "/login/refresh" },
-
-  /* -- quote, trending, sectors, movers -- */
-  emittenInfo: { method: "GET", template: "/emitten/:symbol/info" },
-  emittenTrending: { method: "GET", template: "/emitten/trending" },
-  emittenSectors: { method: "GET", template: "/emitten/sectors" },
-  emittenHotlist: { method: "GET", template: "/emitten/hotlist/:moverType" },
-
-  /* -- price feed -- */
-  pricesClose: { method: "GET", template: "/company-price-feed/prices/close" },
-  /**
-   * Daily OHLCV. Returns exactly 12 rows per page and ignores every widening parameter, so a long
-   * series costs many upstream calls — see `src/core/bars.ts` for how the walk is bounded.
-   */
-  historicalSummary: { method: "GET", template: "/company-price-feed/historical/summary/:symbol" },
-  /**
-   * The user's own saved chart layout and drawings — a READ.
-   *
-   * ADR-0002 rejects Chartbit *writes* and in the same breath keeps its reads in scope: "an agent
-   * seeing the user's existing markup is useful analysis context." Knowing which levels the user
-   * has already drawn is exactly that, and it adds no mutation reachability. `test/transport.test.ts`
-   * asserts every declared Chartbit route is a GET and that no write path is reachable by any method.
-   */
-  chartbitLayout: { method: "GET", template: "/chartbit/:symbol/layout" },
-  chartbitInitial: { method: "GET", template: "/chartbit/initial/:symbol" },
-  /**
-   * Save the user's chart layout. **This mutates account data.**
-   *
-   * The second non-GET route in this table, and the one ADR-0002 was written to keep out. It is here
-   * under ADR-0003, on the account owner's explicit instruction, and it arrives with the apparatus
-   * that ADR requires — read-before-write snapshot, per-call confirmation, post-write verification,
-   * rollback and a mutation log, all in `src/core/layoutwrite.ts`. None of that lives here; this
-   * table's only job is that the request shape is one we declared.
-   *
-   * It OVERWRITES. There is no merge and no undo on Stockbit's side, which is why the snapshot is
-   * mandatory rather than advisory.
-   */
-  chartbitSaveLayout: { method: "POST", template: "/chartbit/:symbol/layout" },
-  /**
-   * The other two places Chartbit state can live, both READS.
-   *
-   * The per-symbol layout answers 200 and stores nothing on this account, so these exist to find out
-   * where a saved chart actually goes: `template` is Stockbit's named-layout list, and
-   * `/user-setting/configurations` is what the bundle's settings merge reads `chartproperties` from.
-   */
-  chartbitTemplates: { method: "GET", template: "/chartbit/template" },
-  chartbitVersion: { method: "GET", template: "/chartbit/version" },
-  /**
-   * What the account is entitled to, per feature. A READ.
-   *
-   * This is the authority on whether a paywall is the reason something does not work. The project
-   * has already made the mistake of *inferring* a gate once — every 403 blamed on the Rp 10,000,000
-   * broker-distribution balance requirement — so when Stockbit will simply answer the question, ask
-   * it instead of guessing. `?features=PAYWALL_FEATURE_CHARTBIT&company=BBRI`.
-   */
-  paywallEligibility: { method: "GET", template: "/paywall/eligibility/check" },
-  /**
-   * Save a NAMED chart layout. The second write, under ADR-0003 as amended.
-   *
-   * The per-symbol layout route it accompanies is a server-side stub — it accepts every valid body
-   * and stores nothing. This is the other mechanism Stockbit's own client uses for the same job, and
-   * it is **additive**: it creates a named layout rather than replacing a slot, so the destructive
-   * failure the layout route's apparatus was built around does not exist here.
-   */
-  chartbitSaveTemplate: { method: "POST", template: "/chartbit/template" },
-  userSettings: { method: "GET", template: "/user-setting/configurations" },
-  // A `/chartbit/:symbol/price/daily` route was added here and then removed. It exists, it accepts
-  // the bearer, and it answers 200 with a well-formed envelope — and `data.chartbit` came back
-  // EMPTY for every parameterization tried against live data: ISO dates, UNIX seconds, several
-  // parameter spellings, limit absent/0/500/1000/2000. Without the front-end's exact call it was a
-  // guess, so it is gone rather than sitting here as an authenticated route that never returns
-  // anything. Bars come from `historicalSummary`, 12 rows a page. See `src/core/bars.ts`.
-  pricePerformance: { method: "GET", template: "/company-price-feed/price-performance/:symbol" },
-  orderbook: { method: "GET", template: "/company-price-feed/v2/orderbook/companies/:symbol" },
-
-  /* -- broker summary / bandarmology -- */
-  marketDetectors: { method: "GET", template: "/marketdetectors/:symbol" },
-  /**
-   * Broker-to-broker flow matrix. Served by the order-trade service rather than marketdetectors,
-   * and it takes the symbol as a QUERY parameter, not a path segment — hence no `:symbol` here.
-   */
-  brokerDistribution: { method: "GET", template: "/order-trade/broker/distribution" },
-
-  /* -- fundamentals -- */
-  keystats: { method: "GET", template: "/keystats/:symbol" },
-  keystatsRatio: { method: "GET", template: "/keystats/ratio/v1/:symbol" },
-  financial: { method: "GET", template: "/findata-view/company/financial" },
-
-  /* -- social / sentiment -- */
-  streamSymbol: { method: "GET", template: "/stream/v3/symbol/:symbol" },
-
-  /**
-   * The user's own watchlists, and their contents. READS.
-   *
-   * Verified live 2026-08-09: the index returns five lists, and `All Watchlist` holds 116 symbols.
-   * Traps worth knowing before touching the accessor — `limit` is required and capped at 500, and
-   * `total_items` in the index reports **0** for every list regardless of how many symbols it
-   * actually contains, so it must never be used as a count.
-   *
-   * This is the universe a user actually cares about, and until now the server had no way to learn
-   * which symbols those were.
-   */
-  watchlists: { method: "GET", template: "/watchlist" },
-  watchlistDetail: { method: "GET", template: "/watchlist/:watchlistId" },
-
-  /**
-   * The screener. All READS — running a screen does not mutate anything.
-   *
-   * Verified live 2026-08-09. `templates` lists the user's own saved screens and
-   * `templates/:templateId` RUNS one, returning matched companies with their metric values: a plain
-   * GET, no POST and no ADR required. `metric` is the ~52KB catalogue of screenable fields,
-   * `preset` the built-in Guru screens, and `universe` the index scopes (IHSG, IDX30, …).
-   *
-   * Creating or saving a screen is deliberately absent. Reading is analysis; writing is account
-   * state, and this table is where that line is drawn.
-   */
-  screenerTemplates: { method: "GET", template: "/screener/templates" },
-  screenerRunTemplate: { method: "GET", template: "/screener/templates/:templateId" },
-  screenerMetrics: { method: "GET", template: "/screener/metric" },
-  screenerPresets: { method: "GET", template: "/screener/preset" },
-  screenerUniverse: { method: "GET", template: "/screener/universe" },
+  ...EXODUS_ROUTES,
+  ...CARINA_ROUTES,
+  ...SEKURITAS_ROUTES,
 } as const satisfies Record<string, RouteSpec>;
 
+// Runs at import: a duplicate name must fail loudly at start-up, not on the one call that hits it.
+mergeRoutes(EXODUS_ROUTES, CARINA_ROUTES, SEKURITAS_ROUTES);
+
 export type RouteName = keyof typeof ROUTES;
+
+/* ------------------------------- credential placement ------------------------------- */
+
+/** Which token domain a route's credential comes from, or null when it takes none of ours. */
+export type TokenDomain = "main" | "securities" | "eipo";
+
+const AUTH_DOMAIN: Record<AuthKind, TokenDomain | null> = {
+  main: "main",
+  refreshMain: "main",
+  securities: "securities",
+  refreshSecurities: "securities",
+  eipo: "eipo",
+  refreshEipo: "eipo",
+  none: null,
+};
+
+/**
+ * Where the credential goes on the wire, per auth kind.
+ *
+ * Three placements exist because the three refresh chains disagree, and pretending otherwise would
+ * mean a call site quietly sending a bearer to a route that reads a query parameter — which fails
+ * as a 401 with no hint about why.
+ */
+type Placement = "header" | "bodyRefreshToken" | "queryToken" | "none";
+
+const PLACEMENT: Record<AuthKind, Placement> = {
+  main: "header",
+  securities: "header",
+  eipo: "header",
+  refreshMain: "header",
+  refreshSecurities: "bodyRefreshToken",
+  refreshEipo: "queryToken",
+  none: "none",
+};
+
+/** The token domain a route draws on — what `src/http/client.ts` asks `ensureFresh` for. */
+export function domainOf(name: RouteName): TokenDomain | null {
+  return AUTH_DOMAIN[ROUTES[name].auth];
+}
+
+/** Whether a route is one of the three refresh routes. Refresh routes never retry on a 401. */
+export function isRefreshRoute(name: RouteName): boolean {
+  return ROUTES[name].auth.startsWith("refresh");
+}
+
+/* --------------------------------- params & segments --------------------------------- */
 
 /**
  * Query params; `undefined`/`null` values are dropped.
@@ -251,12 +308,15 @@ export type QueryParams = Record<string, QueryParamValue>;
 export type Segments = Partial<Record<SegmentName, string>>;
 
 /**
- * The permitted (method, path-template) pairs, for tests and for documenting the boundary. Sorted
- * so the assertion in `test/transport.test.ts` reads as a stable list.
+ * The permitted (host, method, path-template) triples, for tests and for documenting the boundary.
+ *
+ * Sorted so the assertions in `test/transport.test.ts` read as stable lists. Pass a host to get
+ * that host's rows alone — which is how the snapshot stays reviewable now that there are three.
  */
-export function permittedRequests(): string[] {
+export function permittedRequests(host?: Host): string[] {
   return Object.values(ROUTES)
-    .map((route) => `${route.method} ${route.template}`)
+    .filter((route) => host === undefined || route.host === host)
+    .map((route) => (host === undefined ? `${route.host} ${route.method} ${route.template}` : `${route.method} ${route.template}`))
     .sort();
 }
 
@@ -284,9 +344,9 @@ export function resolvePath(name: RouteName, segments: Segments = {}): string {
     .join("/");
 }
 
-/** Build the absolute URL for a route. The origin is ours, never a caller's. */
+/** Build the absolute URL for a route. The origin comes from the route's host, never a caller's. */
 export function buildUrl(name: RouteName, segments?: Segments, params?: QueryParams): string {
-  const url = new URL(resolvePath(name, segments), AUTHENTICATED_ORIGIN);
+  const url = new URL(resolvePath(name, segments), ORIGINS[ROUTES[name].host]);
   if (params) {
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null) continue;
@@ -301,11 +361,15 @@ export function buildUrl(name: RouteName, segments?: Segments, params?: QueryPar
 /* ------------------------------------ policy check ------------------------------------ */
 
 /**
- * Whether a fully-formed (method, url) pair is permitted to carry the bearer.
+ * Whether a fully-formed (method, url) pair is permitted to carry a credential.
  *
  * `buildUrl` cannot produce a non-matching URL, so in production this is a redundant check —
  * kept because "the builder is correct" is exactly the assumption a future refactor breaks
  * silently, and because it gives the permitted-set test something to probe with hostile input.
+ *
+ * Matching is scoped to the URL's own host. A path that exists on exodus is not thereby permitted
+ * on carina, and the reverse matters more: `/order/v2/list` must never become reachable on the
+ * market-data host with the market-data token.
  */
 export function isPermitted(method: string, url: string): boolean {
   let parsed: URL;
@@ -314,7 +378,8 @@ export function isPermitted(method: string, url: string): boolean {
   } catch {
     return false;
   }
-  if (parsed.origin !== AUTHENTICATED_ORIGIN) return false;
+  const host = hostForOrigin(parsed.origin);
+  if (!host) return false;
   // `https://user:pass@exodus.stockbit.com/...` has the right origin but carries credentials in the
   // URL. buildUrl cannot produce one; rejecting it keeps this check honest as a second line.
   if (parsed.username || parsed.password) return false;
@@ -323,6 +388,7 @@ export function isPermitted(method: string, url: string): boolean {
   const actual = parsed.pathname.split("/");
 
   return Object.values(ROUTES).some((route) => {
+    if (route.host !== host) return false;
     if (route.method !== method) return false;
     const expected = route.template.split("/");
     if (expected.length !== actual.length) return false;
@@ -342,8 +408,11 @@ export function isPermitted(method: string, url: string): boolean {
 /* ------------------------------------ the request ------------------------------------ */
 
 export interface AuthenticatedRequest {
-  /** The credential to present. An access token for reads; the refresh token for `loginRefresh`. */
-  token: string;
+  /**
+   * The credential to present. An access token for ordinary routes; the refresh token for the three
+   * refresh routes. Not required for `auth: "none"`.
+   */
+  token?: string;
   segments?: Segments;
   params?: QueryParams;
   /**
@@ -358,27 +427,43 @@ export interface AuthenticatedRequest {
 /**
  * Issue an authenticated request against a declared route and return the raw `Response`.
  *
- * Status handling is the caller's: `src/http/client.ts` owns retry, backoff, and error mapping for
- * market-data reads, and `src/auth/session.ts` owns the refresh response contract. This function
- * owns exactly one thing — that the request which goes out is one the policy permits.
+ * Status handling is the caller's: `src/http/client.ts` owns retry, backoff, and error mapping, and
+ * `src/auth/session.ts` owns the refresh response contract. This function owns exactly one thing —
+ * that the request which goes out is one the policy permits, carrying the credential the route
+ * declared, in the place that route puts it.
  */
 export async function authenticatedRequest(
   name: RouteName,
   { token, segments, params, body }: AuthenticatedRequest,
 ): Promise<Response> {
-  const { method } = ROUTES[name];
-  const url = buildUrl(name, segments, params);
+  const route = ROUTES[name] as RouteSpec;
+  const method: HttpMethod = route.method;
+  const placement = PLACEMENT[route.auth];
+
+  // The e-IPO refresh carries its credential as a query parameter, so it has to join `params`
+  // before the URL is built — and it is added here rather than by the caller so that no call site
+  // outside this module ever puts a token into a URL.
+  const effectiveParams: QueryParams =
+    placement === "queryToken" ? { ...(params ?? {}), token: token ?? "" } : (params ?? {});
+  const url = buildUrl(name, segments, effectiveParams);
 
   if (!isPermitted(method, url)) {
     // Unreachable via buildUrl; a loud failure beats a silently-sent request if that changes.
     throw new StockbitError("invalid_param", `Blocked by request policy: ${method} ${url}`);
   }
-  if (!token) {
+  if (placement !== "none" && !token) {
     throw new StockbitError("auth", `No credential available for ${name}`);
   }
   if (body !== undefined && method === "GET") {
     throw new StockbitError("invalid_param", `Route ${name} is a GET and cannot carry a body`);
   }
+
+  // Carina's refresh takes the token in the body. Merged here so the credential never has to be
+  // assembled into a body by a call site.
+  const effectiveBody =
+    placement === "bodyRefreshToken"
+      ? { ...((body as Record<string, unknown>) ?? {}), refresh_token: token }
+      : body;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RATE.requestTimeoutMs);
@@ -388,10 +473,10 @@ export async function authenticatedRequest(
       method,
       headers: {
         ...defaultHeaders(),
-        authorization: `Bearer ${token}`,
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        ...(placement === "header" ? { authorization: `Bearer ${token}` } : {}),
+        ...(effectiveBody !== undefined ? { "content-type": "application/json" } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(effectiveBody !== undefined ? { body: JSON.stringify(effectiveBody) } : {}),
       // Do not follow: a 3xx would replay this Authorization header at an origin the policy above
       // never approved. See ADR-0002. For a WRITE this is doubly important — a redirected POST
       // would apply the mutation somewhere we never approved.

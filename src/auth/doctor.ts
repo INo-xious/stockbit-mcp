@@ -19,6 +19,9 @@ import { removeDirWithRetry } from "./tempdir.js";
 import { browserVersion, findBrowsers, type BrowserInfo } from "./browsers.js";
 import { captureViaBrowserLogin } from "./login.js";
 import { getStore } from "./store.js";
+import { hasStoredSession } from "./session.js";
+import { pinnedBrowserExists, readBrowserProfile } from "./browserprofile.js";
+import { tradingPolicy } from "../settings.js";
 import { decodeJwt } from "./session.js";
 
 export type CheckStatus = "pass" | "fail" | "warn" | "skip";
@@ -230,6 +233,46 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
       detail: err instanceof Error ? err.message : String(err),
     });
   }
+
+  /* ------------------------------ browser pin ------------------------------ */
+  // The Chartbit driver opens the logged-in profile long after the login, and a Chromium profile is
+  // not portable between browsers. Without this record the driver's likeliest failure is a
+  // logged-out window reported as an empty chart.
+  const pinned = readBrowserProfile();
+  checks.push(
+    pinned
+      ? {
+          name: "Chartbit driver",
+          status: pinnedBrowserExists(pinned) ? "pass" : "fail",
+          detail: pinnedBrowserExists(pinned)
+            ? `profile pinned to ${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""}`
+            : `pinned to ${pinned.browserPath}, which is no longer on disk — re-run \`stockbit-auth login\``,
+        }
+      : {
+          name: "Chartbit driver",
+          status: "warn",
+          detail: "no browser pinned — run `stockbit-auth login` so drawing knows which browser holds the session",
+        },
+  );
+
+  /* ------------------------------ trading side ------------------------------ */
+  const policy = tradingPolicy();
+  checks.push({
+    name: "Trading policy",
+    // Off is the CORRECT state, not a problem: this row reports, it does not nag.
+    status: policy.corrupt ? "fail" : "pass",
+    detail: policy.corrupt
+      ? `${policy.settingsPath} could not be parsed; treated as no permission`
+      : `${policy.enabled ? "enabled" : "off"} (${policy.source})` +
+        (policy.autoConfirmIgnored ? " — autoConfirm set but ignored without a value cap" : ""),
+  });
+  checks.push({
+    name: "Trading session",
+    status: hasStoredSession("securities") ? "pass" : "warn",
+    detail: hasStoredSession("securities")
+      ? "securities credential present (validity not checked here — use `trading-status`)"
+      : "not set — run `stockbit-auth trading-login` for portfolio and orders",
+  });
 
   /* -------------------------------- self-test -------------------------------- */
   if (options.skipSelfTest) {

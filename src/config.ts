@@ -3,10 +3,25 @@
  * frontend (see STOCKBIT-API.md). Nothing here is secret.
  */
 
-/** Backend hosts (from the web bundle's host-constant module). */
+/**
+ * Backend hosts (from the web bundle's host-constant module).
+ *
+ * Three of them carry a credential, and they are three *different* credentials on three separate
+ * refresh chains — which is the whole reason `src/http/transport.ts` gained a `host` field. A route
+ * pointed at the wrong one does not fail cleanly: carina answers 404 for an exodus path with a
+ * valid-looking envelope, so a mis-hosted read looks like a symbol with no data.
+ *
+ * `trading.masonline.id` — the legacy MAS broker backend the bundle still references — is
+ * deliberately absent. This account does not use it, and a host nobody has probed is a host this
+ * project will not send a bearer to.
+ */
 export const HOSTS = {
-  /** Market data — everything this MCP reads lives here. Const `g`/`q7` in the bundle. */
+  /** Market data, stream, Chartbit, screener, watchlist. Const `g`/`q7` in the bundle. */
   exodus: "https://exodus.stockbit.com",
+  /** Stockbit Sekuritas trading: portfolio, cash, orders, history. Const `p.cu`. */
+  carina: "https://carina.stockbit.com",
+  /** e-IPO and smart orders, on their own partner token chain. */
+  sekuritas: "https://api-sekuritas.stockbit.com",
   /** Web origin, used for Origin/Referer headers the API expects. */
   web: "https://stockbit.com",
 } as const;
@@ -74,8 +89,28 @@ export const CACHE = {
   defaultTtlMs: 5_000,
 } as const;
 
-/** Keychain identifiers for the token store. */
+/**
+ * Keychain identifiers for the token store, one account per token domain.
+ *
+ * Separate slots rather than one blob: the three tokens have different lifetimes, different refresh
+ * routes and different consequences if leaked, and `stockbit-auth trading-logout` must be able to
+ * drop the securities session without touching the market-data one.
+ *
+ * `account` is kept as the main slot's name so an existing Keychain item survives this change —
+ * renaming it would silently log every current user out.
+ */
 export const KEYCHAIN = {
   service: "stockbit-mcp",
   account: "refresh-token",
+  accounts: {
+    main: "refresh-token",
+    securities: "securities-refresh-token",
+    eipo: "eipo-refresh-token",
+  },
+  /** File-backend names, for the same three slots. */
+  files: {
+    main: "refresh.enc",
+    securities: "securities-refresh.enc",
+    eipo: "eipo-refresh.enc",
+  },
 } as const;

@@ -88,3 +88,31 @@ export function refreshFromRawBody(raw: string, base64Encoded: boolean): string 
     return m?.[1] ?? null;
   }
 }
+
+/**
+ * Whether a response URL may carry a *securities* (Stockbit Sekuritas) token.
+ *
+ * A separate predicate from `tokenUrlAllowed` rather than a widening of it, and deliberately so:
+ * the main-session rule REJECTS carina, and it must keep rejecting it. Storing a trading token in
+ * the market-data slot would refresh into a token exodus does not accept, and the failure would
+ * arrive hours later as an unexplained 401 far from its cause. Two predicates, two slots, no
+ * overlap — and `test/login.test.ts` asserts the exclusion in both directions.
+ *
+ * This exists for the `--browser` fallback: when Cloudflare Turnstile blocks the direct PIN login,
+ * the user completes it in the logged-in browser and the response is captured the same way the
+ * original login was.
+ */
+export function securitiesTokenUrlAllowed(url: string): boolean {
+  // The HOST is parsed, not matched as a substring. `https://evil.test/x/carina.stockbit.com/auth/refresh`
+  // contains the host name and is not the host — a substring test would accept a token from an
+  // attacker-controlled origin, which is the one mistake this predicate exists to prevent.
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.hostname.toLowerCase() !== "carina.stockbit.com") return false;
+  // The login and refresh responses are the two that carry a session. PIN validation does not.
+  return /^\/auth\/v\d+\/login\/?$/i.test(parsed.pathname) || /^\/auth\/refresh\/?$/i.test(parsed.pathname);
+}

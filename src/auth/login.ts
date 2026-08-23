@@ -28,7 +28,7 @@ import { removeDirWithRetry } from "./tempdir.js";
 import { CDP } from "./cdp.js";
 import { launchDebuggableBrowser } from "./launch.js";
 import { writeBrowserProfile } from "./browserprofile.js";
-import { fileDir, getStore } from "./store.js";
+import { fileDir, getStore, type StoreSlot } from "./store.js";
 import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
 import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
@@ -86,6 +86,13 @@ export interface CaptureOptions {
   extraArgs?: string[];
   /** Persist the captured token. `false` for self-tests. */
   persist?: boolean;
+  /**
+   * Which store slot the captured token belongs in. Defaults to the market-data session.
+   *
+   * The `--browser` trading login captures a carina token, which must NOT land in the main slot —
+   * see `securitiesTokenUrlAllowed`.
+   */
+  slot?: StoreSlot;
   /** Suppress the user-facing "a browser opened" chatter. */
   quiet?: boolean;
 }
@@ -235,7 +242,7 @@ export async function captureViaBrowserLogin(
       // diagnosis at interception instead of at the store.
       if (persist) {
         try {
-          getStore().set(refresh);
+          getStore(options.slot ?? "main").set(refresh);
         } catch (err) {
           fail(
             `Session was captured but could not be stored: ${err instanceof Error ? err.message : String(err)}`,
@@ -247,7 +254,7 @@ export async function captureViaBrowserLogin(
       // browsers, and the Chartbit driver opens this one long after the login — without the pin its
       // most likely failure is a logged-out window reported as an empty chart. Disposable profiles
       // are deliberately not pinned: there is nothing to come back to.
-      if (persist && !profileIsDisposable) writeBrowserProfile(bin);
+      if (persist && !profileIsDisposable && (options.slot ?? "main") === "main") writeBrowserProfile(bin);
       if (!options.quiet) logStderr(`Session captured (${via}). You can close the browser window.`);
       finish({ captured: true, refresh });
     };

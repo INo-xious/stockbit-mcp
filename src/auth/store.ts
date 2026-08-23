@@ -30,7 +30,20 @@ export interface TokenStore {
   set(token: string): void;
   clear(): void;
   readonly backend: "keychain" | "file";
+  /** Which token this store holds. */
+  readonly slot: StoreSlot;
 }
+
+/**
+ * The three refresh tokens this project can hold, each in its own slot.
+ *
+ * Kept apart rather than in one record because they are separate sessions with separate
+ * consequences: `stockbit-auth trading-logout` must be able to end the securities session without
+ * touching market data, and a securities token leaking is a different incident from a market-data
+ * token leaking. `main` keeps the original names so an existing Keychain item and an existing
+ * `refresh.enc` both survive this change — renaming either would log every current user out.
+ */
+export type StoreSlot = "main" | "securities" | "eipo";
 
 /* ------------------------------- macOS Keychain ------------------------------- */
 
@@ -52,41 +65,45 @@ function keychainAvailable(): boolean {
  *
  * The built-in `security` CLI requires the value as the `-w` argument for non-interactive use.
  */
-export function keychainWriteArgs(token: string): string[] {
+export function keychainWriteArgs(token: string, slot: StoreSlot = "main"): string[] {
   return [
     "add-generic-password",
     "-s", KEYCHAIN.service,
-    "-a", KEYCHAIN.account,
+    "-a", KEYCHAIN.accounts[slot],
     "-U",
     "-w", token,
   ];
 }
 
-const keychainStore: TokenStore = {
-  backend: "keychain",
-  get() {
-    const r = spawnSync(
-      "security",
-      ["find-generic-password", "-s", KEYCHAIN.service, "-a", KEYCHAIN.account, "-w"],
-      { encoding: "utf8" },
-    );
-    if (r.status !== 0) return null;
-    const token = r.stdout.trim();
-    return token.length ? token : null;
-  },
-  set(token: string) {
-    // -U updates an existing item without resetting its trusted-application ACL.
-    const r = spawnSync("security", keychainWriteArgs(token), { stdio: "ignore" });
-    if (r.status !== 0) throw new Error("Keychain write failed");
-  },
-  clear() {
-    spawnSync(
-      "security",
-      ["delete-generic-password", "-s", KEYCHAIN.service, "-a", KEYCHAIN.account],
-      { stdio: "ignore" },
-    );
-  },
-};
+function keychainStore(slot: StoreSlot): TokenStore {
+  const account = KEYCHAIN.accounts[slot];
+  return {
+    backend: "keychain",
+    slot,
+    get() {
+      const r = spawnSync(
+        "security",
+        ["find-generic-password", "-s", KEYCHAIN.service, "-a", account, "-w"],
+        { encoding: "utf8" },
+      );
+      if (r.status !== 0) return null;
+      const token = r.stdout.trim();
+      return token.length ? token : null;
+    },
+    set(token: string) {
+      // -U updates an existing item without resetting its trusted-application ACL.
+      const r = spawnSync("security", keychainWriteArgs(token, slot), { stdio: "ignore" });
+      if (r.status !== 0) throw new Error("Keychain write failed");
+    },
+    clear() {
+      spawnSync(
+        "security",
+        ["delete-generic-password", "-s", KEYCHAIN.service, "-a", account],
+        { stdio: "ignore" },
+      );
+    },
+  };
+}
 
 /* --------------------------------- File fallback --------------------------------- */
 
@@ -96,8 +113,8 @@ const keychainStore: TokenStore = {
 export function fileDir(): string {
   return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
 }
-function filePath(): string {
-  return join(fileDir(), "refresh.enc");
+function filePath(slot: StoreSlot): string {
+  return join(fileDir(), KEYCHAIN.files[slot]);
 }
 
 /**
@@ -155,10 +172,12 @@ function fileKey(): Buffer {
   return scryptSync(material, salt, 32);
 }
 
-const fileStore: TokenStore = {
+function fileStore(slot: StoreSlot): TokenStore {
+  return {
   backend: "file",
+  slot,
   get() {
-    const FILE_PATH = filePath();
+    const FILE_PATH = filePath(slot);
     if (!existsSync(FILE_PATH)) return null;
     try {
       const raw = readFileSync(FILE_PATH);
@@ -180,28 +199,35 @@ const fileStore: TokenStore = {
     const cipher = createCipheriv("aes-256-gcm", fileKey(), iv);
     const data = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
-    writeFileAtomic(filePath(), Buffer.concat([iv, tag, data]));
+    writeFileAtomic(filePath(slot), Buffer.concat([iv, tag, data]));
   },
   clear() {
-    const FILE_PATH = filePath();
+    const FILE_PATH = filePath(slot);
     // An empty file rather than an unlink, so `get()`'s decrypt failure path reports "no token"
     // identically either way. Atomic for the same reason `set` is.
     if (existsSync(FILE_PATH)) writeFileAtomic(FILE_PATH, Buffer.alloc(0));
   },
-};
+  };
+}
 
 /* ----------------------------------- selector ----------------------------------- */
 
-let cached: TokenStore | null = null;
+const cached = new Map<StoreSlot, TokenStore>();
 
-/** Returns the best available store for this platform (Keychain on macOS, else file). */
-export function getStore(): TokenStore {
-  if (cached) return cached;
-  cached = keychainAvailable() ? keychainStore : fileStore;
-  return cached;
+/**
+ * The best available store for this platform (Keychain on macOS, else file), for one slot.
+ *
+ * Defaults to `main` so every existing call site keeps meaning the market-data session.
+ */
+export function getStore(slot: StoreSlot = "main"): TokenStore {
+  const hit = cached.get(slot);
+  if (hit) return hit;
+  const store = keychainAvailable() ? keychainStore(slot) : fileStore(slot);
+  cached.set(slot, store);
+  return store;
 }
 
 /** Reset the cached backend selection (tests). */
 export function resetStoreCache(): void {
-  cached = null;
+  cached.clear();
 }

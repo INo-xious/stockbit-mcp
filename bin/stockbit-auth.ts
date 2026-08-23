@@ -16,7 +16,16 @@ import { stdin, stdout } from "node:process";
 import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
-import { decodeJwt, forceRefresh, resetSession } from "../src/auth/session.js";
+import {
+  decodeJwt,
+  forceRefresh,
+  hasStoredSession,
+  missingSessionMessage,
+  resetSession,
+} from "../src/auth/session.js";
+import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.js";
+import { securitiesTokenUrlAllowed } from "../src/auth/capture.js";
+import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/settings.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile, readBrowserProfile } from "../src/auth/browserprofile.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
@@ -158,6 +167,13 @@ async function cmdStatus(argv: string[]): Promise<void> {
       ? `Browser profile: ${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""} (${pinned.browserPath})`
       : "Browser profile: not pinned — Chartbit drawing needs `stockbit-auth login` to record one.",
   );
+  // Every slot, not just the main one: "am I logged in?" now has three answers and a user
+  // debugging a portfolio call needs to see which of them is missing.
+  logStderr(`Trading session: ${hasStoredSession("securities") ? "present" : "not set (stockbit-auth trading-login)"}`);
+  logStderr(`e-IPO session:   ${hasStoredSession("eipo") ? "present" : "not set (minted on first use)"}`);
+  const policy = tradingPolicy();
+  logStderr(`Order placing:   ${policy.enabled ? "ENABLED" : "off"} — ${policy.reason}`);
+
   if (!token) {
     logStderr("Refresh token: NOT set. Run `stockbit-auth login` (or `bootstrap`).");
     return;
@@ -209,6 +225,184 @@ async function cmdLogout(argv: string[]): Promise<void> {
   );
 }
 
+/* ------------------------------- trading commands ------------------------------- */
+
+/**
+ * Unlock the Stockbit Sekuritas session.
+ *
+ * The PIN is read through the same hidden prompt the refresh-token bootstrap uses, handed to one
+ * request, and never stored. `--browser` is the Cloudflare fallback: Turnstile blocks the direct
+ * call often enough that shipping the workaround later would have meant shipping a command that
+ * fails for some users with no way forward.
+ */
+async function cmdTradingLogin(argv: string[]): Promise<void> {
+  if (argv.includes("--browser")) {
+    logStderr("Opening the logged-in browser so Cloudflare sees a real one. Enter your trading PIN there.");
+    const result = await captureViaBrowserLogin({
+      startUrl: "https://stockbit.com/trade",
+      isTokenUrl: securitiesTokenUrlAllowed,
+      fetchPatterns: ["*carina.stockbit.com/auth/*"],
+      slot: "securities",
+    });
+    if (!result.captured) {
+      logStderr("No trading session captured.");
+      process.exit(1);
+    }
+    logStderr("Trading session captured.");
+  } else {
+    const pin = (await promptSecret("Trading PIN (6 digits, input hidden): ")).trim();
+    if (!pin) {
+      logStderr("No PIN entered. Aborting; nothing was sent.");
+      process.exit(2);
+    }
+    try {
+      const result = await loginSecurities({ pin });
+      logStderr(`Trading session stored in: ${result.backend}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logStderr(`Trading login failed: ${message}`);
+      if (/challenge/i.test(message)) {
+        logStderr("");
+        logStderr("This was a Cloudflare browser challenge, NOT a wrong PIN — do not retype it.");
+        logStderr("Run `stockbit-auth trading-login --browser` instead.");
+      }
+      process.exit(1);
+    }
+  }
+
+  // Prove it works before saying it does. A stored token that 401s on first use is the most
+  // expensive kind of "success".
+  try {
+    await forceRefresh("securities");
+    logStderr("Test refresh: OK - the trading session is live.");
+  } catch (err) {
+    logStderr(`Stored the trading session but the test refresh failed: ${String(err)}`);
+    process.exit(1);
+  }
+
+  const policy = tradingPolicy();
+  logStderr("");
+  logStderr(
+    policy.enabled
+      ? "Trading is ENABLED in settings. Orders still require confirmation per call unless autoConfirm is on."
+      : "Trading is still OFF. Logging in unlocks the account READS; run `stockbit-auth trading-enable` to " +
+        "allow orders.",
+  );
+}
+
+/** What the trading side is currently able to do, and why. */
+async function cmdTradingStatus(argv: string[]): Promise<void> {
+  const policy = tradingPolicy();
+  logStderr(`Settings file: ${policy.settingsPath}`);
+  logStderr(`Trading: ${policy.enabled ? "ENABLED" : "OFF"} (${policy.source})`);
+  logStderr(`  ${policy.reason}`);
+  if (policy.corrupt) logStderr("  WARNING: the settings file could not be parsed and was treated as no permission.");
+  if (policy.autoConfirmIgnored) logStderr(`  ${policy.autoConfirmIgnored}`);
+  logStderr(
+    `  autoConfirm: ${policy.autoConfirm ? "on" : "off"}; ` +
+      `maxOrderValueIdr: ${policy.maxOrderValueIdr ?? "none"}; ` +
+      `maxLotsPerOrder: ${policy.maxLotsPerOrder}; ` +
+      `allowedSymbols: ${policy.allowedSymbols.length ? policy.allowedSymbols.join(", ") : "any"}`,
+  );
+
+  if (!hasStoredSession("securities")) {
+    logStderr(`Securities session: NOT set. ${missingSessionMessage("securities")}`);
+    return;
+  }
+  if (argv.includes("--offline")) {
+    logStderr("Securities session: present. Validity NOT CHECKED (--offline).");
+    return;
+  }
+  logStderr("Securities session: present. Checking it against Stockbit...");
+  try {
+    await forceRefresh("securities");
+    logStderr("Validity: OK - the trading token refreshed successfully.");
+  } catch (err) {
+    logStderr(`Validity: FAILED - ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+async function cmdTradingLogout(): Promise<void> {
+  const result = await logoutSecurities();
+  logStderr("Cleared the stored trading session.");
+  if (result.remote === "ok") logStderr("Stockbit was told to end the session too.");
+  else if (result.remote !== "skipped") {
+    logStderr(`Note: the server-side logout did not succeed (${result.remote}).`);
+    logStderr("The credential is gone from this machine either way; the session may still be open in your app.");
+  }
+}
+
+/** Numeric flag value, e.g. `--max-order-value 5000000`. */
+function flagValue(argv: string[], name: string): string | undefined {
+  const index = argv.indexOf(name);
+  if (index >= 0 && argv[index + 1] && !argv[index + 1].startsWith("--")) return argv[index + 1];
+  const inline = argv.find((a) => a.startsWith(`${name}=`));
+  return inline?.slice(name.length + 1);
+}
+
+async function cmdTradingEnable(argv: string[]): Promise<void> {
+  const settings = loadSettings();
+  settings.trading.enabled = true;
+
+  if (argv.includes("--auto-confirm")) settings.trading.autoConfirm = true;
+  if (argv.includes("--no-auto-confirm")) settings.trading.autoConfirm = false;
+
+  const maxValue = flagValue(argv, "--max-order-value");
+  if (maxValue !== undefined) {
+    const parsed = Number(maxValue);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      logStderr(`--max-order-value must be a positive number of rupiah; got ${JSON.stringify(maxValue)}.`);
+      process.exit(2);
+    }
+    settings.trading.maxOrderValueIdr = parsed;
+  }
+
+  const maxLots = flagValue(argv, "--max-lots");
+  if (maxLots !== undefined) {
+    const parsed = Number(maxLots);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      logStderr(`--max-lots must be a positive number of lots; got ${JSON.stringify(maxLots)}.`);
+      process.exit(2);
+    }
+    settings.trading.maxLotsPerOrder = Math.floor(parsed);
+  }
+
+  const symbols = flagValue(argv, "--symbols");
+  if (symbols !== undefined) {
+    settings.trading.allowedSymbols = symbols
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  saveSettings(settings);
+  logStderr(`Trading ENABLED. Wrote ${settingsPath()}.`);
+  const policy = tradingPolicy();
+  if (policy.autoConfirmIgnored) logStderr(policy.autoConfirmIgnored);
+  else if (policy.autoConfirm) {
+    logStderr(
+      `autoConfirm is ON for orders up to Rp ${policy.maxOrderValueIdr?.toLocaleString("en-US")}. ` +
+        "Anything above that still needs confirm: true.",
+    );
+  } else {
+    logStderr("Every order needs confirm: true. That is the default and it is the safe one.");
+  }
+  if (!hasStoredSession("securities")) {
+    logStderr("");
+    logStderr(`No trading session yet. ${missingSessionMessage("securities")}`);
+  }
+}
+
+async function cmdTradingDisable(): Promise<void> {
+  const settings = loadSettings();
+  settings.trading.enabled = false;
+  settings.trading.autoConfirm = false;
+  saveSettings(settings);
+  logStderr(`Trading DISABLED. Wrote ${settingsPath()}.`);
+  logStderr("The order tools still exist and will now refuse, naming this file. The session is untouched.");
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "status";
   const argv = process.argv.slice(3);
@@ -231,8 +425,26 @@ async function main(): Promise<void> {
     case "logout":
       await cmdLogout(argv);
       break;
+    case "trading-login":
+      await cmdTradingLogin(argv);
+      break;
+    case "trading-status":
+      await cmdTradingStatus(argv);
+      break;
+    case "trading-logout":
+      await cmdTradingLogout();
+      break;
+    case "trading-enable":
+      await cmdTradingEnable(argv);
+      break;
+    case "trading-disable":
+      await cmdTradingDisable();
+      break;
     default:
-      logStderr("Usage: stockbit-auth <login|import-har|doctor|bootstrap|status|logout>");
+      logStderr(
+        "Usage: stockbit-auth <login|import-har|doctor|bootstrap|status|logout|" +
+          "trading-login|trading-status|trading-enable|trading-disable|trading-logout>",
+      );
       logStderr("  login       one-time browser login, auto-captures your session (recommended)");
       logStderr("              --fresh-profile  use a throwaway browser profile");
       logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
@@ -242,6 +454,18 @@ async function main(): Promise<void> {
       logStderr("              --offline  skip the live validity check");
       logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
       logStderr("              --keep-profile  keep the browser profile (still logged in)");
+      logStderr("");
+      logStderr("  trading-login    unlock Stockbit Sekuritas with your 6-digit PIN (never stored)");
+      logStderr("                   --browser  complete it in the logged-in browser (Cloudflare fallback)");
+      logStderr("  trading-status   show the trading policy and whether the session still works");
+      logStderr("                   --offline  skip the live validity check");
+      logStderr("  trading-enable   ALLOW this server to place orders. Off until you run this.");
+      logStderr("                   --max-order-value N  cap one order's value in IDR");
+      logStderr("                   --max-lots N         cap one order's size in lots");
+      logStderr("                   --symbols A,B        restrict trading to these tickers");
+      logStderr("                   --auto-confirm       skip per-order confirmation (needs --max-order-value)");
+      logStderr("  trading-disable  turn ordering off again. The session is left alone.");
+      logStderr("  trading-logout   end the trading session and delete its credential");
       process.exit(2);
   }
 }

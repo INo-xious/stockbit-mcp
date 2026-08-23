@@ -10,6 +10,7 @@ import { redact } from "../redact.js";
 
 export type ErrorKind =
   | "auth" // 401/403 — token missing/expired/invalid; re-bootstrap needed
+  | "challenge" // 403 + cf-mitigated: a browser challenge, NOT an entitlement problem
   | "not_found" // 404 — wrong path/host or symbol has no data
   | "invalid_param" // 400 — bad/missing parameters
   | "rate_limited" // 429
@@ -78,4 +79,32 @@ export function mapHttpError(status: number, body: unknown): StockbitError {
   }
 
   return new StockbitError(kind, message, { status, errorType, details });
+}
+
+/**
+ * Whether a 403 is Cloudflare asking for a browser challenge rather than Stockbit refusing.
+ *
+ * These look identical from the status line and mean opposite things. A real 403 says "this account
+ * cannot do that" and the fix is entitlement or a PIN; a challenge says "prove you are a browser"
+ * and the fix is to run the flow through the logged-in browser instead. Cloudflare marks the
+ * difference with a `cf-mitigated: challenge` response header, and reading it turns a dead end into
+ * a next step.
+ *
+ * This project has twice explained a 403 with a guess — once the Rp 10,000,000 balance requirement,
+ * once a Chartbit paywall — and been wrong both times. When the server labels its own refusal,
+ * read the label.
+ */
+export function isChallenge(status: number, headers: Headers): boolean {
+  return status === 403 && (headers.get("cf-mitigated") ?? "").toLowerCase() === "challenge";
+}
+
+/** The error for a Cloudflare challenge, naming the command that gets past it. */
+export function challengeError(route: string): StockbitError {
+  return new StockbitError(
+    "challenge",
+    `Cloudflare asked ${route} to complete a browser challenge (HTTP 403, cf-mitigated: challenge). ` +
+      "This is NOT an entitlement or PIN problem — the request never reached Stockbit's handler. " +
+      "Re-run the step through the logged-in browser: `stockbit-auth trading-login --browser`.",
+    { status: 403 },
+  );
 }
