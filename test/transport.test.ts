@@ -222,8 +222,19 @@ test("every carina route is a GET unless it is named as a session or an order ro
 });
 
 test("the permitted request set on API-SEKURITAS is exactly this list", () => {
+  // The e-IPO host. Two token rows, seven reads, and two POSTs — one of which is Stockbit's own dry
+  // run and one of which commits money. Both are named in EIPO_WRITES below.
   assert.deepEqual(permittedRequests("sekuritas"), [
+    "GET /eipo/company/detail",
+    "GET /eipo/company/unboxing",
+    "GET /eipo/order/detail",
+    "GET /eipo/price_group",
+    "GET /eipo/rdn_balance",
+    "GET /eipo/social/company/list",
+    "GET /eipo/status",
     "GET /partner/refresh_token",
+    "POST /eipo/order",
+    "POST /eipo/order/verify",
     "POST /partner/eipo/access_token",
   ]);
 });
@@ -274,8 +285,16 @@ const CHARTBIT_WRITES = [
  */
 const ORDER_WRITES = ["orderAmend", "orderBuy", "orderCancel", "orderSell"];
 
-/** ADR-0004. e-IPO subscription orders, under the same trading switch. Empty until that increment. */
-const EIPO_ORDER_WRITES: string[] = [];
+/**
+ * ADR-0004 as well, on the e-IPO host.
+ *
+ * `eipoOrderVerify` is a POST that changes nothing: it is Stockbit's own dry run, and the whole
+ * reason `eipo_order_preview` can tell a user their subscription would be refused before committing
+ * anything. It is listed as a write anyway, because the classification is by METHOD and not by
+ * intent — a route that this project believes is harmless is exactly the kind of belief this
+ * tripwire exists to make someone write down.
+ */
+const EIPO_ORDER_WRITES = ["eipoOrderPlace", "eipoOrderVerify"];
 
 /** ADR-0006. Watchlist and screener edits. Empty until that increment. */
 const ACCOUNT_WRITES: string[] = [];
@@ -361,6 +380,18 @@ test("the chart writes touch only the user's chart", () => {
   }
   assert.equal(buildUrl("chartbitChartUpdate", { layoutId: "42" }), `${EXODUS}/chartbit/charts/42`);
   assert.equal(buildUrl("chartbitDrawingsSave"), `${EXODUS}/chartbit/chart-drawings`);
+});
+
+test("the e-IPO writes touch only e-IPO, and only this account's own subscription", () => {
+  // The same property the chart writes have, on the other host: nothing in this class can reach the
+  // token exchange, the RDN balance as a write, or anything belonging to another offering.
+  for (const name of EIPO_ORDER_WRITES) {
+    const route = ROUTES[name as RouteName];
+    assert.ok(route.template.startsWith("/eipo/order"), `${name} (${route.template}) is outside e-IPO order entry`);
+    assert.equal(route.auth, "eipo", `${name} must carry the e-IPO credential, not ${route.auth}`);
+  }
+  assert.equal(buildUrl("eipoOrderPlace"), `${SEKURITAS}/eipo/order`);
+  assert.equal(buildUrl("eipoOrderVerify"), `${SEKURITAS}/eipo/order/verify`);
 });
 
 test("the writes that would matter most are absent, by every verb", () => {

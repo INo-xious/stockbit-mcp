@@ -37,6 +37,7 @@ const WRITES = [
   "chartbit_layout_save",
   "chartbit_save",
   "chartbit_study",
+  "eipo_order",
   "order_amend",
   "order_buy",
   "order_cancel",

@@ -59,6 +59,7 @@ import { registerCorpactionTools } from "./corpaction.js";
 import { registerScreenerTools } from "./screener.js";
 import { registerChartbitTools } from "./chartbit.js";
 import { registerTradingTools } from "./trading.js";
+import { registerEipoTools } from "./eipo.js";
 
 /** Sub-panel titles, matching the periods `PANEL_PRESETS` declares. */
 const PANE_LABELS = { rsi: "RSI(14)", macd: "MACD(12,26,9)", atr: "ATR(14)" } as const;
@@ -1459,6 +1460,7 @@ export function registerTools(server: McpServer): void {
   registerScreenerTools(define);
   registerChartbitTools(define);
   registerTradingTools(define);
+  registerEipoTools(define);
 
   /* --------------------------------- workflows --------------------------------- */
   // Registered last, so every handler above is already captured.

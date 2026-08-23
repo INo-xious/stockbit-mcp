@@ -42,7 +42,19 @@ import { invalidateCache } from "../core/_util.js";
 import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { listOrdersRaw, readOrderList, type Order } from "./account.js";
 import { fingerprintOf, idr, type OrderTicket } from "./preview.js";
-import { peek, take } from "./tickets.js";
+import { peek, take, type TicketBase } from "./tickets.js";
+
+/**
+ * The ticket store holds both kinds. This narrows to an exchange order, and refuses rather than
+ * casting blindly — an e-IPO ticket redeemed by `order_buy` would carry no price the exchange could
+ * use, and the error worth giving says which tool the user's ticket actually belongs to.
+ */
+function asOrderTicket(ticket: TicketBase): OrderTicket {
+  if (ticket.kind !== "order") {
+    refuse(`Ticket ${ticket.id} is an e-IPO subscription, not an exchange order. Use the e-IPO tools.`);
+  }
+  return ticket as OrderTicket;
+}
 
 function stockbitDir(): string {
   return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
@@ -221,10 +233,10 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
 
   // Peeked, not taken: the confirmation decision needs the order's value, and a ticket must not be
   // spent by a call that is about to be refused.
-  const preview = peek(options.ticketId);
-  if (!preview) take(options.ticketId); // throws with the precise reason (missing / expired)
+  const found = peek(options.ticketId);
+  if (!found) take(options.ticketId); // throws with the precise reason (missing / expired)
 
-  const ticket = preview as OrderTicket;
+  const ticket = asOrderTicket(found as TicketBase);
   let via: ConfirmationSource | null = options.confirm === true ? "explicit" : null;
 
   // Configured but not in effect. Falling through to the generic "no confirmation" refusal would be
@@ -267,7 +279,7 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
 
   // Spends the ticket. Everything from here on is one attempt, and this is the last point at which
   // a refusal costs nothing.
-  const taken = take(options.ticketId);
+  const taken = asOrderTicket(take(options.ticketId, "order"));
 
   if (fingerprintOf(taken) !== taken.fingerprint) {
     refuse(
@@ -463,9 +475,10 @@ async function performOrder(
 function forAction(action: OrderTicket["action"]) {
   return async (options: SubmitOptions): Promise<OrderResult> => {
     const preview = peek(options.ticketId);
-    if (preview && preview.action !== action) {
+    if (preview && preview.kind === "order" && (preview as OrderTicket).action !== action) {
       refuse(
-        `Ticket ${options.ticketId} is a ${preview.action.toUpperCase()} and this is the ${action.toUpperCase()} ` +
+        `Ticket ${options.ticketId} is a ${(preview as OrderTicket).action.toUpperCase()} and this is the ` +
+          `${action.toUpperCase()} ` +
           "tool. Nothing was sent. Use the tool that matches the ticket, or preview again.",
       );
     }

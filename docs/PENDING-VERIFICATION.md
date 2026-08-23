@@ -85,3 +85,21 @@ are still read rather than observed:
 
 Amend gets the same treatment on another session.
 
+### e-IPO — a whole host, and a session nobody has minted
+
+`api-sekuritas.stockbit.com` is the third token domain and the least observed of the three. Its
+session is derived from the ordinary market-data login through a webview grant, and neither half of
+that exchange has been captured:
+
+| | What is guessed | How it fails |
+|---|---|---|
+| The webview grant | `GET /auth/eipo/webview/link` is searched for a token-shaped field, then for a URL with one in its query string. | No grant found → an auth error naming `stockbit-auth login`. Loud. |
+| The exchange body | `POST /partner/eipo/access_token` is sent `{token, access_token}` — both spellings, because an extra field is more likely to be ignored than a missing one is to be defaulted. | A 400. Loud. |
+| The subscription body | `{emiten_code, price, lot}`. Lots, not shares — which is the opposite of the exchange orders, and is how every Indonesian e-IPO flow expresses a subscription. | A 400 on the first attempt. |
+| The verify verdict | `POST /eipo/order/verify` is read for a boolean under valid / is_valid / success / eligible / can_order / verified, then for a message that names a refusal. | Unreadable is treated as `unverified`, NOT as a no — otherwise an unrecognised response would make subscription impossible for a reason unrelated to the subscription. |
+| Allotment fields | `allotment_lot` / `allotted_lot` / `result_lot` and their share and amount forms. | Absent means allotment has not happened; the tool description says to report that rather than zero. |
+
+**The first real subscription is a live gate**, same shape as the exchange one: capture a HAR of the
+web e-IPO flow first, then subscribe for the minimum lot on an open offering with the user watching,
+then read `eipo_my_order` and the mutation log together.
+

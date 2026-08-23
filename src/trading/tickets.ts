@@ -25,13 +25,27 @@
  * order the user has to re-preview; the cost this way is an order they never agreed to.
  */
 import { StockbitError } from "../http/errors.js";
-import type { OrderTicket } from "./preview.js";
+
+/**
+ * What every ticket has, whatever it is a ticket for.
+ *
+ * Exchange orders and e-IPO subscriptions are different commitments with different checks, but the
+ * protocol around them is identical — preview, show the user, redeem once, expire — so they share
+ * one store. `kind` is what stops an e-IPO ticket being redeemed by `order_buy` and vice versa.
+ */
+export interface TicketBase {
+  id: string;
+  kind: "order" | "eipo";
+  expiresAt: string;
+  checks: Array<{ name: string; ok: boolean; detail: string; unverified?: true }>;
+  summary: string;
+}
 
 /** How long a ticket stays redeemable. Two minutes: long enough to ask, short enough to still mean it. */
 export const TICKET_TTL_MS = 120_000;
 
 interface Slot {
-  ticket: OrderTicket;
+  ticket: TicketBase;
   consumedAt: number | null;
 }
 
@@ -65,7 +79,7 @@ export function clearTickets(): void {
 }
 
 /** Store a ticket and return it unchanged, so a caller can `return issue(build(...))`. */
-export function issue(ticket: OrderTicket): OrderTicket {
+export function issue<T extends TicketBase>(ticket: T): T {
   slots.set(ticket.id, { ticket, consumedAt: null });
   return ticket;
 }
@@ -77,7 +91,7 @@ export function issue(ticket: OrderTicket): OrderTicket {
  * inspecting a ticket wants to know it is still good, and "expired" and "gone" lead to the same
  * next step.
  */
-export function peek(id: string): OrderTicket | undefined {
+export function peek(id: string): TicketBase | undefined {
   const slot = slots.get(id);
   if (!slot) return undefined;
   if (now() > Date.parse(slot.ticket.expiresAt)) return undefined;
@@ -91,7 +105,7 @@ export function peek(id: string): OrderTicket | undefined {
  * "already used" tells them the order may already exist and to look before retrying; "checks
  * failed" tells them what to fix. One generic error would make all three read as a glitch.
  */
-export function take(id: string): OrderTicket {
+export function take(id: string, expectedKind?: TicketBase["kind"]): TicketBase {
   const slot = slots.get(id);
   if (!slot) {
     throw new StockbitError(
@@ -112,6 +126,13 @@ export function take(id: string): OrderTicket {
       "invalid_param",
       `Order ticket ${id} expired at ${slot.ticket.expiresAt}. It was priced against a market that has moved ` +
         "since; run order_preview again and show the user the new numbers.",
+    );
+  }
+  if (expectedKind && slot.ticket.kind !== expectedKind) {
+    throw new StockbitError(
+      "invalid_param",
+      `Ticket ${id} is a ${slot.ticket.kind} ticket and this tool redeems ${expectedKind} tickets. Nothing ` +
+        "was sent.",
     );
   }
   const failed = slot.ticket.checks.filter((check) => !check.ok);

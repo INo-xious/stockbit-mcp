@@ -107,6 +107,8 @@ export interface TicketAccount {
 
 export interface OrderTicket {
   id: string;
+  /** Which store this ticket belongs to. See `TicketBase` in `tickets.ts`. */
+  kind: "order";
   action: OrderAction;
   symbol: string;
   /** Null on a cancel, which carries no price. */
@@ -539,6 +541,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
 
   const ticket: OrderTicket = {
     id: `tk_${randomUUID()}`,
+    kind: "order",
     action,
     symbol,
     price,
