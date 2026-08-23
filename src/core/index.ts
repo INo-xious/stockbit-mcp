@@ -10,8 +10,8 @@ export * from "./indicators.js";
 export * from "./keystats.js";
 export * from "./stream.js";
 export * from "./financial.js";
-export * from "./layout.js";
+// `layoutcodec` survives its own endpoint: the series-id substitution and the corruption check it
+// implements still apply to the Chartbit charts API, and `src/chartbit/codec.ts` uses them.
 export * from "./layoutcodec.js";
 export * from "./chartsettings.js";
-export * from "./layoutwrite.js";
 export { clearCache } from "./_util.js";

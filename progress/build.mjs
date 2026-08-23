@@ -9,7 +9,7 @@
  * Usage: `npm run progress` (regenerates index.html), or `npm run progress -- --serve`.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,12 +49,25 @@ const head = commits[0]?.hash ?? "unknown";
 const remoteHead = (read("git", ["ls-remote", "--heads", "origin", "main"]).split(/\s+/)[0] ?? "").slice(0, 7);
 const pushed = remoteHead && commits[0] && remoteHead.startsWith(commits[0].hash);
 
-/** Tool names, read from the registration source so the list cannot drift from the server. */
+/**
+ * Tool names, read from the registration sources so the list cannot drift from the server.
+ *
+ * Every module under `src/tools/` is scanned, not just `register.ts`: the families each register
+ * their own tools now, and a builder that read one file would quietly under-report the surface.
+ */
 const tools = [
-  ...readFileSync(join(ROOT, "src/tools/register.ts"), "utf8").matchAll(
-    /(?:server\.tool|define\.(?:read|write))\(\s*"([a-z_]+)"/g,
+  ...new Set(
+    readdirSync(join(ROOT, "src/tools"))
+      .filter((f) => f.endsWith(".ts"))
+      .sort()
+      .flatMap((f) => [
+        ...readFileSync(join(ROOT, "src/tools", f), "utf8").matchAll(
+          /(?:server\.tool|define\.(?:read|write))\(\s*"([a-z_]+)"/g,
+        ),
+      ])
+      .map((m) => m[1]),
   ),
-].map((m) => m[1]);
+].sort();
 
 /** Test count, read from the suite's own output if it has been run into progress/tests.txt. */
 let testLine = "";

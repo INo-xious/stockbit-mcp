@@ -35,15 +35,18 @@
  *
  * ## What this cannot do
  *
- * Two of the pillars a serious equity read would want are absent, and their absence is structural
- * rather than an oversight:
+ * Two of the pillars a serious equity read would want are not scored here, and the reason has
+ * changed since this was written:
  *
- *   - **Analyst consensus and price targets.** No route in the closed table serves them
- *     (`docs/CAPABILITY-RESEARCH.md` names `/analyst-ratings/{symbol}`; it has never been probed).
- *   - **Peer-relative valuation.** `ratios` answers "what is BBRI's PBV" and nothing here can ask
- *     "and is that cheap for a bank". `valuationPillar` therefore scores against absolute bands,
- *     which is genuinely weak for banks, property and any cyclical — and it says so, in the pillar
- *     and in `limits`, rather than letting a reader mistake a band for a benchmark.
+ *   - **Analyst consensus and price targets.** The routes now exist (see `analyst_ratings`), but
+ *     folding a consensus into this score needs the wire shape observed first — a target price read
+ *     from a field nobody has looked at is a number with a decimal point and no meaning.
+ *   - **Peer-relative valuation.** `ratios` answers "what is BBRI's PBV" and this pillar cannot ask
+ *     "and is that cheap for a bank". The industry aggregate is now reachable through
+ *     `peer_comparison`; until its shape is confirmed live, `valuationPillar` still scores against
+ *     absolute bands, which is genuinely weak for banks, property and any cyclical — and it says
+ *     so, in the pillar and in `limits`, rather than letting a reader mistake a band for a
+ *     benchmark.
  *
  * Community sentiment is fetched and **reported, not scored**. Turning ~30 Indonesian-language
  * retail posts into a directional number needs a classifier this project does not have; a keyword
@@ -741,10 +744,12 @@ const VALUATION_METRICS: Array<{
  * Valuation, scored against absolute bands — with the weakness stated rather than buried.
  *
  * The right way to do this is relative: a PBV of 1.2 is expensive for a bank and cheap for a
- * consumer name, and Stockbit serves an industry aggregate that would supply the denominator. That
- * route (`/comparison/{SYMBOL}/ratios`, `/industries`) is not in the closed route table and has
- * never been probed, so it is not available to this pillar. Absolute bands are what remains, and
- * they are systematically wrong in a predictable direction for banks, property and cyclicals.
+ * consumer name, and Stockbit serves an industry aggregate that would supply the denominator. Those
+ * comparison routes are now declared and reachable through the `peer_comparison` tool, but their
+ * field names have not been observed against live data, and scoring against a denominator nobody
+ * has looked at would be worse than scoring against a stated band. Absolute bands are what remains
+ * until then, and they are systematically wrong in a predictable direction for banks, property and
+ * cyclicals.
  *
  * The payloads are the other constraint: `getKeystats` and `getRatios` return `unknown` by design,
  * so every metric is looked up by name and a metric that cannot be found is simply not scored. If

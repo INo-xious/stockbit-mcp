@@ -58,3 +58,23 @@ export function defaultChartPath(parts: {
   const name = `${parts.symbol}-${parts.side}-${window}-${parts.dataType}`.replace(/[^A-Za-z0-9._-]/g, "_");
   return join(homedir(), ".stockbit", "charts", name);
 }
+
+/**
+ * Write a base64 PNG screenshot of the user's real chart, and return the path.
+ *
+ * Beside the generated SVGs for the same reason they are there: the working directory is whatever
+ * the MCP client happened to launch from, and a temp dir gets swept, which is the wrong behaviour
+ * for a file the user is told the path of.
+ *
+ * Timestamped rather than deterministic, unlike `defaultChartPath`. A screenshot is a record of a
+ * moment — overwriting yesterday's with today's would destroy the only copy of what the chart used
+ * to look like, which is often the reason one was taken.
+ */
+export function writeChartPng(symbol: string, base64: string, at: Date = new Date()): string {
+  const stamp = at.toISOString().replace(/[:.]/g, "-");
+  const name = `${symbol}-chartbit-${stamp}`.replace(/[^A-Za-z0-9._-]/g, "_");
+  const target = resolve(join(homedir(), ".stockbit", "charts", `${name}.png`));
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, Buffer.from(base64, "base64"));
+  return target;
+}

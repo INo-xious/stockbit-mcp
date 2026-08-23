@@ -55,48 +55,112 @@ test("the permitted request set on EXODUS is exactly this list", () => {
   // Locked deliberately: adding a route must show up as a change to this assertion, so a new
   // authenticated request shape cannot land without a reviewer seeing it.
   assert.deepEqual(permittedRequests("exodus"), [
+    "DELETE /chartbit/charts/:layoutId",
+    "DELETE /chartbit/settings/:templateName",
+    "GET /analyst-ratings/:symbol",
+    "GET /analyst-ratings/:symbol/consensus",
     "GET /auth/eipo/webview/link",
-    // The RETIRED per-symbol Chartbit pair. Still declared because `src/core/layout.ts` and
-    // `src/core/layoutwrite.ts` still call them; the Chartbit increment removes route, module and
-    // tool together rather than leaving any of the three pointing at nothing.
-    "GET /chartbit/:symbol/layout",
+    "GET /chartbit/chart-drawings",
+    "GET /chartbit/charts",
+    "GET /chartbit/charts/:layoutId",
+    "GET /chartbit/drawings",
     "GET /chartbit/initial/:symbol",
-    "GET /chartbit/template",
+    "GET /chartbit/settings",
+    "GET /chartbit/settings/:templateName",
+    "GET /chartbit/studies",
     "GET /chartbit/version",
+    "GET /charts/:symbol",
+    "GET /charts/:symbol/daily",
     "GET /company-price-feed/historical/summary/:symbol",
+    "GET /company-price-feed/market-time/session",
     "GET /company-price-feed/price-performance/:symbol",
+    "GET /company-price-feed/prices",
+    "GET /company-price-feed/prices/:symbol/market",
     "GET /company-price-feed/prices/close",
+    "GET /company-price-feed/seasonality/:symbol",
     "GET /company-price-feed/v2/orderbook/companies/:symbol",
+    "GET /comparison/:symbol/industries",
+    "GET /comparison/:symbol/ratios",
+    "GET /comparison/:symbol/templates",
+    "GET /comparison/metrics",
+    "GET /comparison/templates",
+    "GET /corpaction",
+    "GET /corpaction/:actionType",
+    "GET /corpaction/:symbol/stock_conversion",
+    "GET /corpaction/status",
+    "GET /earnings",
+    "GET /emitten-metadata/shareholders/:symbol/chart",
+    "GET /emitten-metadata/subsidiary/:symbol",
+    "GET /emitten/:symbol/contact",
     "GET /emitten/:symbol/info",
+    "GET /emitten/:symbol/profile",
+    "GET /emitten/classification",
+    "GET /emitten/classification/company",
     "GET /emitten/hotlist/:moverType",
+    "GET /emitten/indexes/:indexCode",
     "GET /emitten/sectors",
     "GET /emitten/trending",
+    "GET /emitten/v2/:emittenType/:symbol/fin-items",
+    "GET /emitten/v2/:emittenType/:symbol/info",
+    "GET /emitten/v3/sector/:sectorId/company",
     "GET /findata-view/company/financial",
+    "GET /findata-view/marketdetectors/brokers",
+    "GET /fundachart/metrics",
+    "GET /fundachart/templates",
+    "GET /insider/company/majorholder",
+    "GET /insider/majorholder/ownership",
+    "GET /insider/shareholding/companies/:symbol",
+    "GET /insider/shareholding/composition/companies/:symbol",
+    "GET /insider/shareholding/investors/:insiderId",
+    "GET /insider/shareholding/network",
     "GET /keystats/:symbol",
     "GET /keystats/ratio/v1/:symbol",
     "GET /marketdetectors/:symbol",
-    // Broker Distribution. Served by the order-trade service and takes its symbol as a query
-    // parameter rather than a path segment, so there is no `:symbol` here.
+    "GET /order-trade/broker/activity",
     "GET /order-trade/broker/distribution",
+    "GET /order-trade/broker/top",
+    "GET /order-trade/market-mover",
+    "GET /order-trade/order-queue",
+    "GET /order-trade/running-trade",
+    "GET /order-trade/running-trade/chart/:symbol",
+    "GET /order-trade/running-trade/group",
+    "GET /order-trade/top-stock",
+    "GET /order-trade/trade-book",
+    "GET /order-trade/trade-book/chart",
+    "GET /order-trade/underwriters",
+    "GET /order-trade/underwriters/:underwriterCode/ipo-performance",
     "GET /paywall/eligibility/check",
-    // The screener, all READS. Running a saved screen is a plain GET — an earlier research pass
-    // assumed a POST and concluded this needed its own ADR; it does not.
+    "GET /research/categories",
+    "GET /research/indicator/new",
+    "GET /screener/favorites",
+    "GET /screener/finitem-watchlist",
     "GET /screener/metric",
     "GET /screener/preset",
     "GET /screener/templates",
     "GET /screener/templates/:templateId",
     "GET /screener/universe",
-    // A GET that returns a CREDENTIAL: the first hop of the trading unlock. Authorised by the main
-    // session, so holding it does not by itself unlock trading — the PIN is the second factor.
+    "GET /search",
+    "GET /search/v2",
     "GET /sekuritas/auth/token",
+    "GET /stream/non-login/user/:username",
+    "GET /stream/v3",
+    "GET /stream/v3/post/:postId",
     "GET /stream/v3/symbol/:symbol",
+    "GET /stream/v3/symbol/:symbol/pinned",
     "GET /user-setting/configurations",
-    // The user's own watchlists. Reads only so far.
     "GET /watchlist",
     "GET /watchlist/:watchlistId",
-    "POST /chartbit/:symbol/layout",
-    "POST /chartbit/template",
+    "GET /watchlist/:watchlistId/symbols",
+    "GET /watchlist/search/company",
+    "POST /chartbit/chart-drawings",
+    "POST /chartbit/charts",
+    "POST /chartbit/settings",
+    "POST /emitten-metadata/shareholders/token",
     "POST /login/refresh",
+    "POST /screener/templates",
+    "POST /stream/v3/trending",
+    "PUT /chartbit/charts/:layoutId",
+    "PUT /chartbit/settings/:templateName",
   ]);
 });
 
@@ -138,8 +202,22 @@ const SESSION_WRITES = [
   "loginRefresh",
 ];
 
-/** ADR-0003. The retired per-symbol pair, removed together with its module in the Chartbit increment. */
-const CHARTBIT_WRITES = ["chartbitSaveLayout", "chartbitSaveTemplate"];
+/**
+ * ADR-0003, as amended. Chart persistence, on the endpoints Stockbit's own save adapter uses.
+ *
+ * The per-symbol pair this ADR was originally written against turned out to be a server-side stub —
+ * it accepted every valid body and stored nothing — and has been removed along with the module and
+ * the tools that called it. These are where the chart page actually saves.
+ */
+const CHARTBIT_WRITES = [
+  "chartbitChartCreate",
+  "chartbitChartDelete",
+  "chartbitChartUpdate",
+  "chartbitDrawingsSave",
+  "chartbitSettingDelete",
+  "chartbitSettingUpdate",
+  "chartbitSettingsCreate",
+];
 
 /** ADR-0004. Orders on carina. Empty until the order increment lands. */
 const ORDER_WRITES: string[] = [];
@@ -157,7 +235,17 @@ const ACCOUNT_WRITES: string[] = [];
  * in a URL. They are listed separately so "this is a POST" never has to mean "this mutates", and so
  * that a genuine write cannot hide in the crowd by being called a read-shaped one.
  */
-const READ_SHAPED_POSTS: string[] = [];
+const READ_SHAPED_POSTS = [
+  // The shareholder chart's one-shot access token: minted, used by the very next GET, creates
+  // nothing.
+  "shareholdersToken",
+  // An ad-hoc screen. The body carries Stockbit's own `save: "0"` — evaluate, do not persist — and
+  // `buildScreenBody` hard-codes it with a unit test on that exact value. Saving is a separate,
+  // confirm-gated tool.
+  "screenerRun",
+  // Trending posts. The date/cursor triple does not fit in a URL, so Stockbit's client posts it.
+  "streamTrending",
+];
 
 test("every non-GET route belongs to exactly one named write class", () => {
   const declared = [
@@ -209,12 +297,18 @@ test("the session writes touch the session and nothing else", () => {
 });
 
 test("the chart writes touch only the user's chart", () => {
-  const allowed = ["/chartbit/:symbol/layout", "/chartbit/template"];
+  // Every one of these is under `/chartbit`. Nothing in this class can reach a portfolio, an order,
+  // a watchlist, a profile or the settings blob — which is the property ADR-0003 was written to keep
+  // true while opening one door.
   for (const name of CHARTBIT_WRITES) {
-    assert.ok(allowed.includes(ROUTES[name as RouteName].template), `${name} mutates something ADR-0003 did not approve`);
+    const route = ROUTES[name as RouteName];
+    assert.ok(
+      route.template.startsWith("/chartbit/"),
+      `${name} (${route.method} ${route.template}) mutates something outside the chart`,
+    );
   }
-  assert.equal(buildUrl("chartbitSaveLayout", { symbol: "BBRI" }), `${EXODUS}/chartbit/BBRI/layout`);
-  assert.equal(buildUrl("chartbitSaveTemplate"), `${EXODUS}/chartbit/template`);
+  assert.equal(buildUrl("chartbitChartUpdate", { layoutId: "42" }), `${EXODUS}/chartbit/charts/42`);
+  assert.equal(buildUrl("chartbitDrawingsSave"), `${EXODUS}/chartbit/chart-drawings`);
 });
 
 test("the writes that would matter most are absent, by every verb", () => {
@@ -364,24 +458,31 @@ test("the segment validator table and the segment names agree", () => {
   }
 });
 
-test("the ONLY writable Chartbit path is the layout pair, and only by POST", () => {
-  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/BBRI/layout`), true);
+test("the writable Chartbit surface is exactly the charts, drawings and settings triple", () => {
+  // The layouts and their drawings are writable; everything else under /chartbit is not, and the
+  // retired per-symbol stub is gone entirely rather than left declared as a route that stores nothing.
+  assert.equal(isPermitted("PUT", `${EXODUS}/chartbit/charts/42`), true);
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/42`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/chart-drawings`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/settings`), true);
 
-  for (const method of ["PUT", "PATCH", "DELETE"]) {
-    assert.equal(
-      isPermitted(method, `${EXODUS}/chartbit/BBRI/layout`),
-      false,
-      `${method} on a layout is not what ADR-0003 approved`,
-    );
-  }
   for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
-    for (const path of ["/chartbit/layouts", "/chartbit/1.1/charts", "/chartbit/BBRI/drawings"]) {
+    for (const path of ["/chartbit/BBRI/layout", "/chartbit/template", "/chartbit/layouts", "/chartbit/BBRI/drawings"]) {
       assert.equal(isPermitted(method, `${EXODUS}${path}`), false, `${method} ${path} must be rejected`);
     }
   }
-  assert.equal(isPermitted("GET", `${EXODUS}/chartbit/template`), true);
-  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/template`), true, "creating a named layout is approved");
-  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/template/mine`), false, "deleting one is not");
+  // A layout id is a path segment on a bearer-carrying DELETE, so it gets the numeric-id validator
+  // rather than anything looser.
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/..`), false);
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/mine`), false);
+
+  // The study and drawing template lists are readable and NOT writable — creating one has no caller.
+  assert.equal(isPermitted("GET", `${EXODUS}/chartbit/studies`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/studies`), false);
+  assert.equal(isPermitted("GET", `${EXODUS}/chartbit/drawings`), true);
+  assert.equal(isPermitted("POST", `${EXODUS}/chartbit/drawings`), false);
+
+  // The settings blob holds the user's real chart configuration and stays READ-ONLY.
   assert.equal(isPermitted("GET", `${EXODUS}/user-setting/configurations`), true);
   assert.equal(isPermitted("POST", `${EXODUS}/user-setting/configurations`), false);
 });
@@ -390,7 +491,7 @@ test("a GET route refuses a body rather than silently dropping it", async () => 
   // A caller passing a body to a read has misunderstood something; hiding that would surface later
   // as data that is quietly wrong.
   await assert.rejects(
-    () => authenticatedRequest("chartbitLayout", { token: "T", segments: { symbol: "BBRI" }, body: { x: 1 } }),
+    () => authenticatedRequest("chartbitChart", { token: "T", segments: { layoutId: "42" }, body: { x: 1 } }),
     (err: unknown) => err instanceof StockbitError && /cannot carry a body/.test(err.message),
   );
 });
@@ -404,15 +505,15 @@ test("a write sends its body as JSON and still refuses redirects", async () => {
   }) as typeof fetch;
 
   try {
-    await authenticatedRequest("chartbitSaveLayout", {
+    await authenticatedRequest("chartbitChartUpdate", {
       token: "T",
-      segments: { symbol: "BBRI" },
+      segments: { layoutId: "42" },
       body: { content: "{}" },
     });
-    assert.equal(seen?.method, "POST");
+    assert.equal(seen?.method, "PUT");
     assert.equal(seen?.body, JSON.stringify({ content: "{}" }));
     assert.equal(new Headers(seen?.headers).get("content-type"), "application/json");
-    // A redirected POST would apply the mutation at an origin the policy never approved.
+    // A redirected write would apply the mutation at an origin the policy never approved.
     assert.equal(seen?.redirect, "manual");
   } finally {
     globalThis.fetch = realFetch;
