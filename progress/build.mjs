@@ -50,9 +50,11 @@ const remoteHead = (read("git", ["ls-remote", "--heads", "origin", "main"]).spli
 const pushed = remoteHead && commits[0] && remoteHead.startsWith(commits[0].hash);
 
 /** Tool names, read from the registration source so the list cannot drift from the server. */
-const tools = [...readFileSync(join(ROOT, "src/tools/register.ts"), "utf8").matchAll(/server\.tool\(\s*"([a-z_]+)"/g)].map(
-  (m) => m[1],
-);
+const tools = [
+  ...readFileSync(join(ROOT, "src/tools/register.ts"), "utf8").matchAll(
+    /(?:server\.tool|define\.(?:read|write))\(\s*"([a-z_]+)"/g,
+  ),
+].map((m) => m[1]);
 
 /** Test count, read from the suite's own output if it has been run into progress/tests.txt. */
 let testLine = "";

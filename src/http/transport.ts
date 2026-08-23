@@ -236,8 +236,16 @@ export const ROUTES = {
 
 export type RouteName = keyof typeof ROUTES;
 
-/** Query params; `undefined`/`null` values are dropped. */
-export type QueryParams = Record<string, string | number | boolean | undefined | null>;
+/**
+ * Query params; `undefined`/`null` values are dropped.
+ *
+ * An array value becomes **repeated** parameters (`?x=a&x=b`), not a comma-joined one. Stockbit's
+ * broker-activity endpoint is the reason: it takes several `market_type` and `investor_type` values
+ * and reads only the first when they arrive comma-joined, so the joined form returns a confident,
+ * narrower answer rather than an error.
+ */
+export type QueryParamValue = string | number | boolean | undefined | null | readonly string[];
+export type QueryParams = Record<string, QueryParamValue>;
 
 /** Values for a route's dynamic segments, keyed by segment name. */
 export type Segments = Partial<Record<SegmentName, string>>;
@@ -281,7 +289,10 @@ export function buildUrl(name: RouteName, segments?: Segments, params?: QueryPar
   const url = new URL(resolvePath(name, segments), AUTHENTICATED_ORIGIN);
   if (params) {
     for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+      if (value === undefined || value === null) continue;
+      // `append`, not `set`, for an array: repeated keys are the wire form these endpoints want.
+      if (Array.isArray(value)) for (const item of value) url.searchParams.append(key, String(item));
+      else url.searchParams.set(key, String(value));
     }
   }
   return url.toString();

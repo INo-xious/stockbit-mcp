@@ -22,80 +22,50 @@
  *
  * ## Approach
  *
- * A lock directory (`mkdir` is atomic on every platform, unlike "check then create") serialises
- * refreshes across processes. It is best-effort by design: a stale lock from a crashed process is
- * broken after `STALE_MS` rather than wedging the server forever, and failing to acquire is not
- * fatal — the caller proceeds, because a possible clobber is better than a guaranteed outage.
+ * The lock mechanism lives in `src/util/dirlock.ts`, shared with the chart-layout and order write
+ * paths. What stays here is the policy: **one lock directory per token domain**, and best-effort
+ * acquisition — a stale lock from a crashed process is broken rather than wedging the server
+ * forever, and failing to acquire is not fatal, because a possible clobber is better than a
+ * guaranteed outage.
+ *
+ * Per domain matters now that there are three (main, securities, e-IPO): a securities refresh
+ * queued behind an exodus refresh would serialise two operations that cannot interfere, and
+ * `trading-login` would appear to hang for no reason.
  *
  * The lock alone is not the whole fix. `session.ts` also re-reads the store after a failed refresh,
  * since another process may legitimately have rotated the token while this one was waiting.
  */
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { acquireDirLock } from "../util/dirlock.js";
 import { fileDir } from "./store.js";
 
 /** A lock older than this is assumed to belong to a dead process. */
 export const STALE_MS = 30_000;
 const POLL_MS = 120;
 
-function lockPath(): string {
-  return join(fileDir(), "refresh.lock");
-}
+/** Lock names by token domain. `main` keeps its historical name so an in-flight lock survives an upgrade. */
+const LOCK_NAMES = {
+  main: "refresh.lock",
+  securities: "securities-refresh.lock",
+  eipo: "eipo-refresh.lock",
+} as const;
 
-/** Age of the current lock in ms, or null if there is none. */
-function lockAge(): number | null {
-  try {
-    return Date.now() - statSync(lockPath()).mtimeMs;
-  } catch {
-    return null;
-  }
+/** The token domains that hold their own refresh lock. Mirrors `TokenDomain` in `session.ts`. */
+export type LockDomain = keyof typeof LOCK_NAMES;
+
+function lockPath(domain: LockDomain): string {
+  return join(fileDir(), LOCK_NAMES[domain]);
 }
 
 /**
- * Try to take the refresh lock, waiting up to `timeoutMs`.
+ * Try to take a domain's refresh lock, waiting up to `timeoutMs`.
  *
  * Returns a release function, or null if the lock could not be taken. A null return is not an
  * error: the caller refreshes anyway, accepting the small clobber risk rather than failing.
  */
-export async function acquireRefreshLock(timeoutMs = 10_000): Promise<(() => void) | null> {
-  const path = lockPath();
-  const deadline = Date.now() + timeoutMs;
-
-  for (;;) {
-    try {
-      // mkdir is atomic and fails if the directory exists — the test-then-create race does not
-      // exist here, which is the whole reason for using a directory rather than a file.
-      mkdirSync(path);
-      try {
-        writeFileSync(join(path, "pid"), String(process.pid));
-      } catch {
-        /* informational only */
-      }
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        try {
-          rmSync(path, { recursive: true, force: true });
-        } catch {
-          /* a lock we cannot remove will be broken as stale */
-        }
-      };
-    } catch {
-      const age = lockAge();
-      if (age !== null && age > STALE_MS) {
-        // The holder crashed or was killed mid-refresh. Leaving the lock forever would make every
-        // future refresh fail, which is worse than the race it protects against.
-        try {
-          rmSync(path, { recursive: true, force: true });
-        } catch {
-          /* someone else got there first */
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) return null;
-      await delay(POLL_MS);
-    }
-  }
+export async function acquireRefreshLock(
+  timeoutMs = 10_000,
+  domain: LockDomain = "main",
+): Promise<(() => void) | null> {
+  return acquireDirLock(lockPath(domain), { staleMs: STALE_MS, timeoutMs, pollMs: POLL_MS });
 }

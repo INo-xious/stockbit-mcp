@@ -146,3 +146,23 @@ export function todayIso(now: Date = new Date()): string {
 export function isSettledRange(range: DateRange, now: Date = new Date()): boolean {
   return range.to < todayIso(now);
 }
+
+/**
+ * A `YYYY-MM-DD` date as the UNIX epoch second of its UTC midnight.
+ *
+ * TradingView's charting library — and therefore every Chartbit drawing point — locates a shape in
+ * time by epoch seconds, not by a date string. Sending a millisecond value silently places the shape
+ * about fifty thousand years in the future, which renders as nothing at all rather than as an error,
+ * so the conversion belongs in one tested place rather than at each call site.
+ *
+ * UTC midnight, not local: the daily bars this project draws on are keyed by calendar date, and
+ * anchoring to the running machine's zone would move a level by a day for anyone west of Greenwich.
+ * Whether Stockbit's daily bars snap to UTC or WIB midnight is a wire fact recorded in
+ * `docs/chartbit-drawing.md` once observed; if it is WIB the offset is applied there, once, rather
+ * than by re-deciding what "a date" means here.
+ */
+export function epochSeconds(date: string, field = "date"): number {
+  const value = normalizeTradeDate(date, field);
+  const [y, m, d] = value.split("-").map(Number);
+  return Math.floor(Date.UTC(y, m - 1, d) / 1000);
+}

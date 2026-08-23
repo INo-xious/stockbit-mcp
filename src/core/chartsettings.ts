@@ -20,77 +20,21 @@
  *
  * ## Decoding
  *
- * A minimal ZIP reader rather than a dependency: the archive has one deflate entry, and the parts of
- * the format that make general unzipping hard — multi-entry central directories, ZIP64, encryption —
- * are not present. It reads the central directory rather than scanning local headers, because a
- * local header may carry sizes of 0 with the real values in a trailing data descriptor.
+ * The envelope — base64 of a ZIP holding a single `layout.json` — is shared with Chartbit layouts
+ * and drawings, so the reader lives in `src/core/zipjson.ts` and is re-exported here for the
+ * callers (and the test) that found it at this path first.
  */
-import { inflateRawSync } from "node:zlib";
 import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { readZip } from "./zipjson.js";
+
+export { readZip, type ZipEntry } from "./zipjson.js";
 
 const SettingsResponse = z
   .object({ data: z.object({ content: z.string().optional() }).passthrough() })
   .passthrough();
-
-/** End-of-central-directory signature, searched from the tail. */
-const EOCD = 0x06054b50;
-const CENTRAL = 0x02014b50;
-
-export interface ZipEntry {
-  name: string;
-  text: string;
-}
-
-/**
- * Read every entry of a single-disk ZIP.
- *
- * Throws rather than returning partial results: a chart configuration decoded from half an archive
- * is worse than an error, because it looks like a configuration.
- */
-export function readZip(buffer: Buffer): ZipEntry[] {
-  // The EOCD is at the end, after a comment of unknown length, so scan backwards for its signature.
-  let eocd = -1;
-  for (let i = buffer.length - 22; i >= 0; i--) {
-    if (buffer.readUInt32LE(i) === EOCD) {
-      eocd = i;
-      break;
-    }
-  }
-  if (eocd < 0) throw new Error("not a ZIP archive (no end-of-central-directory record)");
-
-  const count = buffer.readUInt16LE(eocd + 10);
-  let offset = buffer.readUInt32LE(eocd + 16);
-  const entries: ZipEntry[] = [];
-
-  for (let i = 0; i < count; i++) {
-    if (buffer.readUInt32LE(offset) !== CENTRAL) throw new Error(`corrupt ZIP: bad central header at ${offset}`);
-    const method = buffer.readUInt16LE(offset + 10);
-    const compressedSize = buffer.readUInt32LE(offset + 20);
-    const nameLength = buffer.readUInt16LE(offset + 28);
-    const extraLength = buffer.readUInt16LE(offset + 30);
-    const commentLength = buffer.readUInt16LE(offset + 32);
-    const localOffset = buffer.readUInt32LE(offset + 42);
-    const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
-
-    // Sizes come from the central directory; the local header's may be zero with the real values in
-    // a trailing data descriptor. Its variable-length fields still have to be skipped, and they can
-    // differ from the central ones.
-    const localNameLength = buffer.readUInt16LE(localOffset + 26);
-    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
-    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-    const data = buffer.subarray(dataStart, dataStart + compressedSize);
-
-    if (method !== 0 && method !== 8) throw new Error(`unsupported ZIP compression method ${method} for ${name}`);
-    entries.push({ name, text: (method === 8 ? inflateRawSync(data) : data).toString("utf8") });
-
-    offset += 46 + nameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
 
 export interface ChartSettings {
   /** False when the account has never saved chart settings. */

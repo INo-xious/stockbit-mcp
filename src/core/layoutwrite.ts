@@ -36,11 +36,11 @@
  * fields we understand. `saveChartLayout` will happily persist any plausible layout it is handed;
  * what it will not do is pretend the project can compose drawings it has never seen the schema for.
  */
-import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
+import { acquireDirLock } from "../util/dirlock.js";
 import { getJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
@@ -188,50 +188,20 @@ export const WRITE_LOCK_STALE_MS = 60_000;
  *
  * Two concurrent saves of the same chart would each snapshot the other's pre-state, each verify
  * against the other's bytes, and a rollback would then restore a layout that was never current.
- * `mkdir` is atomic everywhere, unlike check-then-create — the same approach as `src/auth/reflock.ts`,
- * kept separate because that lock guards a token and this one guards a chart.
+ * The `mkdir` primitive lives in `src/util/dirlock.ts`, shared with the refresh lock and the order
+ * lock; what is decided here is the policy.
  *
  * Best-effort by design: a stale lock is broken rather than wedging the feature, and failing to
  * acquire proceeds anyway. The alternative — refusing to write because a lock file exists — turns a
- * crashed process into a permanent outage.
+ * crashed process into a permanent outage. (The order path in `src/trading/orders.ts` makes the
+ * opposite call, and can, because no read-back can undo a duplicated order.)
  */
 async function acquireWriteLock(symbol: string, timeoutMs = 15_000): Promise<(() => void) | null> {
-  const path = join(stockbitDir(), `layout-${symbol}.lock`);
-  const deadline = Date.now() + timeoutMs;
-
-  for (;;) {
-    try {
-      mkdirSync(stockbitDir(), { recursive: true });
-      mkdirSync(path);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        try {
-          rmSync(path, { recursive: true, force: true });
-        } catch {
-          /* a lock we cannot remove will be broken as stale */
-        }
-      };
-    } catch {
-      let age: number | null = null;
-      try {
-        age = Date.now() - statSync(path).mtimeMs;
-      } catch {
-        age = null;
-      }
-      if (age !== null && age > WRITE_LOCK_STALE_MS) {
-        try {
-          rmSync(path, { recursive: true, force: true });
-        } catch {
-          /* someone else got there first */
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) return null;
-      await delay(150);
-    }
-  }
+  return acquireDirLock(join(stockbitDir(), `layout-${symbol}.lock`), {
+    staleMs: WRITE_LOCK_STALE_MS,
+    timeoutMs,
+    pollMs: 150,
+  });
 }
 
 export interface SaveOptions {

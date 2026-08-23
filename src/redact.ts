@@ -11,6 +11,22 @@ const BEARER_RE = /(authorization\s*[:=]\s*bearer\s+)\S+/gi;
 // JSON-ish `"refresh_token":"..."` / `refresh_token=...`.
 const REFRESH_RE = /("?refresh_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 const ACCESS_RE = /("?access_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
+/**
+ * The credentials the trading path adds, none of which is JWT-shaped.
+ *
+ * `pin` is the six digits that unlock Stockbit Sekuritas. It is entered at a terminal prompt, used
+ * for exactly one request, and never stored — but a thrown error or a debug dump that echoed the
+ * request body would put it in a log file, which is the one place it must never be. `login_token`
+ * is the short-lived exodus grant exchanged for a securities session, and `securities_token` the
+ * session itself; both are bearer-equivalent even though neither matches `JWT_RE`.
+ *
+ * `PIN_RE` is exported because a PIN also has a shape of its own, and the value-level rules below
+ * cannot see one that arrives as a bare argument rather than under a key.
+ */
+export const PIN_RE = /\b\d{6}\b/;
+const PIN_FIELD_RE = /("?pin"?\s*[:=]\s*"?)\d{4,8}/gi;
+const LOGIN_TOKEN_RE = /("?login_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
+const SECURITIES_TOKEN_RE = /("?securities_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 
 const MASK = "[REDACTED]";
 
@@ -20,6 +36,9 @@ export function redact(input: string): string {
     .replace(BEARER_RE, `$1${MASK}`)
     .replace(REFRESH_RE, `$1${MASK}`)
     .replace(ACCESS_RE, `$1${MASK}`)
+    .replace(LOGIN_TOKEN_RE, `$1${MASK}`)
+    .replace(SECURITIES_TOKEN_RE, `$1${MASK}`)
+    .replace(PIN_FIELD_RE, `$1${MASK}`)
     .replace(JWT_RE, MASK);
 }
 
@@ -33,7 +52,9 @@ export function redactValue(value: unknown, seen = new WeakSet<object>()): unkno
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     // Drop known-sensitive keys entirely rather than masking their value.
-    if (/^(authorization|refresh_token|access_token|token)$/i.test(k)) {
+    // The trading credentials join the list rather than getting their own pass: a PIN under a `pin`
+    // key is dropped whole, because masking half of six digits still narrows the search space.
+    if (/^(authorization|refresh_token|access_token|token|pin|login_token|securities_token)$/i.test(k)) {
       out[k] = MASK;
     } else {
       out[k] = redactValue(v, seen);

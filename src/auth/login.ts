@@ -21,14 +21,14 @@
  * new-device verification response, which failed with "No resource with given identifier found" and
  * only succeeded on a lucky `loadingFinished` retry.
  */
-import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { removeDirWithRetry } from "./tempdir.js";
-import { setTimeout as delay } from "node:timers/promises";
 import { CDP } from "./cdp.js";
-import { getStore } from "./store.js";
+import { launchDebuggableBrowser } from "./launch.js";
+import { writeBrowserProfile } from "./browserprofile.js";
+import { fileDir, getStore } from "./store.js";
 import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
 import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
@@ -53,9 +53,15 @@ const ARM_TIMEOUT_MS = 5_000;
 /** Ceiling on browser startup, independent of how long the user then has to log in. */
 const BROWSER_START_TIMEOUT_MS = 30_000;
 
-/** Persistent profile, so a re-login does not mean re-entering password + OTP from scratch. */
+/**
+ * Persistent profile, so a re-login does not mean re-entering password + OTP from scratch.
+ *
+ * Resolved through `fileDir()` rather than `homedir()` directly, so it lands beside the credential
+ * store and moves with `STOCKBIT_STORE_DIR` — which is how a test gets a profile path that is not
+ * the developer's real logged-in one.
+ */
 export function defaultProfileDir(): string {
-  return join(homedir(), ".stockbit", "browser-profile");
+  return join(fileDir(), "browser-profile");
 }
 
 export interface LoginResult {
@@ -137,72 +143,17 @@ export async function captureViaBrowserLogin(
     }
   }
 
-  const port = 9500 + Math.floor(Math.random() * 400);
-  const child: ChildProcess = spawn(
+  // Launching and waiting for the DevTools endpoint is shared with the Chartbit driver — see
+  // `launch.ts` for why each flag is there and why the wait loop watches the child.
+  const { child, wsUrl } = await launchDebuggableBrowser({
     bin,
-    [
-      `--remote-debugging-port=${port}`,
-      // Chrome 136+ refuses remote debugging against the DEFAULT profile directory, so this flag
-      // is mandatory, not merely tidy.
-      `--user-data-dir=${profile}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      // A fresh --user-data-dir still inherits browser-managed extensions, which open their own
-      // tabs (an OAuth prompt stole focus from the login page here) and bury the responses we watch.
-      "--disable-extensions",
-      "--disable-component-extensions-with-background-pages",
-      // The one window the user must find and type into; do not let it open behind others.
-      "--start-maximized",
-      "--new-window",
-      // Start blank so interception is live before the login page loads.
-      "about:blank",
-      ...(options.extraArgs ?? []),
-    ],
-    { stdio: "ignore" },
-  );
+    profileDir: profile,
+    extraArgs: options.extraArgs,
+    startTimeoutMs: Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS),
+  });
 
   if (!options.quiet) {
     logStderr("A browser window opened. Log into Stockbit there — your session is captured automatically.");
-  }
-
-  // Wait for the DevTools endpoint.
-  //
-  // The startup wait is bounded separately from the login window, and it watches the child. The
-  // most common Windows failure is launching against a profile that another window already has
-  // open: the new process hands off to the running instance and exits immediately, so the debugging
-  // port never opens. Polling on the login timeout alone turned that into a fifteen-minute silent
-  // hang with no window to look at.
-  let childExited = false;
-  child.once("exit", () => {
-    childExited = true;
-  });
-
-  let wsUrl = "";
-  const alreadyOpenHint =
-    "The browser exited immediately without opening a debugging port. This usually means a window " +
-    "is already open using this profile — close every window of that browser and retry, or use " +
-    "`--fresh-profile`.";
-  const deadline = Date.now() + Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS);
-  for (;;) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (r.ok) {
-        wsUrl = ((await r.json()) as { webSocketDebuggerUrl: string }).webSocketDebuggerUrl;
-        break;
-      }
-    } catch {
-      /* not up yet */
-    }
-    if (childExited) throw new Error(alreadyOpenHint);
-    if (Date.now() > deadline) {
-      child.kill();
-      throw new Error(
-        "Browser did not start in time (no debugging port after " +
-          `${Math.round(Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS) / 1000)}s). ` +
-          "If a window using this profile is already open, close it and retry.",
-      );
-    }
-    await delay(250);
   }
 
   const debug = process.env.STOCKBIT_DEBUG === "1";
@@ -292,6 +243,11 @@ export async function captureViaBrowserLogin(
           return;
         }
       }
+      // Pin the browser this profile belongs to. A Chromium profile is not portable between
+      // browsers, and the Chartbit driver opens this one long after the login — without the pin its
+      // most likely failure is a logged-out window reported as an empty chart. Disposable profiles
+      // are deliberately not pinned: there is nothing to come back to.
+      if (persist && !profileIsDisposable) writeBrowserProfile(bin);
       if (!options.quiet) logStderr(`Session captured (${via}). You can close the browser window.`);
       finish({ captured: true, refresh });
     };

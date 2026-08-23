@@ -18,6 +18,7 @@ import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
 import { decodeJwt, forceRefresh, resetSession } from "../src/auth/session.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
+import { clearBrowserProfile, readBrowserProfile } from "../src/auth/browserprofile.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
@@ -151,6 +152,12 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const store = getStore();
   const token = store.get();
   logStderr(`Backend: ${store.backend}`);
+  const pinned = readBrowserProfile();
+  logStderr(
+    pinned
+      ? `Browser profile: ${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""} (${pinned.browserPath})`
+      : "Browser profile: not pinned — Chartbit drawing needs `stockbit-auth login` to record one.",
+  );
   if (!token) {
     logStderr("Refresh token: NOT set. Run `stockbit-auth login` (or `bootstrap`).");
     return;
@@ -180,6 +187,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
 async function cmdLogout(argv: string[]): Promise<void> {
   getStore().clear();
   logStderr("Cleared stored refresh token.");
+
+  // The pin describes a profile that is about to stop being logged in; leaving it would send the
+  // Chartbit driver at a browser with no session and no explanation.
+  clearBrowserProfile();
 
   // The persistent browser profile is a SECOND copy of the session: it holds Stockbit cookies and a
   // Login Data store, so clearing only the token leaves an artifact that can still log straight back
