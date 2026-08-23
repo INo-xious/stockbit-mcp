@@ -120,3 +120,28 @@ Every one of these is verified by reading the account back, so a wrong body shap
 replaces or duplicates has not been observed and those are very different outcomes for someone who
 curated a screen. That refusal can be relaxed once one save over an existing name has been watched.
 
+### The market-data read families
+
+The 2026-08-24 expansion wired around fifty new exodus routes read out of Stockbit's web bundle
+rather than probed one at a time. Most answer plainly and their shapes are ordinary; a minority have
+**never been seen return a row**, and those are handled differently from everything else in this
+document.
+
+Where a market-data route is unobserved, the module returns **the raw row** beside the one or two
+fields it is willing to claim it recognised, with `readFrom` naming the wire key each came from and
+`unmapped.sampleKeys` listing what the row actually contained. A wrong guess therefore shows up as
+`code: undefined` next to a visible raw row — never as a confident wrong value, and never as a key
+that is always undefined. That is the opposite of the rule the account modules follow, and the
+reason for the difference is the same one in both directions: here an unmapped field is a metric
+nobody has named yet, and hiding it loses information.
+
+The tools say so themselves. Every one whose route is unobserved carries `PENDING VERIFICATION` in
+its description, and the modules say it in their doc comments — `grep -rn "not been observed" src/`
+is the current list, which is better than a copy here that would go stale. The families carrying
+most of them are the broker directory and league table (`src/core/brokers.ts`), parts of market
+internals (`src/core/market.ts`), the comparison and fundachart routes
+(`src/core/fundamentals.ts`), and the research feed.
+
+**How to settle any of them:** call the tool once against a live session and read `unmapped.sampleKeys`
+off the result. One call per route, and the projection's candidate list is the single edit.
+
