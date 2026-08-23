@@ -1,7 +1,11 @@
 # Features and how to use them
 
-35 tools over Stockbit's private API, plus a standalone alert daemon. Everything reads; one tool
-writes (`chart_layout_save`) and it requires explicit confirmation.
+134 tools over Stockbit's private APIs, plus a standalone alert daemon.
+
+Most of them read. Twelve write: the four order tools, the e-IPO subscription, the Chartbit drawing
+and layout tools, and the watchlist and screener edits. Every one requires an explicit
+per-action confirmation, and trading is **off** until you turn it on yourself at a terminal. If you
+never do, nothing here can reach your money.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
 argument names below matter when you want to be specific ("broker summary for BBRI from 2026-07-01
@@ -336,23 +340,38 @@ Detection is honest about its limits: on macOS every tab of every running browse
 Windows and Linux only each window's **active** tab is visible, so a Stockbit tab sitting in the
 background reports as "not in front" rather than "closed".
 
-### `chart_layout` / `chart_settings`
-Read your own saved chart markup and configuration. `chart_settings` is account-wide (theme,
-resolution, drawing-toolbar state); `chart_layout` is per-symbol.
+### Drawing on it — `chartbit_draw`, `chartbit_analyze`, `chartbit_study`
 
-These are **different stores** — TradingView persists a chart's properties separately from its
-layout. An empty `chart_layout` does not mean you have configured nothing.
+> "draw the support and resistance on BBRI's chart"
+> "mark the trend line GOTO has been respecting"
 
-### `chart_layout_save` — the only write
+These draw on the **real** Stockbit chart, by driving the browser you logged in with, in a window
+you can see. Stockbit's own auto-save persists what appears. `chartbit_analyze` fits the geometry
+from price and draws it in one step; `chartbit_draw` takes annotations you name.
 
-Saves a chart layout to your Stockbit account. Requires `confirm: true` on every call, snapshots the
-current layout to `~/.stockbit/layout-backups/` before touching anything, verifies by reading back,
-restores automatically if it does not match, and appends to `~/.stockbit/layout-mutations.log`.
+Every line carries its evidence in the label — how many times a level was tested and when it was
+last tested, or a trend line's fit — because a bare line invites more confidence than the data
+supports.
 
-**It currently does nothing, and that is Stockbit's end.** Their server accepts the write with HTTP
-200 and discards it; their own web app has no save code path at all. See
-[chartbit-layout-format.md](chartbit-layout-format.md) for the full elimination. The tool reports
-`verified: false` and says nothing was altered, rather than claiming a save that did not happen.
+`chartbit_clear` removes drawings and is confirm-gated: it can destroy work you did by hand that
+this server never saw. Drawing is not gated, because a line is additive, visible, and one click to
+delete. See [chartbit-drawing.md](chartbit-drawing.md).
+
+### `chart_settings`
+Reads your account-wide chart configuration — theme, resolution, drawing-toolbar state. Separate
+from a chart's layout: TradingView persists the two independently, so an empty layout does not mean
+you have configured nothing.
+
+### The saved layouts — `chartbit_layouts`, `chartbit_layout`, `chartbit_layout_save`, `chartbit_layout_delete`
+
+The REST side of the same thing: list your saved chart layouts, read one, round-trip one, delete
+one. The writes are confirm-gated, snapshot before touching anything, and verify by reading back.
+
+An earlier version of this project targeted `/chartbit/{symbol}/layout` and concluded that saving
+was a server-side no-op. That was true of **those two routes**, which really are stubs, and wrong
+about Chartbit — the chart page's own save adapter writes to `/chartbit/charts` and
+`/chartbit/chart-drawings`. [chartbit-layout-format.md](chartbit-layout-format.md) keeps the
+original investigation with a correction on top.
 
 ---
 
@@ -366,7 +385,11 @@ restores automatically if it does not match, and appends to `~/.stockbit/layout-
 | `~/.stockbit/alerts.json` | alert rules |
 | `~/.stockbit/alerts.log` | every alert that fired, append-only |
 | `~/.stockbit/layout-backups/` | pre-write chart-layout snapshots |
-| `~/.stockbit/layout-mutations.log` | every write attempt, append-only |
+| `~/.stockbit/layout-mutations.log` | every chart write attempt, append-only |
+| `~/.stockbit/settings.json` | the trading switches. Written by `stockbit-auth`, never by the server |
+| `~/.stockbit/order-mutations.log` | every order and IPO subscription attempt, append-only |
+| `~/.stockbit/account-mutations.log` | every watchlist and screener edit, append-only |
+| `~/.stockbit/browser-profile.json` | which browser binary your session was created in |
 
 ## Environment
 
@@ -376,6 +399,7 @@ restores automatically if it does not match, and appends to `~/.stockbit/layout-
 | `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts; off unless set |
 | `STOCKBIT_NO_BROWSER=1` | never open a browser |
 | `STOCKBIT_DEBUG=1` | log response shapes on parse failures |
+| `STOCKBIT_TRADING=off` | force trading off, whatever the settings file says. It can only turn trading **off** — no value of it turns trading on |
 
 ## When the session expires
 
@@ -389,10 +413,34 @@ node "C:\Users\<you>\stockbit-mcp\dist\bin\stockbit-auth.js" login
 Run it in your own terminal. Google sign-in is broken on Stockbit's own site (deprecated `gapi.auth2`,
 never migrated) — use username and password.
 
+## Your portfolio and trading
+
+Reading the account needs a trading session, which needs your 6-digit PIN typed at your own
+terminal (`stockbit-auth trading-login`). The PIN is used for one request and never stored, and **no
+tool here accepts one** — if anything asks you for it through the assistant, that is not this server.
+
+`portfolio`, `position`, `cash_balance`, `orders`, `order_history`, `trade_performance`,
+`trading_info`, `stock_tradable` and `account` read it. Identifiers are masked before they leave:
+your name becomes initials, account and RDN numbers become their last four characters.
+
+Placing an order is off by default and always two steps — `order_preview` builds a ticket you read
+and agree to, then `order_buy` takes that ticket id and nothing else. Read
+[trading.md](trading.md) before turning it on; it explains the outcome classes, which matter more
+than the happy path.
+
 ## What this cannot do
 
-It cannot place, modify or cancel an order, and has no portfolio access. The transport enforces that
-with a closed route table, not a convention: every request shape the project may make is enumerated
-in `src/http/transport.ts`, and a test fails if that list changes. See
-[ADR-0002](adr/0002-daemon-is-the-product-server-stays-read-only.md) and
-[ADR-0003](adr/0003-chartbit-writes.md).
+- **It cannot turn trading on.** That is `stockbit-auth trading-enable`, run by you. The environment
+  can only turn it **off**, and no module the assistant can reach may write the settings file.
+- **It cannot place an order you did not agree to.** The write tools take a ticket id and a
+  confirmation, and no price and no quantity, so what reaches the exchange is what you were shown.
+- **A saved workflow recipe cannot reach anything that writes.** Recipes are data — a name and a
+  list of steps — and `define.write` deliberately never registers a tool in the map the workflow
+  engine looks names up in.
+- **It cannot reach a route that is not in the table.** Every request shape the project may make is
+  enumerated in `src/http/transport.ts`; a caller names a route, never a path. Day-trade orders,
+  smart orders, bulk cancels, withdrawals, deposits and stream posting are all deliberately absent.
+
+See [ADR-0002](adr/0002-daemon-is-the-product-server-stays-read-only.md),
+[ADR-0003](adr/0003-chartbit-writes.md), [ADR-0004](adr/0004-order-entry.md),
+[ADR-0005](adr/0005-browser-driven-chartbit.md) and [ADR-0006](adr/0006-account-writes.md).

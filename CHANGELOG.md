@@ -8,6 +8,87 @@ from naming.
 
 ## Unreleased
 
+### Full Stockbit coverage, confirm-gated trading, and drawing on the real chart (2026-08-24)
+
+35 tools became 134; 544 tests became 1041. The read surface now covers what the web UI shows, and
+for the first time this server can do things to an account: place an order, subscribe to an IPO,
+draw on the chart, and edit watchlists and saved screens. Each is off by default or per-action
+confirmed, and each has a decision record.
+
+**One host became three, with three credentials.** `exodus` (market data), `carina` (Stockbit
+Sekuritas), `api-sekuritas` (e-IPO), each with its own store slot, its own refresh chain and its own
+placement rule: the main session refreshes with a header, carina with a `refresh_token` in the
+BODY, e-IPO with the token in a QUERY parameter. `AuthKind` distinguishes all three rather than
+assuming a bearer, because assuming one is how a credential gets sent somewhere it was never issued
+for. `STOCKBIT-API.md` claimed carina needed an `Authorization-Carina` header; the current bundle
+says a plain bearer, and it was wrong.
+
+**`/charts/{SYM}` was never locked — the spelling was wrong.** This project recorded it for months
+as "real, and still unusable" after probing `timeframe` / `tf` / `interval` / `resolution` against
+`daily`, `1D`, `D`, `DAILY`, `TIMEFRAME_DAILY`. Every one of those was uppercase. The client sends
+lowercase *windows*: `?timeframe=1w|1m|3m|ytd|1y|3y|5y`. A whole series in one request, against the
+12-row paged walk it replaces — roughly 40x fewer requests for every scan, backtest and alignment.
+The lesson kept in `STOCKBIT-API.md` §11d: a 400 naming a parameter means the route is real, and
+says nothing about whether the values tried were the right *shape* of value.
+
+**Chartbit saving was never retired; this project was reading the retired half.**
+`/chartbit/{symbol}/layout` really is a server-side stub that accepts every valid body and stores
+nothing — twelve probes established that and they were right about those two routes. The chart page's
+own `save_load_adapter` writes to `/chartbit/charts` and `/chartbit/chart-drawings`, content encoded
+as base64 of a ZIP holding one `layout.json`. `src/core/layout.ts`, `src/core/layoutwrite.ts` and the
+tools `chart_layout` / `chart_layout_save` are gone; `src/chartbit/` replaces them, and the account
+owner had said drawings persist before the bundle confirmed it.
+
+**Drawing happens in the user's own browser** (ADR-0005), over CDP, in a visible window, through the
+TradingView widget's own API. That bypasses the transport tripwire entirely — the requests are made
+by Stockbit's JavaScript with Stockbit's credential — which is why it needed its own decision record
+rather than being an implementation detail. The driver enables only the `Page` and `Runtime` CDP
+domains: never `Network` or `Fetch`, which can read response bodies, and a drawing driver that could
+read traffic could read the session token. A test asserts it on the source.
+
+**Order entry (ADR-0004) inverts three of ADR-0003's rules**, because an order has no undo. Lock
+contention refuses instead of proceeding; a failed verification never rolls back, and nothing ever
+auto-cancels, because the rollback for an order is another order sent on a guess; and nothing throws
+after the request goes out, because a thrown error is a caller's licence to retry and a retry here
+is a duplicate. Seven outcome classes, and only `ok` means the order is on the book and was seen
+there.
+
+The protocol is two steps with a person in the middle: `order_preview` builds a ticket, the write
+tools take a **ticket id and a confirmation and nothing else** — no price, no quantity — so the order
+placed is the order described. Tickets live in memory, expire in two minutes, are spent before the
+request goes out, and are fingerprinted so one altered between the steps is caught. Where the client
+supports MCP elicitation the human is asked directly, in addition to the caller's confirmation.
+
+**Checks that failed and checks that could not be RUN are different facts.** Nothing on the trading
+host has been observed live — reading it needs a PIN this project never stores — so a projection that
+does not recognise an account's key names leaves buying power or a position unknown. Failing those
+closed would make order entry impossible the first time a key name did not match, for a reason with
+nothing to do with the order. They pass, marked `unverified`, named in the warnings, and counted in
+the summary the user reads.
+
+**The account modules project and never pass a row through**, which is the opposite of the rule
+every market-data module follows. There, an unmapped field is a metric nobody has named and hiding
+it loses information. On a brokerage response it is as likely to be an account number, and a tool
+result is text a model relays — so `unmappedKeys` reports the NAMES and drops the values. Names,
+account, RDN and SID are masked inside the core module rather than at the tool boundary, so no
+future call site can reach the unmasked value.
+
+**Writes are unreachable from a saved workflow.** `define.write` registers a tool with the client
+and deliberately does not add it to the handler map `workflow_run` looks names up in — enforced by
+construction, asserted on a real server. A recipe is data: a name and a list of steps.
+
+**A bug the e-IPO tests caught, worth recording because the shape generalises:** a failed read-back
+and a read-back that says "nothing there" were both `null`, so a 4xx that left nothing behind
+reported as `outcome-unknown` — "we cannot tell, do not resend" — when the honest answer was a clean
+failure. Two facts that are opposites must not share a representation.
+
+**Also:** watchlist and screener edits (ADR-0006) with their own audit log, `screener_save` as a
+separate route row from `screener_run` because the only difference on the wire is one body field;
+`progress/build.mjs` scanning every module under `src/tools/` rather than one file; and the route
+guard reading code rather than prose, so a module can name the endpoint it calls in its own
+documentation.
+
+
 ### `analyze` — the synthesis layer (2026-08-10)
 
 One new tool. 35 tools, 544 tests. No new route, no new request shape: it composes sources the

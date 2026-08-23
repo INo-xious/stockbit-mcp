@@ -36,8 +36,9 @@ robust than the TradingView approach.
 |---|---|---|
 | `https://exodus.stockbit.com` | **Market data (DEFAULT)** | Everything in §4 lives here. Go backend, grpc-gateway style. |
 | `https://api.stockbit.com/v2.5` | Legacy, version-gated | **AVOID.** Rejects with `"Silahkan update aplikasi kamu…"` (update-your-app). |
-| `https://carina.stockbit.com` | Portfolio / watchlist service | Needs extra header `Authorization-Carina: Bearer <token>`. |
-| `https://trading.masonline.id` | Order/trading backend (MAS) | Write path. Out of scope for a read-only MCP. |
+| `https://carina.stockbit.com` | **Stockbit Sekuritas**: portfolio, cash, orders, history | A **plain** `Authorization: Bearer <securities token>` — **not** `Authorization-Carina`, which this document claimed until it was checked against the current bundle (2026-08-24). |
+| `https://api-sekuritas.stockbit.com` | e-IPO, smart orders | Its own token chain; see §3. |
+| `https://trading.masonline.id` | Legacy MAS broker backend | Not used by this account. Deliberately absent from the route table. |
 
 **Websockets (real-time — REST 404s for live data because it flows over WS):**
 - `wss://ws3.stockbit.com/` — Primus (running trade, orderbook ticks)
@@ -70,10 +71,21 @@ The real-time protobuf service is named `securities.transactional.datafeed.v1.To
     `POST https://exodus.stockbit.com/login/refresh`, header `Authorization: Bearer <refresh_token>`,
     **empty body**, response nested `{ data: { data: {...} } }`. Live probe with an invalid bearer
     returns `401 UNAUTHORIZED` (endpoint exists). Frontend: `post(q7 + "/login/refresh", null, {headers:{Authorization: Bearer <UR().refresh.token>}})`.
-  - **Securities/trading token** (portfolio/orders — NOT used here):
-    `POST {carina|trading.masonline.id}/auth/refresh` with a `{refresh_token}` body.
-    Frontend: `post(JI() ? cu : Cb, "/auth/refresh", {refresh_token})` where `cu=carina.stockbit.com`,
-    `Cb=trading.masonline.id`. Live probe: exodus `/auth/refresh` → 404; carina `/auth/refresh` → 401.
+  - **Securities/trading token** (portfolio, orders — now used, see ADR-0004). Unlock chain:
+    `GET exodus/sekuritas/auth/token` → `{login_token}` → `POST carina/auth/v2/login {login_token, pin}`
+    → `{access_token, refresh_token}`. Refresh: `POST carina/auth/refresh` with a `{refresh_token}`
+    **body** and no Authorization header — that is what Stockbit's own client does, and it is the one
+    thing about this chain that differs from the main session. `POST carina/auth/pin/validate
+    {pin, purpose}` exists for actions that demand the PIN again.
+  - **e-IPO token** (`api-sekuritas`): `GET exodus/auth/eipo/webview/link` → the grant in that link →
+    `POST sekuritas/partner/eipo/access_token` → `{access_token, refresh_token}`. Refresh:
+    `GET sekuritas/partner/refresh_token?token=` — the credential goes in the **query string**, with
+    no header at all. Minted automatically from the main login; needs no PIN.
+  - **Cloudflare Turnstile:** a `403` carrying the response header `cf-mitigated: challenge` is a
+    browser challenge, **not** an entitlement problem and **not** a wrong PIN. Saying so matters: the
+    natural response to "403 on a PIN login" is to retype the PIN, which is useless and is how an
+    account gets locked. The optional request header `X-Force-Challenge: true` triggers one
+    deliberately.
   - **Still unverified** (needs one real refresh with a valid token): success-response field names and
     whether the refresh token rotates. `src/auth/session.ts::parseRefresh` handles both defensively.
 - **Login (JS-ONLY, reCAPTCHA-gated — do NOT automate):** `/auth/v2/login`, `/login/v3/username/browser`
@@ -321,13 +333,31 @@ Found as `GET_*`/`POST_*` action strings; confirms these features exist and are 
 
 ---
 
-## 7. WRITE endpoints — DO NOT implement in a read-only MCP
+## 7. WRITE endpoints — what is in, what is out, and why
 
-Present in JS but must be excluded by construction (order-entry on a real brokerage account):
-`/order/v2/{buy,sell,cancel,amend,detail}`, `/order/day-trade/v1/*`, `/smart-order/{bracket,stop,trailing-stop}/*`,
-`/withdraw/balance`, `/securities/deposit`, `/intraservice/multi-portfolio/v1/{move-cash,move-stock}`,
-`/virtualtrading/order`, `/bond/v1/orders`. Portfolio/balance reads (`/portfolio/v2/*`, `/balance/cash`)
-live on `carina`/`trading` hosts and are account-sensitive — treat as opt-in, not default.
+This section used to say "do not implement any of these". That was right for a read-only server and
+is no longer the posture; each write below was admitted by a decision record, and each is enforced
+by the closed route table rather than by this prose.
+
+**In scope, confirm-gated:**
+
+| | Routes | Record |
+|---|---|---|
+| Chart persistence | `POST/PUT/DELETE /chartbit/charts[/{id}]`, `POST /chartbit/chart-drawings`, `POST/PUT/DELETE /chartbit/settings[/{name}]` | ADR-0003 (+ Amendment 2) |
+| Order entry | `POST carina/order/v2/{buy,sell,amend,cancel}` | ADR-0004 |
+| IPO subscription | `POST sekuritas/eipo/order` (and `/eipo/order/verify`, a dry run) | ADR-0004 |
+| Watchlist | `POST /watchlist`, `PUT/DELETE /watchlist/{id}`, `POST /watchlist/{id}/company/item`, `DELETE /watchlist/{id}/company/{companyId}/item`, `PUT /watchlist/favorite/{id}` | ADR-0006 |
+| Screener | `POST /screener/templates` with `save:"1"`, `DELETE /screener/templates/{id}`, `POST/DELETE /screener/favorites` | ADR-0006 |
+
+**Deliberately out**, and each would need its own argument: `/order/v2/amend/bulk`,
+`/order/v2/bulk-cancel`, `/order/day-trade/v1/*`, `/smart-order/*`, `/withdraw/balance`,
+`/securities/deposit`, `/intraservice/multi-portfolio/v1/{move-cash,move-stock}`,
+`/virtualtrading/order`, `/bond/v1/orders`, stream posting/liking/following, and
+`POST /user-setting/configurations`. None of them is in the route table, which is what actually
+stops them.
+
+`test/transport.test.ts` sorts every non-GET route into a named class citing its ADR, and asserts
+that nothing else mutates. Editing that list is the deliberate act that lets a new write in.
 
 ---
 
@@ -539,15 +569,213 @@ fnet      506880714000
 Also present and unmapped: `iepiev`, `has_foreign_bs`, `total_bid_offer`, `market_data`,
 `autoreject_*`, `domestic`, `foreign`, `up`/`down`/`unchanged`.
 
-### 11d. `/charts/{SYMBOL}` — real, and still locked
+### 11d. `/charts/{SYMBOL}` — RESOLVED (2026-08-24). The spelling was the problem.
 
-`GET /charts/BBRI` answers **400** with `errors: [{ key: "Timeframe" }]`, and `GET /charts/BBRI/daily`
-answers 400 `"Kurun waktu tidak valid"` ("time period is not valid"). By this document's own rule a
-400 naming a parameter means the route is real — but every timeframe spelling tried was rejected:
-`timeframe` / `tf` / `interval` / `resolution`, each with `daily`, `1D`, `D`, `DAILY`,
-`TIMEFRAME_DAILY`.
+`GET /charts/BBRI` answers **400** with `errors: [{ key: "Timeframe" }]`, and this document spent
+months recording that as "real, and still locked" after trying `timeframe` / `tf` / `interval` /
+`resolution` against `daily`, `1D`, `D`, `DAILY`, `TIMEFRAME_DAILY`.
 
-Left unwired rather than guessed at further, exactly as `/chartbit/{symbol}/price/daily` was. It
-remains the highest-leverage unknown in the project: bars currently cost 12 rows a page, and a route
-returning a whole series in one request would change the cost of every scan, backtest and alignment
-by roughly 40x. It needs the front-end's exact call, not more guesses.
+Every one of those attempts was **uppercase**. The web client calls:
+
+```
+GET /charts/{SYM}/daily?timeframe=1w|1m|3m|ytd|1y|3y|5y
+        (+ &is_include_previous_historical=true for ytd and 1w)
+GET /charts/{SYM}/daily?from&to&interval&chart_type&timeframe
+GET /charts/{SYM}?timeframe=…
+```
+
+Lowercase, and the vocabulary is windows rather than bar sizes. Wired, tested, and it does what the
+old note predicted: a whole series in one request instead of the 12-row paged walk, roughly 40x
+fewer requests for every scan, backtest and alignment.
+
+The lesson generalises and is worth keeping: **a 400 naming a parameter means the route is real, and
+says nothing about whether the values tried were the right shape of value.**
+
+---
+
+## Appendix A — the route table, in full
+
+Generated from `src/http/transport.ts`, which is the only place a Stockbit URL exists in this
+project. A caller names a **route key**; it never supplies a path. That is ADR-0002's closed table,
+and `test/transport.test.ts` snapshots the permitted set per host so that adding a row is a visible
+edit rather than a side effect.
+
+`Credential` is the auth kind the route carries: `main` / `securities` / `eipo` present a bearer for
+that domain; `refreshMain` / `refreshSecurities` / `refreshEipo` are the three refresh chains, which
+put the credential in a header, a body field and a query parameter respectively; `none` means the
+route is called with no credential of ours at all, which is correct for the two token exchanges —
+sending one there would be a token presented somewhere it was never issued for.
+
+### `exodus.stockbit.com`
+
+Market data, stream, screener, watchlist, Chartbit. Main session token.
+
+| Route key | Method + template | Credential |
+|---|---|---|
+| `chartbitChartDelete` | DELETE /chartbit/charts/:layoutId | main |
+| `chartbitSettingDelete` | DELETE /chartbit/settings/:templateName | main |
+| `screenerFavoriteRemove` | DELETE /screener/favorites | main |
+| `screenerTemplateDelete` | DELETE /screener/templates/:templateId | main |
+| `watchlistDelete` | DELETE /watchlist/:watchlistId | main |
+| `watchlistRemoveItem` | DELETE /watchlist/:watchlistId/company/:companyId/item | main |
+| `analystRatings` | GET /analyst-ratings/:symbol | main |
+| `analystConsensus` | GET /analyst-ratings/:symbol/consensus | main |
+| `eipoWebviewLink` | GET /auth/eipo/webview/link | main |
+| `chartbitDrawings` | GET /chartbit/chart-drawings | main |
+| `chartbitCharts` | GET /chartbit/charts | main |
+| `chartbitChart` | GET /chartbit/charts/:layoutId | main |
+| `chartbitDrawingTemplates` | GET /chartbit/drawings | main |
+| `chartbitInitial` | GET /chartbit/initial/:symbol | main |
+| `chartbitSettings` | GET /chartbit/settings | main |
+| `chartbitSetting` | GET /chartbit/settings/:templateName | main |
+| `chartbitStudies` | GET /chartbit/studies | main |
+| `chartbitVersion` | GET /chartbit/version | main |
+| `charts` | GET /charts/:symbol | main |
+| `chartsDaily` | GET /charts/:symbol/daily | main |
+| `historicalSummary` | GET /company-price-feed/historical/summary/:symbol | main |
+| `marketSession` | GET /company-price-feed/market-time/session | main |
+| `pricePerformance` | GET /company-price-feed/price-performance/:symbol | main |
+| `pricesBatch` | GET /company-price-feed/prices | main |
+| `pricesMarket` | GET /company-price-feed/prices/:symbol/market | main |
+| `pricesClose` | GET /company-price-feed/prices/close | main |
+| `seasonality` | GET /company-price-feed/seasonality/:symbol | main |
+| `orderbook` | GET /company-price-feed/v2/orderbook/companies/:symbol | main |
+| `comparisonIndustries` | GET /comparison/:symbol/industries | main |
+| `comparisonRatios` | GET /comparison/:symbol/ratios | main |
+| `comparisonSymbolTemplates` | GET /comparison/:symbol/templates | main |
+| `comparisonMetrics` | GET /comparison/metrics | main |
+| `comparisonTemplates` | GET /comparison/templates | main |
+| `corpactionToday` | GET /corpaction | main |
+| `corpaction` | GET /corpaction/:actionType | main |
+| `stockConversion` | GET /corpaction/:symbol/stock_conversion | main |
+| `corpactionStatus` | GET /corpaction/status | main |
+| `earnings` | GET /earnings | main |
+| `shareholdersChart` | GET /emitten-metadata/shareholders/:symbol/chart | main |
+| `emittenSubsidiary` | GET /emitten-metadata/subsidiary/:symbol | main |
+| `emittenContact` | GET /emitten/:symbol/contact | main |
+| `emittenInfo` | GET /emitten/:symbol/info | main |
+| `emittenProfile` | GET /emitten/:symbol/profile | main |
+| `emittenClassification` | GET /emitten/classification | main |
+| `emittenClassificationCompany` | GET /emitten/classification/company | main |
+| `emittenHotlist` | GET /emitten/hotlist/:moverType | main |
+| `indexMembers` | GET /emitten/indexes/:indexCode | main |
+| `emittenSectors` | GET /emitten/sectors | main |
+| `emittenTrending` | GET /emitten/trending | main |
+| `emittenFinItems` | GET /emitten/v2/:emittenType/:symbol/fin-items | main |
+| `emittenTypedInfo` | GET /emitten/v2/:emittenType/:symbol/info | main |
+| `sectorCompanies` | GET /emitten/v3/sector/:sectorId/company | main |
+| `financial` | GET /findata-view/company/financial | main |
+| `brokerDirectory` | GET /findata-view/marketdetectors/brokers | main |
+| `fundachartMetrics` | GET /fundachart/metrics | main |
+| `fundachartTemplates` | GET /fundachart/templates | main |
+| `insiderTransactions` | GET /insider/company/majorholder | main |
+| `insiderOwnership` | GET /insider/majorholder/ownership | main |
+| `shareholdingCompanies` | GET /insider/shareholding/companies/:symbol | main |
+| `shareholdingComposition` | GET /insider/shareholding/composition/companies/:symbol | main |
+| `shareholdingInvestors` | GET /insider/shareholding/investors/:insiderId | main |
+| `shareholdingNetwork` | GET /insider/shareholding/network | main |
+| `keystats` | GET /keystats/:symbol | main |
+| `keystatsRatio` | GET /keystats/ratio/v1/:symbol | main |
+| `marketDetectors` | GET /marketdetectors/:symbol | main |
+| `brokerActivity` | GET /order-trade/broker/activity | main |
+| `brokerDistribution` | GET /order-trade/broker/distribution | main |
+| `brokerTop` | GET /order-trade/broker/top | main |
+| `marketMover` | GET /order-trade/market-mover | main |
+| `orderQueue` | GET /order-trade/order-queue | main |
+| `runningTrade` | GET /order-trade/running-trade | main |
+| `runningTradeChart` | GET /order-trade/running-trade/chart/:symbol | main |
+| `runningTradeGroup` | GET /order-trade/running-trade/group | main |
+| `topStock` | GET /order-trade/top-stock | main |
+| `tradeBook` | GET /order-trade/trade-book | main |
+| `tradeBookChart` | GET /order-trade/trade-book/chart | main |
+| `underwriters` | GET /order-trade/underwriters | main |
+| `underwriterPerformance` | GET /order-trade/underwriters/:underwriterCode/ipo-performance | main |
+| `paywallEligibility` | GET /paywall/eligibility/check | main |
+| `researchCategories` | GET /research/categories | main |
+| `researchIndicator` | GET /research/indicator/new | main |
+| `screenerFavorites` | GET /screener/favorites | main |
+| `screenerFinItems` | GET /screener/finitem-watchlist | main |
+| `screenerMetrics` | GET /screener/metric | main |
+| `screenerPresets` | GET /screener/preset | main |
+| `screenerTemplates` | GET /screener/templates | main |
+| `screenerRunTemplate` | GET /screener/templates/:templateId | main |
+| `screenerUniverse` | GET /screener/universe | main |
+| `search` | GET /search | main |
+| `searchV2` | GET /search/v2 | main |
+| `sekuritasAuthToken` | GET /sekuritas/auth/token | main |
+| `streamUser` | GET /stream/non-login/user/:username | main |
+| `streamAll` | GET /stream/v3 | main |
+| `streamPost` | GET /stream/v3/post/:postId | main |
+| `streamSymbol` | GET /stream/v3/symbol/:symbol | main |
+| `streamSymbolPinned` | GET /stream/v3/symbol/:symbol/pinned | main |
+| `userSettings` | GET /user-setting/configurations | main |
+| `watchlists` | GET /watchlist | main |
+| `watchlistDetail` | GET /watchlist/:watchlistId | main |
+| `watchlistSymbols` | GET /watchlist/:watchlistId/symbols | main |
+| `watchlistSearchCompany` | GET /watchlist/search/company | main |
+| `chartbitDrawingsSave` | POST /chartbit/chart-drawings | main |
+| `chartbitChartCreate` | POST /chartbit/charts | main |
+| `chartbitSettingsCreate` | POST /chartbit/settings | main |
+| `shareholdersToken` | POST /emitten-metadata/shareholders/token | main |
+| `loginRefresh` | POST /login/refresh | refreshMain |
+| `screenerFavoriteAdd` | POST /screener/favorites | main |
+| `screenerRun` | POST /screener/templates | main |
+| `screenerSave` | POST /screener/templates | main |
+| `streamTrending` | POST /stream/v3/trending | main |
+| `watchlistCreate` | POST /watchlist | main |
+| `watchlistAddItem` | POST /watchlist/:watchlistId/company/item | main |
+| `chartbitChartUpdate` | PUT /chartbit/charts/:layoutId | main |
+| `chartbitSettingUpdate` | PUT /chartbit/settings/:templateName | main |
+| `watchlistRename` | PUT /watchlist/:watchlistId | main |
+| `watchlistFavorite` | PUT /watchlist/favorite/:watchlistId | main |
+
+### `carina.stockbit.com`
+
+Stockbit Sekuritas. Securities token, plain bearer. Nothing here has been observed live.
+
+| Route key | Method + template | Credential |
+|---|---|---|
+| `account` | GET /account | securities |
+| `balanceCash` | GET /balance/cash | securities |
+| `balanceCashInfo` | GET /balance/cash/info | securities |
+| `tradingFormula` | GET /formula/v2 | securities |
+| `historyDetail` | GET /history/detail | securities |
+| `historyPortfolioPerformance` | GET /history/performance/portfolio/:performanceKind | securities |
+| `historyTradePerformance` | GET /history/performance/trade | securities |
+| `historyRealized` | GET /history/realized | securities |
+| `historyRealizedDetail` | GET /history/realized/detail | securities |
+| `historyList` | GET /history/v3 | securities |
+| `orderDetail` | GET /order/v2/detail | securities |
+| `orderList` | GET /order/v2/list | securities |
+| `portfolioDetail` | GET /portfolio/v2/detail | securities |
+| `portfolioList` | GET /portfolio/v2/list | securities |
+| `portfolioSummary` | GET /portfolio/v2/summary | securities |
+| `stockTradable` | GET /stock/tradable | securities |
+| `tradingInfo` | GET /trading/info | securities |
+| `subAccountList` | GET /v2/sub-account/list | securities |
+| `carinaAuthLogout` | POST /auth/logout | securities |
+| `carinaAuthPinValidate` | POST /auth/pin/validate | securities |
+| `carinaAuthRefresh` | POST /auth/refresh | refreshSecurities |
+| `carinaAuthLogin` | POST /auth/v2/login | none |
+| `orderAmend` | POST /order/v2/amend | securities |
+| `orderBuy` | POST /order/v2/buy | securities |
+| `orderCancel` | POST /order/v2/cancel | securities |
+| `orderSell` | POST /order/v2/sell | securities |
+
+### `api-sekuritas.stockbit.com`
+
+e-IPO. Its own token, minted from the main login. Nothing here has been observed live.
+
+| Route key | Method + template | Credential |
+|---|---|---|
+| `eipoCompanyDetail` | GET /eipo/company/detail | eipo |
+| `eipoUnboxing` | GET /eipo/company/unboxing | eipo |
+| `eipoOrderDetail` | GET /eipo/order/detail | eipo |
+| `eipoPriceGroup` | GET /eipo/price_group | eipo |
+| `eipoRdnBalance` | GET /eipo/rdn_balance | eipo |
+| `eipoCompanyList` | GET /eipo/social/company/list | eipo |
+| `eipoStatus` | GET /eipo/status | eipo |
+| `eipoRefreshToken` | GET /partner/refresh_token | refreshEipo |
+| `eipoOrderPlace` | POST /eipo/order | eipo |
+| `eipoOrderVerify` | POST /eipo/order/verify | eipo |
+| `eipoAccessToken` | POST /partner/eipo/access_token | none |

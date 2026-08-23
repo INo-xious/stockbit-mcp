@@ -1,6 +1,6 @@
 {
   "project": "stockbit-mcp",
-  "goal": "An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks \u2014 showing the exact same data Stockbit shows.",
+  "goal": "An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks — showing the exact same data Stockbit shows.",
   "repo": "https://github.com/INo-xious/stockbit-mcp",
   "features": [
     {
@@ -36,20 +36,25 @@
     },
     {
       "name": "Drawing",
-      "state": "partial",
-      "detail": "Levels, zones, trend lines and markers drawn on the rendered chart; the same levels written into generated Pine; and your OWN saved Stockbit drawings readable as context via chart_layout. Writing drawings INTO the account is not done \u2014 it needs POST /chartbit/{symbol}/layout, which mutates your account and supersedes ADR-0002.",
+      "state": "done",
+      "detail": "Levels, zones, trend lines, channels and markers drawn on the REAL Stockbit chart, by driving the browser you logged in with over CDP in a visible window; Stockbit's own auto-save persists them. The same geometry is also rendered as SVG and embedded in generated Pine. Saved layouts and their drawings are readable and writable over REST.",
       "tools": [
+        "chartbit_analyze",
+        "chartbit_draw",
+        "chartbit_layout",
+        "chartbit_layout_save",
+        "chartbit_open",
+        "chartbit_screenshot",
+        "chartbit_study",
         "price_chart",
-        "chart_layout",
         "pine_script"
       ],
-      "verified": "Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. The save format is now fully recovered from Stockbit's own bundle (docs/chartbit-layout-format.md) \u2014 Fj is a string substitution, not encryption, and the payload is plain TradingView chart state. The encoder, composer and round-trip are implemented and tested (layoutcodec).",
-      "blocker": "Needs your explicit yes: POST /chartbit/{symbol}/layout overwrites your saved chart. The payload is ready and tested; no write route exists until you say so. Separately, composing BRAND-NEW drawings needs the TradingView line-tool schema, which Stockbit serves only to an authenticated chart page \u2014 reading and round-tripping a layout does not need it."
+      "verified": "The endpoints the chart page's own save adapter uses were read out of the current web bundle: /chartbit/charts and /chartbit/chart-drawings, content base64-ZIP of a single layout.json. The per-symbol pair this project targeted for months is a server-side stub and has been removed. Codec round-trip, shape mapping and the page scripts are tested; two tests drive a real Chromium when one is installed."
     },
     {
       "name": "Alerts",
       "state": "done",
-      "detail": "Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree \u2014 plus a standalone daemon (`stockbit-alerts watch`) that polls during IDX hours and delivers. Three channels: an append-only JSONL log (always, written first), a native desktop notification (default on, no setup), and an optional https webhook. Fires once per bar; reports warm-up separately from a false condition.",
+      "detail": "Rule engine sharing one indicator registry with the Pine emitter, so an alert and its alertcondition agree — plus a standalone daemon (`stockbit-alerts watch`) that polls during IDX hours and delivers. Three channels: an append-only JSONL log (always, written first), a native desktop notification (default on, no setup), and an optional https webhook. Fires once per bar; reports warm-up separately from a false condition.",
       "tools": [
         "alert_create",
         "alert_list",
@@ -62,7 +67,7 @@
     {
       "name": "Workflow automation",
       "state": "done",
-      "detail": "Five saved recipes \u2014 deep_dive, morning_scan, bandar_watch, alert_sweep, pine_handoff \u2014 each running several tools in one call, the same way every time. Declarative steps only: no eval, a closed template vocabulary, capped fan-out that reports what it skipped, and a failing step that aborts and names itself unless marked optional.",
+      "detail": "Five saved recipes — deep_dive, morning_scan, bandar_watch, alert_sweep, pine_handoff — each running several tools in one call, the same way every time. Declarative steps only: no eval, a closed template vocabulary, capped fan-out that reports what it skipped, and a failing step that aborts and names itself unless marked optional.",
       "tools": [
         "workflow_list",
         "workflow_run"
@@ -71,9 +76,12 @@
     },
     {
       "name": "UI automation on graphics",
-      "state": "declined",
-      "detail": "Deliberately not built. Stockbit Desktop is Tauri/WKWebView with no CDP, and Stockbit exposes a clean JSON API this server already reads \u2014 so driving a GUI would solve a problem that does not exist. The practical substitute is opening the real Stockbit chart in your own browser beside what was drawn.",
+      "state": "done",
+      "detail": "Reframed rather than declined. Driving Stockbit Desktop is still refused — it is Tauri/WKWebView with no CDP, and it is a thin client over the same JSON API this server already reads. What the request actually meant is drawing on the real chart, and that is done by driving the BROWSER you logged in with. ADR-0005.",
       "tools": [
+        "chartbit_draw",
+        "chartbit_open",
+        "chartbit_screenshot",
         "stockbit_web"
       ]
     },
@@ -89,20 +97,98 @@
     },
     {
       "name": "Universe screening",
-      "state": "partial",
-      "detail": "One condition across many symbols, with pre-dispatch budgets and honest truncation. Universe sources: explicit symbols, movers, trending.",
+      "state": "done",
+      "detail": "One condition across many symbols, with pre-dispatch budgets and honest truncation. Universe sources: explicit symbols, movers, trending, your own watchlists and your saved screens. Ad-hoc screens run without creating anything; saving one is a separate, confirm-gated tool.",
       "tools": [
         "scan",
-        "price_bands"
+        "price_bands",
+        "screener",
+        "screener_run",
+        "screener_save",
+        "watchlist"
+      ]
+    },
+    {
+      "name": "The full read surface",
+      "state": "done",
+      "detail": "One module per section of the Stockbit web UI: stream and research, company profile and fundamentals, insider activity, market internals and running trade, the broker directory and league table, corporate actions and the dividend calendar, and the screener catalogue.",
+      "tools": [
+        "company_profile",
+        "corpaction_calendar",
+        "insider_activity",
+        "market_movers",
+        "research_feed",
+        "stream",
+        "brokers",
+        "screener_metrics"
       ],
-      "blocker": "Watchlist and screener universes are designed but not wired \u2014 their endpoints have not been verified against a live session yet."
+      "verified": "Every route is declared in the closed table and snapshotted per host by test/transport.test.ts. Routes nobody has observed live say so in their tool descriptions and project defensively rather than renaming fields on a guess."
+    },
+    {
+      "name": "Portfolio and order entry",
+      "state": "done",
+      "detail": "Portfolio, positions, cash and buying power, open orders, trade and realised history, performance, fee schedule, tradability and a masked account identity — plus order entry: preview a ticket, show it to the user, then buy, sell, amend or cancel against that ticket id. OFF by default and unreachable from a saved workflow recipe.",
+      "tools": [
+        "account",
+        "cash_balance",
+        "order_amend",
+        "order_buy",
+        "order_cancel",
+        "order_history",
+        "order_preview",
+        "order_sell",
+        "orders",
+        "portfolio",
+        "position",
+        "trading_info",
+        "trading_status",
+        "stock_tradable",
+        "trade_performance"
+      ],
+      "verified": "Not against a live account, and deliberately so: reading this host needs the trading PIN, which this project never stores. The apparatus is tested against a fake brokerage that lies in every way a real one can — accepts and hides the order, errors after accepting it, errors without accepting it, fails the read-back. Every refusal path asserts that ZERO requests left the process.",
+      "blocker": "The first REAL order is a live gate, not a test run: a HAR of one manually-placed order settles platform_order_type, the error envelope and the list shape, then one 1-lot order with the account owner watching. docs/PENDING-VERIFICATION.md carries the protocol."
+    },
+    {
+      "name": "e-IPO",
+      "state": "done",
+      "detail": "The offerings, one offering in full, where it is in its timetable, this account's own subscription and what was ALLOTTED, the RDN cash it is funded from, and subscribing under the same switch and the same two-step protocol as an exchange order.",
+      "tools": [
+        "eipo_detail",
+        "eipo_list",
+        "eipo_my_order",
+        "eipo_order",
+        "eipo_order_preview",
+        "eipo_price_groups",
+        "eipo_rdn_balance",
+        "eipo_status",
+        "eipo_unboxing"
+      ],
+      "verified": "Not against a live account. The session is minted from the ordinary login through a webview grant, and the preview uses Stockbit's OWN verify endpoint — the server knows the offering's rules and this project does not.",
+      "blocker": "Same live gate as order entry, on an open offering."
+    },
+    {
+      "name": "Account writes",
+      "state": "done",
+      "detail": "Watchlist create, rename, delete, add, remove and favourite; screener save, delete and favourite. Each confirm-gated, verified by reading the account back, and logged. Deleting a watchlist that still holds symbols refuses once and names the count.",
+      "tools": [
+        "screener_delete",
+        "screener_favorite",
+        "screener_save",
+        "watchlist_add",
+        "watchlist_create",
+        "watchlist_delete",
+        "watchlist_favorite",
+        "watchlist_remove",
+        "watchlist_rename"
+      ],
+      "verified": "Every edit reads the account back, so a wrong body shape reports not-visible rather than a false success. Nothing rolls back: each of these is one action a person can reverse in the Stockbit app, and undoing a change we could not read would be a second blind write."
     }
   ],
   "verification": [
     {
       "check": "Volume unit is LOTS, not shares",
       "result": "pass",
-      "evidence": "BBRI value/volume = 303,668 against an average price of 3,037 \u2014 exactly price x 100."
+      "evidence": "BBRI value/volume = 303,668 against an average price of 3,037 — exactly price x 100."
     },
     {
       "check": "Support/resistance labelled correctly",
@@ -120,9 +206,9 @@
       "evidence": "220 sessions (2025-09-03 to 2026-08-05) in 19 requests, not truncated."
     },
     {
-      "check": "Read-only boundary holds",
+      "check": "The write boundary is enumerated, not assumed",
       "result": "pass",
-      "evidence": "Three non-GET routes, all declared: POST /login/refresh (session only) plus the two ADR-0003 Chartbit writes, POST /chartbit/{symbol}/layout and POST /chartbit/template. No order, portfolio or withdrawal path is reachable by any method. test/transport.test.ts asserts the permitted set exactly."
+      "evidence": "Every non-GET route is sorted into a named class citing the ADR that admitted it: session refresh, Chartbit persistence (ADR-0003), the four order routes plus the e-IPO pair (ADR-0004), and watchlist/screener edits (ADR-0006), with a fifth class for POSTs that read. test/transport.test.ts asserts nothing else mutates, and test/tools.test.ts asserts on a real server that exactly twelve tools can change anything and that none of them is reachable from a saved workflow recipe."
     },
     {
       "check": "Broker distribution against live data",
@@ -132,7 +218,7 @@
     {
       "check": "Workflows run end to end on live data",
       "result": "pass",
-      "evidence": "deep_dive on BBRI: quote 388ms, technicals 2542ms, chart 630ms, brokers 156ms \u2014 no step failed."
+      "evidence": "deep_dive on BBRI: quote 388ms, technicals 2542ms, chart 630ms, brokers 156ms — no step failed."
     },
     {
       "check": "Alert daemon fires and delivers on live data",
@@ -141,7 +227,7 @@
     }
   ],
   "blockers": [
-    "Chartbit writes are ENABLED under ADR-0003 with their full apparatus (snapshot, verify, rollback, mutation log) \u2014 and Stockbit's end discards them. Both POST routes answer 200 and store nothing; eliminated across nine variables, and their own web bundle has no save wiring either. Not a blocker this project can clear.",
+    "Chartbit writes are ENABLED under ADR-0003 with their full apparatus (snapshot, verify, rollback, mutation log) — and Stockbit's end discards them. Both POST routes answer 200 and store nothing; eliminated across nine variables, and their own web bundle has no save wiring either. Not a blocker this project can clear.",
     "Composing brand-new drawings needs the TradingView line-tool schema (what `state` a LineToolHorzLine expects). Stockbit serves the charting library only to an authenticated chart page, so it could not be read the way the rest of the format was. Reading, round-tripping and modifying an existing layout does not need it."
   ],
   "notes": [

@@ -1,9 +1,15 @@
 # stockbit-mcp
 
-Read-only [Model Context Protocol](https://modelcontextprotocol.io) server for **Stockbit**
-(Indonesian / IDX market data) — broker summary / *bandarmology*, quotes, top movers, orderbook,
-fundamentals, and sentiment. It talks to the same JSON backend the Stockbit apps use, with **your
-own** session. It never places or modifies orders.
+[Model Context Protocol](https://modelcontextprotocol.io) server for **Stockbit** (Indonesian / IDX
+market) — broker summary / *bandarmology*, quotes, top movers, orderbook, fundamentals, sentiment,
+your portfolio, and your real chart. It talks to the same JSON backends the Stockbit apps use, with
+**your own** session.
+
+**Most of it reads. A few things write, and they are the interesting part of this README.** It can
+place an order on the exchange, subscribe to an IPO, draw on your chart, and edit your watchlists —
+each off by default, each behind an explicit per-action confirmation, each verified by reading the
+account back afterwards. If you never turn trading on, this is a read-only market-data server and
+nothing here can reach your money. See [`docs/trading.md`](./docs/trading.md).
 
 > ⚠️ **Unofficial.** Not affiliated with, endorsed by, or associated with Stockbit or TradingView.
 > Automated access may conflict with Stockbit's Terms of Use — you use this at your own risk on your
@@ -18,7 +24,18 @@ MCPs doesn't apply, and isn't needed: the desktop app is a thin client over
 
 ## Auth model
 
-- One credential: a bearer **access token** (24h), minted from a **refresh token** via
+Three separate credentials for three separate hosts, each with its own store slot, its own refresh
+chain and its own consequences if leaked:
+
+| Host | What it reaches | Credential |
+|---|---|---|
+| `exodus.stockbit.com` | market data, stream, screener, watchlist, Chartbit | the main session |
+| `carina.stockbit.com` | Stockbit Sekuritas: portfolio, cash, orders | a **securities** token, unlocked with your trading PIN |
+| `api-sekuritas.stockbit.com` | e-IPO | its own token, minted from the main login |
+
+The market-data half:
+
+- A bearer **access token** (24h), minted from a **refresh token** via
   `POST {exodus}/login/refresh` (refresh token in the `Authorization` header; no reCAPTCHA on refresh).
 - Initial login is OAuth + reCAPTCHA gated, so a human logs in **once**. `stockbit-auth login` drives
   your own browser over the DevTools Protocol (no extra browser download — Node 24's built-in
@@ -118,14 +135,21 @@ depth, and neither has broker-flow data at all.
 | Pine generation | — | ✅ | ✅ |
 | Chart rendering | — | ✅ (screenshots) | ✅ (SVG, no browser) |
 | Alerts | — | ✅ | ✅ + a standalone daemon |
-| Drives a desktop app | — | ✅ | — *deliberately: see below* |
-| Needs a running desktop app | — | ✅ | — |
+| Drives a desktop app | — | ✅ | — (it drives your **browser**, for drawing only) |
+| Draws on your real chart | — | ✅ | ✅ |
+| Portfolio / order entry | — | — | ✅ (off by default) |
 
-**Why no desktop automation.** Stockbit Desktop is a Tauri/WKWebView app, so the CDP approach does
-not apply — and it is not needed, because the desktop app is a thin client over the same JSON API
-this server talks to. Writing chart drawings back to Stockbit was attempted, measured across nine
-variables, and found to be a server-side no-op: their own web bundle has no save path either. That
-is recorded in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
+**Why not desktop automation.** Stockbit Desktop is a Tauri/WKWebView app, so the CDP approach does
+not apply to it — and it is not needed, because the desktop app is a thin client over the same JSON
+API this server talks to.
+
+Drawing is the exception, and it drives the **browser** you logged in with rather than the desktop
+app. An earlier pass concluded that writing drawings back to Stockbit was a server-side no-op; that
+was correct about the two `/chartbit/{symbol}/layout` routes it probed and wrong about Chartbit as a
+whole — real persistence lives on `/chartbit/charts` and `/chartbit/chart-drawings`, which is where
+the chart page's own save adapter writes. The correction is in
+[`docs/chartbit-drawing.md`](./docs/chartbit-drawing.md) and ADR-0003's Amendment 2; the original
+investigation is kept in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
 
 ## Tools
 
@@ -156,12 +180,33 @@ is recorded in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
 `price_performance`, `top_movers`, `trending`, `sectors`.
 
 **Your own account** — `watchlist` (your lists, and what's in them) and `screener` (your saved
-screens, and running one). Both read-only. `scan` can sweep a watchlist directly.
+screens, and running one). `scan` can sweep a watchlist directly.
+
+Editing them is separate and confirm-gated: `watchlist_create`, `watchlist_rename`,
+`watchlist_delete`, `watchlist_add`, `watchlist_remove`, `watchlist_favorite`, `screener_save`,
+`screener_delete`, `screener_favorite`. Each reads the account back afterwards and reports what it
+actually saw; deleting a watchlist that still holds symbols refuses once, names the count, and needs
+a second flag. [ADR-0006](./docs/adr/0006-account-writes.md).
+
+**Your portfolio** — `portfolio`, `position`, `cash_balance`, `orders`, `order_detail`,
+`order_history`, `trade_performance`, `trading_info`, `stock_tradable`, `account` (identifiers
+masked before they leave this server). Needs a trading session; see below.
+
+**Trading** — `trading_status`, `order_preview`, then `order_buy` / `order_sell` / `order_amend` /
+`order_cancel`. **Off by default.** Two steps, always: preview builds a ticket and the write tools
+take a ticket id and a confirmation and nothing else, so what reaches the exchange is what you were
+shown. Read [`docs/trading.md`](./docs/trading.md) before turning it on.
+
+**e-IPO** — `eipo_list`, `eipo_detail`, `eipo_status`, `eipo_my_order`, `eipo_price_groups`,
+`eipo_rdn_balance`, `eipo_unboxing`, and `eipo_order_preview` → `eipo_order` under the same switch.
 
 **Fundamentals** — `keystats`, `ratios`, `financials`, `sentiment_stream`.
 
-**Chart state** — `chart_layout`, `chart_settings`, `stockbit_web`, and `chart_layout_save` (the one
-write, confirm-gated).
+**Your chart** — `chartbit_open`, `chartbit_draw`, `chartbit_analyze`, `chartbit_study`,
+`chartbit_shapes`, `chartbit_clear`, `chartbit_screenshot`, `chartbit_save`, plus the saved-layout
+REST tools. It draws on the **real** Stockbit chart by driving the browser you logged in with, in a
+visible window, and Stockbit's own auto-save persists it. `chart_settings` and `stockbit_web` are
+still here. See [`docs/chartbit-drawing.md`](./docs/chartbit-drawing.md).
 
 **Workflows** — `workflow_list` / `workflow_run`: seven recipes including `deep_dive`,
 `bandar_watch`, `strategy_check` and `screen_and_dive`.
@@ -197,11 +242,18 @@ npm test            # node --test (redaction, error mapping, refresh rotation, s
 npm run dev:mcp     # run from source via tsx
 ```
 
-## Status / roadmap
+## Status
 
-v1 is read-only MCP tools. The `src/core/` layer is intentionally UI-agnostic so a CLI and a
-**watch/alert daemon** (the two-stage broker-summary → intraday screener) can be added as v2 without
-touching the data layer.
+Full coverage of what the Stockbit web UI shows, plus confirm-gated trading and live chart drawing.
+The `src/core/` layer is UI-agnostic, which is how the CLI and the standalone **watch/alert daemon**
+exist without duplicating the data layer.
+
+What is **not** verified: nothing on the trading host or the e-IPO host has been observed against a
+live account, because reading them needs a PIN this project never stores. Field names there are
+projected against candidates read out of Stockbit's own web client, `readFrom` says where each value
+came from, and `docs/PENDING-VERIFICATION.md` lists every guess ordered by what goes wrong if it is
+wrong — including the protocol for the first real order, which is a live gate with the account owner
+watching rather than a test run.
 
 > **Refresh contract** (confirmed via source + live endpoint probe): the main/session token renews at
 > `POST {exodus}/login/refresh` with the refresh token in the `Authorization: Bearer` header and an

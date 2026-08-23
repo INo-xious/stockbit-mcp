@@ -67,14 +67,14 @@
   <h1>stockbit-mcp — progress</h1>
   <p class="goal">An AI assistant that can do chart analysis, Pine Script development, workflow automation, bandarmology, drawing, alerts and UI automation on IDX stocks — showing the exact same data Stockbit shows.</p>
 
-  <div class="bar"><i style="width:78%"></i></div>
+  <div class="bar"><i style="width:100%"></i></div>
   <div class="meta">
-    <div class="stat"><b>7/9</b><span>features settled</span></div>
+    <div class="stat"><b>13/13</b><span>features settled</span></div>
     <div class="stat"><b>134</b><span>MCP tools</span></div>
     
-    <div class="stat"><b>102</b><span>source files</span></div>
-    <div class="stat"><b>50</b><span>test files</span></div>
-    <div class="stat"><b><code>f604a8f</code></b><span>NOT pushed</span></div>
+    <div class="stat"><b>106</b><span>source files</span></div>
+    <div class="stat"><b>51</b><span>test files</span></div>
+    <div class="stat"><b><code>417235b</code></b><span>NOT pushed</span></div>
   </div>
 
   <h2>Features</h2>
@@ -109,15 +109,15 @@
         <p class="verified"><strong>Verified:</strong> Generated and structurally validated; runs with no API call when levels are excluded.</p>
         
       </article>
-      <article class="feature partial">
+      <article class="feature done">
         <header>
           <h3>Drawing</h3>
-          <span class="pill partial">Partial</span>
+          <span class="pill done">Done</span>
         </header>
-        <p>Levels, zones, trend lines and markers drawn on the rendered chart; the same levels written into generated Pine; and your OWN saved Stockbit drawings readable as context via chart_layout. Writing drawings INTO the account is not done — it needs POST /chartbit/{symbol}/layout, which mutates your account and supersedes ADR-0002.</p>
-        <p class="tools"><code>price_chart</code> <code>chart_layout</code> <code>pine_script</code></p>
-        <p class="verified"><strong>Verified:</strong> Live: chart_layout reads GET /chartbit/{symbol}/layout (HTTP 200) plus chart metadata. The save format is now fully recovered from Stockbit's own bundle (docs/chartbit-layout-format.md) — Fj is a string substitution, not encryption, and the payload is plain TradingView chart state. The encoder, composer and round-trip are implemented and tested (layoutcodec).</p>
-        <p class="blocker"><strong>Blocked:</strong> Needs your explicit yes: POST /chartbit/{symbol}/layout overwrites your saved chart. The payload is ready and tested; no write route exists until you say so. Separately, composing BRAND-NEW drawings needs the TradingView line-tool schema, which Stockbit serves only to an authenticated chart page — reading and round-tripping a layout does not need it.</p>
+        <p>Levels, zones, trend lines, channels and markers drawn on the REAL Stockbit chart, by driving the browser you logged in with over CDP in a visible window; Stockbit's own auto-save persists them. The same geometry is also rendered as SVG and embedded in generated Pine. Saved layouts and their drawings are readable and writable over REST.</p>
+        <p class="tools"><code>chartbit_analyze</code> <code>chartbit_draw</code> <code>chartbit_layout</code> <code>chartbit_layout_save</code> <code>chartbit_open</code> <code>chartbit_screenshot</code> <code>chartbit_study</code> <code>price_chart</code> <code>pine_script</code></p>
+        <p class="verified"><strong>Verified:</strong> The endpoints the chart page's own save adapter uses were read out of the current web bundle: /chartbit/charts and /chartbit/chart-drawings, content base64-ZIP of a single layout.json. The per-symbol pair this project targeted for months is a server-side stub and has been removed. Codec round-trip, shape mapping and the page scripts are tested; two tests drive a real Chromium when one is installed.</p>
+        
       </article>
       <article class="feature done">
         <header>
@@ -139,13 +139,13 @@
         <p class="verified"><strong>Verified:</strong> Live: deep_dive on BBRI ran all four steps green in 3.7s (quote, technicals, chart, broker distribution).</p>
         
       </article>
-      <article class="feature declined">
+      <article class="feature done">
         <header>
           <h3>UI automation on graphics</h3>
-          <span class="pill declined">Declined</span>
+          <span class="pill done">Done</span>
         </header>
-        <p>Deliberately not built. Stockbit Desktop is Tauri/WKWebView with no CDP, and Stockbit exposes a clean JSON API this server already reads — so driving a GUI would solve a problem that does not exist. The practical substitute is opening the real Stockbit chart in your own browser beside what was drawn.</p>
-        <p class="tools"><code>stockbit_web</code></p>
+        <p>Reframed rather than declined. Driving Stockbit Desktop is still refused — it is Tauri/WKWebView with no CDP, and it is a thin client over the same JSON API this server already reads. What the request actually meant is drawing on the real chart, and that is done by driving the BROWSER you logged in with. ADR-0005.</p>
+        <p class="tools"><code>chartbit_draw</code> <code>chartbit_open</code> <code>chartbit_screenshot</code> <code>stockbit_web</code></p>
         
         
       </article>
@@ -159,15 +159,55 @@
         <p class="verified"><strong>Verified:</strong> Absence of lookahead proved structurally: a backtest over the first N bars is a prefix of the backtest over all bars, asserted across nine presets, three cut points and 100+ trades.</p>
         
       </article>
-      <article class="feature partial">
+      <article class="feature done">
         <header>
           <h3>Universe screening</h3>
-          <span class="pill partial">Partial</span>
+          <span class="pill done">Done</span>
         </header>
-        <p>One condition across many symbols, with pre-dispatch budgets and honest truncation. Universe sources: explicit symbols, movers, trending.</p>
-        <p class="tools"><code>scan</code> <code>price_bands</code></p>
+        <p>One condition across many symbols, with pre-dispatch budgets and honest truncation. Universe sources: explicit symbols, movers, trending, your own watchlists and your saved screens. Ad-hoc screens run without creating anything; saving one is a separate, confirm-gated tool.</p>
+        <p class="tools"><code>scan</code> <code>price_bands</code> <code>screener</code> <code>screener_run</code> <code>screener_save</code> <code>watchlist</code></p>
         
-        <p class="blocker"><strong>Blocked:</strong> Watchlist and screener universes are designed but not wired — their endpoints have not been verified against a live session yet.</p>
+        
+      </article>
+      <article class="feature done">
+        <header>
+          <h3>The full read surface</h3>
+          <span class="pill done">Done</span>
+        </header>
+        <p>One module per section of the Stockbit web UI: stream and research, company profile and fundamentals, insider activity, market internals and running trade, the broker directory and league table, corporate actions and the dividend calendar, and the screener catalogue.</p>
+        <p class="tools"><code>company_profile</code> <code>corpaction_calendar</code> <code>insider_activity</code> <code>market_movers</code> <code>research_feed</code> <code>stream</code> <code>brokers</code> <code>screener_metrics</code></p>
+        <p class="verified"><strong>Verified:</strong> Every route is declared in the closed table and snapshotted per host by test/transport.test.ts. Routes nobody has observed live say so in their tool descriptions and project defensively rather than renaming fields on a guess.</p>
+        
+      </article>
+      <article class="feature done">
+        <header>
+          <h3>Portfolio and order entry</h3>
+          <span class="pill done">Done</span>
+        </header>
+        <p>Portfolio, positions, cash and buying power, open orders, trade and realised history, performance, fee schedule, tradability and a masked account identity — plus order entry: preview a ticket, show it to the user, then buy, sell, amend or cancel against that ticket id. OFF by default and unreachable from a saved workflow recipe.</p>
+        <p class="tools"><code>account</code> <code>cash_balance</code> <code>order_amend</code> <code>order_buy</code> <code>order_cancel</code> <code>order_history</code> <code>order_preview</code> <code>order_sell</code> <code>orders</code> <code>portfolio</code> <code>position</code> <code>trading_info</code> <code>trading_status</code> <code>stock_tradable</code> <code>trade_performance</code></p>
+        <p class="verified"><strong>Verified:</strong> Not against a live account, and deliberately so: reading this host needs the trading PIN, which this project never stores. The apparatus is tested against a fake brokerage that lies in every way a real one can — accepts and hides the order, errors after accepting it, errors without accepting it, fails the read-back. Every refusal path asserts that ZERO requests left the process.</p>
+        <p class="blocker"><strong>Blocked:</strong> The first REAL order is a live gate, not a test run: a HAR of one manually-placed order settles platform_order_type, the error envelope and the list shape, then one 1-lot order with the account owner watching. docs/PENDING-VERIFICATION.md carries the protocol.</p>
+      </article>
+      <article class="feature done">
+        <header>
+          <h3>e-IPO</h3>
+          <span class="pill done">Done</span>
+        </header>
+        <p>The offerings, one offering in full, where it is in its timetable, this account's own subscription and what was ALLOTTED, the RDN cash it is funded from, and subscribing under the same switch and the same two-step protocol as an exchange order.</p>
+        <p class="tools"><code>eipo_detail</code> <code>eipo_list</code> <code>eipo_my_order</code> <code>eipo_order</code> <code>eipo_order_preview</code> <code>eipo_price_groups</code> <code>eipo_rdn_balance</code> <code>eipo_status</code> <code>eipo_unboxing</code></p>
+        <p class="verified"><strong>Verified:</strong> Not against a live account. The session is minted from the ordinary login through a webview grant, and the preview uses Stockbit's OWN verify endpoint — the server knows the offering's rules and this project does not.</p>
+        <p class="blocker"><strong>Blocked:</strong> Same live gate as order entry, on an open offering.</p>
+      </article>
+      <article class="feature done">
+        <header>
+          <h3>Account writes</h3>
+          <span class="pill done">Done</span>
+        </header>
+        <p>Watchlist create, rename, delete, add, remove and favourite; screener save, delete and favourite. Each confirm-gated, verified by reading the account back, and logged. Deleting a watchlist that still holds symbols refuses once and names the count.</p>
+        <p class="tools"><code>screener_delete</code> <code>screener_favorite</code> <code>screener_save</code> <code>watchlist_add</code> <code>watchlist_create</code> <code>watchlist_delete</code> <code>watchlist_favorite</code> <code>watchlist_remove</code> <code>watchlist_rename</code></p>
+        <p class="verified"><strong>Verified:</strong> Every edit reads the account back, so a wrong body shape reports not-visible rather than a false success. Nothing rolls back: each of these is one action a person can reverse in the Stockbit app, and undoing a change we could not read would be a second blind write.</p>
+        
       </article></div>
 
   <h2>Verified against live Stockbit</h2>
@@ -195,9 +235,9 @@
         <td>220 sessions (2025-09-03 to 2026-08-05) in 19 requests, not truncated.</td>
       </tr>
       <tr>
-        <td>Read-only boundary holds</td>
+        <td>The write boundary is enumerated, not assumed</td>
         <td><span class="result pass">pass</span></td>
-        <td>Three non-GET routes, all declared: POST /login/refresh (session only) plus the two ADR-0003 Chartbit writes, POST /chartbit/{symbol}/layout and POST /chartbit/template. No order, portfolio or withdrawal path is reachable by any method. test/transport.test.ts asserts the permitted set exactly.</td>
+        <td>Every non-GET route is sorted into a named class citing the ADR that admitted it: session refresh, Chartbit persistence (ADR-0003), the four order routes plus the e-IPO pair (ADR-0004), and watchlist/screener edits (ADR-0006), with a fifth class for POSTs that read. test/transport.test.ts asserts nothing else mutates, and test/tools.test.ts asserts on a real server that exactly twelve tools can change anything and that none of them is reachable from a saved workflow recipe.</td>
       </tr>
       <tr>
         <td>Broker distribution against live data</td>
@@ -229,6 +269,11 @@
   <div class="scroll"><table>
     <thead><tr><th>Commit</th><th>Date</th><th>Subject</th></tr></thead>
     <tbody>
+      <tr>
+        <td><code>417235b</code></td>
+        <td class="date">2026-08-24</td>
+        <td>feat(account): watchlist and screener edits, confirmed and read back</td>
+      </tr>
       <tr>
         <td><code>f604a8f</code></td>
         <td class="date">2026-08-24</td>
@@ -348,16 +393,11 @@
         <td><code>53a1f20</code></td>
         <td class="date">2026-08-07</td>
         <td>Update SECURITY.md with dependency security and reporting</td>
-      </tr>
-      <tr>
-        <td><code>40ca1f8</code></td>
-        <td class="date">2026-08-05</td>
-        <td>docs: a feature guide and a session log</td>
       </tr></tbody>
   </table></div>
 
   <p class="foot">
-    Generated 2026-08-23 21:53 UTC from
+    Generated 2026-08-23 22:05 UTC from
     <code>progress/status.json</code> and the repo itself.
     Repository: <a href="https://github.com/INo-xious/stockbit-mcp">https://github.com/INo-xious/stockbit-mcp</a>.
     Regenerate with <code>npm run progress</code>.

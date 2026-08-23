@@ -1,3 +1,13 @@
+> **SUPERSEDED (2026-08-24).** The per-symbol `/chartbit/{symbol}/layout` pair this document
+> investigates is the RETIRED half of Chartbit's API, and the conclusion below that "saving is a
+> server-side stub" is correct about those two routes and wrong about Chartbit as a whole. Real
+> persistence lives on `/chartbit/charts` and `/chartbit/chart-drawings`, which is where the chart
+> page's own `save_load_adapter` writes. See ADR-0003's Amendment 2 and `docs/chartbit-drawing.md`.
+>
+> The codec work here — the series-id normalisation and the corruption check in
+> `src/core/layoutcodec.ts` — outlived its endpoint and is still what encodes content for the real
+> routes. The twelve probes are kept because they are what established that the stub is a stub.
+
 # The Chartbit layout format
 
 Recovered by reading Stockbit's own front-end bundle (`_next/static/chunks/82241-*.js`, module

@@ -1,7 +1,7 @@
 {
   "name": "stockbit-mcp",
   "version": "0.1.0",
-  "description": "Read-only MCP server for Stockbit (Indonesian market) — broker summary / bandarmology, quotes, movers, orderbook, fundamentals. Unofficial; uses your own session.",
+  "description": "MCP server for Stockbit (Indonesian / IDX market) — bandarmology, quotes, orderbook, fundamentals, your portfolio, and drawing on your real chart. Order entry is off by default and confirm-gated. Unofficial; uses your own session.",
   "type": "module",
   "license": "MIT",
   "engines": {

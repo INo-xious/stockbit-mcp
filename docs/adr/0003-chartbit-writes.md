@@ -13,7 +13,40 @@ ADR-0002 says a Chartbit write increment "must reintroduce the apparatus above a
 a feature flag; it is a change of posture, and it supersedes this ADR." This is that increment,
 written before it is enabled so the decision can be judged rather than discovered in a diff.
 
-## Amendment: scope is chart persistence, not one URL
+## Amendment 2 (2026-08-24): the scope moved to the endpoints Stockbit's own adapter uses
+
+The route this ADR was written against, and the named-layout save Amendment 1 added, were **both**
+halves of a retired API. Reading the current web bundle settled it: the chart page configures the
+TradingView Charting Library with a `save_load_adapter`, an `auto_save_delay` and
+`onAutoSaveNeeded -> widget.saveChartToServer()`, and those adapter methods point at
+
+```
+GET/POST /chartbit/charts          ·  GET/PUT/DELETE /chartbit/charts/{id}
+GET/POST /chartbit/chart-drawings
+GET/POST /chartbit/settings        ·  GET/PUT/DELETE /chartbit/settings/{name}
+```
+
+not at the per-symbol pair. This project concluded for months that Chartbit saving was retired on
+both sides; it was looking at the retired half. Drawings **do** persist, and the account owner said
+so before the bundle did.
+
+So the approved scope — chart persistence — is unchanged, and the mechanism is replaced.
+`src/core/layout.ts`, `src/core/layoutwrite.ts` and the tools `chart_layout` / `chart_layout_save`
+are **removed**, along with the four stub routes; `src/chartbit/` implements the real thing. The
+apparatus below is kept in full, on the new routes.
+
+Two things this amendment adds rather than moves:
+
+- **Deleting a layout** is now in scope, which Amendment 1 explicitly refused for the template
+  route. The argument that changed: a user who asks to remove a chart they made should not be told
+  the server cannot, and the same confirmation, snapshot and read-back apply to it. It is one of the
+  writes `test/transport.test.ts` enumerates.
+- **Drawing is now real.** The "what is still unknown" section below was right that composing a
+  `LineToolHorzLine` needed a schema this project had not read. It still has not read it — instead,
+  ADR-0005 drives the widget in the user's own browser, which composes the state itself. That is a
+  different mechanism with a different risk profile, and it has its own decision record.
+
+## Amendment 1: scope is chart persistence, not one URL
 
 The instruction was "enable the write", meaning *let drawing save to my account*. The route named
 below was **my** choice of mechanism, and it turned out to be a server-side stub — it accepts every
@@ -105,7 +138,8 @@ Every fixture in the test suite was ~495 bytes, so the truncation never triggere
 
 The rule that came out of it: **a truncating read and a byte-exact operation must not share an entry
 point.** `getRawChartLayout` now exists for the write path, uncached and unbounded, and the display
-accessor is for display.
+accessor is for display. (Under Amendment 2 it is `getLayoutContentRaw`; the rule outlived the
+function's name, and `listOrdersRaw` in `src/trading/account.ts` exists for the same reason.)
 
 Four other guarantees were strengthened in the same pass: the rollback is read back and confirmed
 rather than inferred from a 2xx; a write whose request errored is read back before being called a
