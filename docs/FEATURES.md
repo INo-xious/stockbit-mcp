@@ -411,6 +411,8 @@ All of it lives in one directory — `~/.stockbit` by default, or wherever
 | `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only, never written to disk |
 | `STOCKBIT_FORCE_FILE_STORE=1` | skip the macOS Keychain and use the encrypted file store (what the tests run under) |
 | `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts; off unless set |
+| `STOCKBIT_TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather. Environment only — a token on the command line is visible to every user on the machine through `ps` |
+| `STOCKBIT_TELEGRAM_CHAT_ID` | Numeric chat id (a group's is negative). Message your bot once, then read it from `https://api.telegram.org/bot<token>/getUpdates` |
 | `STOCKBIT_DEBUG=1` | log response shapes on parse failures |
 
 ## When the session expires

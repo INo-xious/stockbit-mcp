@@ -17,9 +17,24 @@
  *     Best-effort: it is one spawn with a short timeout, and a failure is recorded rather than
  *     raised, since a missing notification daemon must not stop the next alert being delivered.
  *   - **webhook** — only when `STOCKBIT_ALERT_WEBHOOK` is set. Off by default on purpose: this is
- *     the one channel that sends data off the machine, and that should be a thing the user turned
- *     on deliberately, not a default they discover later. The URL must be https (or explicit
+ *     a channel that sends data off the machine, and that should be a thing the user turned on
+ *     deliberately, not a default they discover later. The URL must be https (or explicit
  *     localhost) so a typo cannot silently downgrade to plaintext.
+ *   - **Telegram** — only when both `STOCKBIT_TELEGRAM_BOT_TOKEN` and `STOCKBIT_TELEGRAM_CHAT_ID`
+ *     are set. This is the channel that reaches a phone, which is the point: a desktop toast fires
+ *     at a laptop that is shut. It sends off-machine like the webhook does, and the same rule
+ *     applies — the Bot API is https-only, so there is nothing to downgrade.
+ *
+ * ## The Telegram token lives in the URL
+ *
+ * The Bot API puts the bot token in the request **path**, not a header. So any error message that
+ * quotes the URL carries the credential in full, and whoever reads that log can send as the bot
+ * until it is revoked. Every failure string from `postTelegram` is therefore built from the status
+ * code and the error's name — never from the URL, and never from the exception's own message. The
+ * token is also matched by shape in `src/redact.ts`, as a second line rather than the first.
+ *
+ * Tokens come from the environment only. A `--telegram-token` flag would put the credential in the
+ * process table, where every other user on the machine can read it with `ps`.
  *
  * Nothing here is a trading action. A notification is the whole feature; this project cannot place
  * an order and must not look like it might.
@@ -34,6 +49,7 @@ export interface DeliveryResult {
   logged: boolean;
   desktop: "sent" | "failed" | "disabled";
   webhook: "sent" | "failed" | "disabled";
+  telegram: "sent" | "failed" | "disabled";
   errors: string[];
 }
 
@@ -192,11 +208,79 @@ async function postWebhook(url: string, payload: unknown, timeoutMs = 8000): Pro
   }
 }
 
+/* ------------------------------------ telegram ------------------------------------ */
+
+export interface TelegramTarget {
+  botToken: string;
+  chatId: string;
+}
+
+/**
+ * Read a Telegram target from the environment, or null when it is not configured.
+ *
+ * Both halves are required and the chat id is validated: `getUpdates` returns it as a number and a
+ * group's is negative, so `/^-?\d+$/` is the whole vocabulary. A user who pasted an @username here
+ * gets no delivery rather than a per-alert HTTP 400 in the log — the shape is checked once, at
+ * startup, where the message can say what to fix.
+ */
+export function telegramTargetFromEnv(env: NodeJS.ProcessEnv = process.env): TelegramTarget | null {
+  const botToken = env.STOCKBIT_TELEGRAM_BOT_TOKEN?.trim();
+  const chatId = env.STOCKBIT_TELEGRAM_CHAT_ID?.trim();
+  if (!botToken || !chatId) return null;
+  if (!/^-?\d+$/.test(chatId)) return null;
+  return { botToken, chatId };
+}
+
+/**
+ * Send one message. Resolves to an error string, or null on success.
+ *
+ * The error string is built from the status code and the error's `name` — never from the URL and
+ * never from `err.message`, either of which can quote the request and therefore the token.
+ *
+ * Plain text with no `parse_mode`: an alert name is user-supplied, and under Markdown or HTML an
+ * unbalanced `*` or `<` makes Telegram reject the whole message. The alert that fires is exactly
+ * the one you cannot afford to lose to a formatting error.
+ */
+export async function postTelegram(
+  target: TelegramTarget,
+  text: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 8000,
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`https://api.telegram.org/bot${target.botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: target.chatId, text, disable_web_page_preview: true }),
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    if (res.status >= 300 && res.status < 400) return `refused to follow a redirect (HTTP ${res.status})`;
+    if (res.ok) return null;
+    // Deliberately not the body: Telegram echoes parts of the request in its error descriptions.
+    return `HTTP ${res.status}`;
+  } catch (err) {
+    // `err.message` on a fetch failure routinely contains the full URL. Only the class is safe.
+    return err instanceof Error ? `request failed (${err.name})` : "request failed";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What a fired alert looks like in a chat window. */
+export function telegramText(event: AlertEvaluation, at: string): string {
+  return `${alertTitle(event)}\n${alertBody(event)}\n${at}`;
+}
+
 /* ------------------------------------ delivery ------------------------------------ */
 
 export interface DeliveryOptions {
   desktop?: boolean;
   webhookUrl?: string;
+  /** A target, or `false` to skip the channel even when the environment configures one. */
+  telegram?: TelegramTarget | false;
 }
 
 /**
@@ -204,7 +288,13 @@ export interface DeliveryOptions {
  * their failures are reported rather than thrown, so one broken channel cannot stop the next alert.
  */
 export async function deliver(event: AlertEvaluation, at: string, options: DeliveryOptions = {}): Promise<DeliveryResult> {
-  const result: DeliveryResult = { logged: false, desktop: "disabled", webhook: "disabled", errors: [] };
+  const result: DeliveryResult = {
+    logged: false,
+    desktop: "disabled",
+    webhook: "disabled",
+    telegram: "disabled",
+    errors: [],
+  };
 
   try {
     logAlert(event, at);
@@ -238,6 +328,15 @@ export async function deliver(event: AlertEvaluation, at: string, options: Deliv
       result.webhook = error ? "failed" : "sent";
       if (error) result.errors.push(`webhook: ${error}`);
     }
+  }
+
+  // Last, because it is the slowest and the least likely to be configured. The log has already been
+  // written, so a Telegram outage costs the notification, never the record.
+  const telegram = options.telegram === false ? null : (options.telegram ?? telegramTargetFromEnv());
+  if (telegram) {
+    const error = await postTelegram(telegram, telegramText(event, at));
+    result.telegram = error ? "failed" : "sent";
+    if (error) result.errors.push(`telegram: ${error}`);
   }
 
   return result;
