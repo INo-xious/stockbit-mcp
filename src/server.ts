@@ -11,6 +11,7 @@ import { registerTools } from "./tools/register.js";
 import { describeSurface } from "./tools/surface.js";
 import { buildInstructions } from "./instructions.js";
 import { VERSION } from "./version.js";
+import { registerWorkflowPrompts } from "./prompts.js";
 import type { ToolProfile } from "./tools/_define.js";
 
 export interface CreateServerOptions {
@@ -27,5 +28,11 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   );
 
   registerTools(server, { profile: options.profile, toolCount: surface.tools.length });
+
+  // After the tools, because a prompt's first instruction is to call `workflow_run` — and it is
+  // skipped entirely when a profile filtered that away, rather than offering a menu entry that
+  // cannot work.
+  registerWorkflowPrompts(server, options.profile);
+
   return server;
 }

@@ -28,7 +28,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** What the surface is expected to hold when nothing else says otherwise. Update with each phase. */
 const FALLBACK_TOOLS = 137;
-const FALLBACK_PROMPTS = 0;
+const FALLBACK_PROMPTS = 8;
 
 function flag(name) {
   const i = process.argv.indexOf(name);
