@@ -17,22 +17,32 @@ that the code is built so an unchecked guess fails loudly rather than quietly.
 
 ## By family
 
-| Family | Evidence | What was compared against what |
-|---|---|---|
-| bandarmology | **Observed** | NET vs GROSS, the four market boards and the six period windows confirmed on a live account 2026-08-09; broker distribution cross-checked against Stockbit's own screens. |
-| market (core) | **Observed** | `quote`, `orderbook`, `price_bands`, `top_movers`, daily bars — all read from live responses; the ARA/ARB shape and the `topgainer` casing were both corrected against them. |
-| market (internals) | **Projected** | `running_trade`, `trade_book`, `order_queue`, `prices_batch`, `market_prices`, `chart_series` — routes are real, field names come from the web bundle. |
-| analysis | **Observed** | Local mathematics over observed bars. Indicators, patterns and backtests are computed here, not read; walk-forward usually returns `inconclusive` on ~500 daily bars, which is the honest answer. |
-| company · fundamentals · insider · corpaction | **Mixed** | Per tool — see the evidence column in [`TOOLS.md`](TOOLS.md). |
-| stream | **Mixed** | The per-symbol stream is **Observed**; the rest is **Projected**. |
-| screener · watchlist (reads) | **Observed** | Confirmed 2026-08-09: the index returns `data` as an array, the detail wraps rows in `data.result`, and running a saved screen is a plain GET. |
-| account (writes) | **Read-back** | Every watchlist and screener edit re-reads the account and reports what it found (ADR-0006). |
-| chartbit | **Observed / Read-back** | Layout persistence confirmed 2026-08-24 on `/chartbit/charts`; the retired per-symbol routes accept a valid body and store nothing (ADR-0003 Amendment 2). |
-| alerts · workflows | **Observed** | Live end-to-end run 2026-08-05: rules fired, notifications delivered, every workflow completed. |
-| **trading (carina)** | **Projected — never observed live** | Nothing on `carina.stockbit.com` has been seen. Reading it needs a securities session, which needs the account owner's PIN at their own terminal. |
-| **e-IPO (api-sekuritas)** | **Projected** | Same reason. |
-| paper | **Observed by construction** | The ledger is local; there is no wire shape to guess. Fills are approximate and every result says so. |
-| system | **Observed** | `status`, `login`, `logout` read local state only. |
+Counts are read off the running server — the same `_meta` a client sees and the same numbers
+[`TOOLS.md`](TOOLS.md) is generated from, so this table cannot drift from the code.
+
+| Family | Tools | Evidence | What was compared against what |
+|---|---|---|---|
+| system | 3 | 3 Observed | `status`, `login` and `logout` read local state only; nothing to project. |
+| market | 18 | 8 Observed, 10 Projected | `quote`, `orderbook`, `price_bands`, `top_movers` and daily bars were read from live responses; the ARA/ARB shape and the `topgainer` casing were both corrected against them (2026-08-09). The internals — `running_trade`, `trade_book`, `order_queue`, `prices_batch`, `chart_series`, `market_prices` — are real routes with projected field names. |
+| bandarmology | 6 | 3 Observed, 3 Projected | NET vs GROSS, the four boards and the six period windows confirmed live 2026-08-09; `broker_distribution` cross-checked against Stockbit's own screens. `broker_activity`, `bandar_detector` and the broker directory are projected. |
+| analysis | 9 | 9 Observed | Local mathematics over observed bars. Indicators, patterns, backtests and `position_size` are computed here, not read. |
+| company | 9 | 9 Projected | Routes read off the web bundle; no live response seen. |
+| fundamentals | 10 | 4 Observed, 6 Projected | `keystats`, `ratios`, `financials` and `sentiment_stream` were read live; seasonality and the rest are projected. |
+| insider | 4 | 4 Projected | |
+| corpaction | 7 | 7 Projected | |
+| stream | 7 | 7 Projected | The per-symbol feed is the closest to settled; none has been observed from this server. |
+| screener | 5 | 5 Projected | The *route* is settled — running a saved screen is a plain GET, confirmed 2026-08-09 — but the request bodies and row shapes are not. |
+| account | 11 | 2 Observed, 9 Read-back | The watchlist index/detail split and the screener GET were confirmed live 2026-08-09. Every edit re-reads the account and reports what it found (ADR-0006). |
+| chartbit | 17 | 17 Observed | Layout persistence confirmed 2026-08-24 on `/chartbit/charts`; the retired per-symbol routes accept a valid body and store nothing (ADR-0003 Amendment 2). |
+| alerts | 4 | 4 Observed | Live end-to-end run 2026-08-05: rules fired, notifications delivered. |
+| pine | 1 | 1 Observed | Generated locally from observed series. |
+| workflows | 2 | 2 Observed | Every built-in ran end to end on live data 2026-08-05. |
+| **trading** | 16 | **16 Projected** | **Nothing on `carina.stockbit.com` has been observed.** Reading it needs a securities session, which needs the account owner's PIN at their own terminal. |
+| **e-IPO** | 9 | **9 Projected** | Same reason, on `api-sekuritas.stockbit.com`. |
+
+Paper mode is Observed by construction: the ledger is local, so there is no wire shape to guess. It
+proves the *protocol*, not the field mappings — turning paper on changes nothing about the rows
+above.
 
 ## Checks that were run
 

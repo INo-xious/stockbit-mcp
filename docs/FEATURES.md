@@ -1,11 +1,12 @@
 # User guide
 
-134 tools over Stockbit's private APIs, plus a standalone alert daemon.
+Tools over Stockbit's private APIs, plus a standalone alert daemon. The complete, generated list —
+every tool, its evidence and its arguments — is [`TOOLS.md`](TOOLS.md); this page is the tour.
 
-Most of them read. Twenty-two write: the four order tools, the e-IPO subscription, the eight Chartbit
-drawing and layout tools, and the nine watchlist and screener edits. Every one requires an explicit
-per-action confirmation, and trading is **off** until you turn it on yourself at a terminal. If you
-never do, nothing here can reach your money.
+Most of them read. Twenty-four write: the four order tools, the e-IPO subscription, the eight
+Chartbit drawing and layout tools, the nine watchlist and screener edits, and `login`/`logout`. Every
+one requires an explicit per-action confirmation, and trading is **off** until you turn it on
+yourself at a terminal. If you never do, nothing here can reach your money.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
 argument names below matter when you want to be specific ("broker summary for BBRI from 2026-07-01
