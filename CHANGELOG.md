@@ -39,6 +39,14 @@ installable by someone who is not the author.
 - **`README.id.md`** in Bahasa Indonesia, and two sample images rendered from synthetic data.
 - **Distribution**: npm, the MCP Registry, a Claude Code plugin with six skills, and a Claude
   Desktop Extension.
+- **CI on every push** — typecheck, test, build, smoke, `check:pack` and a `docs/TOOLS.md`
+  freshness check across Ubuntu, macOS and Windows on Node 22 and 24, plus a dependency audit and an
+  offline link check. Three operating systems because the token store, the file locks and the
+  browser probe are all different on each, and a suite that only ever runs on the author's Mac is a
+  suite that tests one of them.
+- **Community plumbing** — issue templates that ask for `stockbit-auth doctor` output and make you
+  tick a box saying you scrubbed it, a pull-request checklist naming the three invariants, and
+  Dependabot.
 - **`CONTEXT.md`** — a glossary, so "session" stops meaning two things.
 - **`docs/VERIFICATION.md`** — the evidence ladder, what each family is, and how to settle a
   projection.

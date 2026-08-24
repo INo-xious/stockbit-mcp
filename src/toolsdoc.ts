@@ -58,9 +58,21 @@ interface Row {
   inputs: string;
 }
 
-/** Escape a Markdown table cell without letting a preceding backslash neutralise the pipe escape. */
+/**
+ * Escape a Markdown table cell.
+ *
+ * Both metacharacters are escaped in a SINGLE pass over one character class, and that is the whole
+ * point. Chained replaces — backslashes, then pipes — are correct only in that order, and a later
+ * reader reordering them for tidiness would silently reintroduce the bug: escaping `|` first turns
+ * `a\|b` into `a\\|b`, and doubling the backslashes afterwards produces `a\\\\|b`, an escaped
+ * backslash followed by a live pipe that breaks the row. One pass cannot be reordered, and never
+ * looks at a character it has already written.
+ */
 export function escapeMarkdownTableCell(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
+  return value
+    .replace(/[\\|]/g, (metacharacter) => `\\${metacharacter}`)
+    .replace(/\s*\n+\s*/g, " ")
+    .trim();
 }
 
 /**

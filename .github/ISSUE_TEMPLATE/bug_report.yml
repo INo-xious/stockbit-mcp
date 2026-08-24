@@ -1,0 +1,85 @@
+name: Bug report
+description: Something returned the wrong answer, failed, or did not do what the docs say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before anything else: **do not paste a token, a PIN, an account number or a
+        real name.** `stockbit-auth doctor` and `stockbit-auth status --json` are
+        both written to be safe to paste — read them before you do anyway.
+
+        Found a security problem? Do not open an issue. Use a
+        [private security advisory](https://github.com/INo-xious/stockbit-mcp/security/advisories/new).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you asked for, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool, and with what arguments
+      placeholder: broker_summary symbol=BBRI period=LAST_1_MONTH
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Claude Desktop
+        - Claude Code
+        - Cursor
+        - VS Code
+        - Other / directly over stdio
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options:
+        - npx -y stockbit-mcp
+        - Global npm install
+        - Claude Code plugin
+        - Desktop Extension (.mcpb)
+        - From source
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and Node version
+      description: "`node --version`, and which macOS/Windows/Linux."
+      placeholder: macOS 15.3, Node v22.14.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: stockbit-auth doctor
+      description: Paste the output. It is rendered as a code block; no need for backticks.
+      render: text
+
+  - type: textarea
+    id: status
+    attributes:
+      label: stockbit-auth status --offline --json
+      render: json
+
+  - type: checkboxes
+    id: scrubbed
+    attributes:
+      label: Before you submit
+      options:
+        - label: I removed every token, PIN, account number, name and watchlist from what I pasted.
+          required: true

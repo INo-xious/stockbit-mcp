@@ -54,6 +54,38 @@ beforeEach(() => {
 
 /* ------------------------------------ the request ------------------------------------ */
 
+/** The Bot API origin, as an origin rather than as a piece of text. */
+const BOT_API_ORIGIN = "https://api.telegram.org";
+
+/**
+ * Whether `text` contains a URL that would actually reach the Bot API.
+ *
+ * A substring test for `api.telegram.org` is not this question: it says yes to
+ * `https://api.telegram.org.evil.example/`, whose host is `evil.example`, and no to a host written
+ * with a trailing dot or in mixed case. Parse, then compare the origin the parser produced.
+ */
+function mentionsBotApi(text: string): boolean {
+  for (const candidate of text.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) {
+    let url: URL;
+    try {
+      url = new URL(candidate[0]);
+    } catch {
+      continue; // Not a URL after all — it cannot reach anything.
+    }
+    if (url.origin === BOT_API_ORIGIN) return true;
+  }
+  return false;
+}
+
+test("a lookalike host is not the Bot API", () => {
+  // The reason the check above parses instead of calling `includes`.
+  assert.ok(mentionsBotApi("failed: https://api.telegram.org/bot1:x/sendMessage"));
+  assert.ok(!mentionsBotApi("failed: https://api.telegram.org.evil.example/bot1:x/sendMessage"));
+  assert.ok(!mentionsBotApi("failed: https://notapi.telegram.org/bot1:x/sendMessage"));
+  assert.ok(!mentionsBotApi("failed: http://api.telegram.org/bot1:x/sendMessage"), "plain HTTP is a different origin");
+  assert.ok(!mentionsBotApi("no url here at all"));
+});
+
 test("it posts to the Bot API with the token in the path and the chat id in the body", async () => {
   let seen: { url: string; init: RequestInit } | undefined;
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
@@ -64,7 +96,9 @@ test("it posts to the Bot API with the token in the path and the chat id in the 
   const error = await postTelegram(TARGET, "hello", fetchImpl);
   assert.equal(error, null);
   assert.ok(seen);
-  assert.equal(seen.url, `https://api.telegram.org/bot${TOKEN}/sendMessage`);
+  const sent = new URL(seen.url);
+  assert.equal(sent.origin, BOT_API_ORIGIN, "the host must be exactly the Bot API, over TLS");
+  assert.equal(sent.pathname, `/bot${TOKEN}/sendMessage`);
   assert.equal(seen.init.method, "POST");
   assert.equal(seen.init.redirect, "manual", "a redirect would move the message to another origin");
 
@@ -107,6 +141,7 @@ test("a fetch error whose message contains the URL does not put the token in the
   const error = await postTelegram(TARGET, "hello", fetchImpl);
   assert.ok(error, "a failure must be reported");
   assert.ok(!error.includes(TOKEN), `the error carried the bot token: ${error}`);
+  assert.ok(!mentionsBotApi(error), "the URL itself is enough to reconstruct the path");
   assert.equal(error, "request failed (TypeError)");
 });
 
@@ -121,6 +156,7 @@ test("a timeout is reported without the URL either", async () => {
 
   const error = await postTelegram(TARGET, "hello", fetchImpl, 5);
   assert.ok(error && !error.includes(TOKEN));
+  assert.ok(!mentionsBotApi(error), "an abort message quotes the URL; the result must not");
   assert.match(error, /AbortError/);
 });
 
