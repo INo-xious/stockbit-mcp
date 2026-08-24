@@ -30,7 +30,7 @@
 import { getStore, type StoreSlot } from "./auth/store.js";
 import { decodeJwt, ensureFresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
-import { tradingPolicy, type TradingPolicy } from "./settings.js";
+import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
 import { VERSION } from "./version.js";
@@ -71,6 +71,9 @@ export interface StatusReport {
   auth: Record<StoreSlot, SlotStatus>;
   login: LoginStatus;
   trading: {
+    /** `off`, `paper` or `live` — the one field that answers "what happens if I place an order". */
+    mode: TradingMode;
+    live: boolean;
     enabled: boolean;
     autoConfirm: boolean;
     maxOrderValueIdr: number | null;
@@ -199,10 +202,14 @@ function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport[
       "`stockbit-auth trading-enable --paper`."
     );
   }
-  if (!trading.enabled) {
+  if (trading.mode === "off") {
     return (
-      "Everything reads. Order entry is off: " + trading.reason
+      "Everything reads. Order entry is off — try it on paper first with " +
+      "`stockbit-auth trading-enable --paper`, which needs no PIN and no real money."
     );
+  }
+  if (trading.mode === "paper") {
+    return 'Paper trading is on. Try: "preview a buy of 1 lot of BBRI", then agree to it.';
   }
   return 'You are set. Try: "broker summary for BBRI".';
 }
@@ -227,7 +234,10 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       detail: `Could not be read, so trading is off: ${err instanceof Error ? err.message : String(err)}`,
     });
     policy = {
+      mode: "off",
+      live: false,
       enabled: false,
+      paper: { startingCashIdr: 0 },
       autoConfirm: false,
       maxOrderValueIdr: null,
       allowedSymbols: [],
@@ -239,6 +249,8 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   }
 
   const trading: StatusReport["trading"] = {
+    mode: policy.mode,
+    live: policy.live,
     enabled: policy.enabled,
     autoConfirm: policy.autoConfirm,
     maxOrderValueIdr: policy.maxOrderValueIdr,
@@ -349,7 +361,7 @@ export function formatStatus(report: StatusReport): string {
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),
-    `Order placing    ${report.trading.enabled ? "ENABLED" : "off"} — ${report.trading.reason}`,
+    `Order placing    ${report.trading.mode.toUpperCase()} — ${report.trading.reason}`,
     `Market           ${report.market.nowWib} WIB (${report.market.weekday}), ${report.market.phase}` +
       (report.market.nextOpenWib ? `; next open ${report.market.nextOpenWib}` : ""),
   ];

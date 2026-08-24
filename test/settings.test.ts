@@ -51,7 +51,7 @@ test("with no settings file at all, trading is off", () => {
 
 test("the shipped default has every money-moving switch off", () => {
   const d = defaultSettings();
-  assert.equal(d.trading.enabled, false);
+  assert.equal(d.trading.mode, "off");
   assert.equal(d.trading.autoConfirm, false);
   assert.equal(d.trading.maxOrderValueIdr, null);
   assert.deepEqual(d.trading.allowedSymbols, []);
@@ -61,18 +61,90 @@ test("enabling in the file enables the policy, and it is read at CALL time", () 
   clear();
   assert.equal(tradingPolicy({}).enabled, false);
   const settings = defaultSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = "live";
   saveSettings(settings);
   // No restart, no cache to bust: `trading-disable` must take effect on the next order.
   assert.equal(tradingPolicy({}).enabled, true);
-  settings.trading.enabled = false;
+  assert.equal(tradingPolicy({}).live, true);
+  settings.trading.mode = "off";
   saveSettings(settings);
   assert.equal(tradingPolicy({}).enabled, false);
 });
 
+test("paper is a third state, not a flag beside enabled", () => {
+  // `enabled: boolean` could not say this without a second field, and the pair "enabled but paper"
+  // is exactly the combination a reader gets wrong — one of the two says the opposite of the truth.
+  clear();
+  const settings = defaultSettings();
+  settings.trading.mode = "paper";
+  saveSettings(settings);
+
+  const policy = tradingPolicy({});
+  assert.equal(policy.mode, "paper");
+  assert.equal(policy.live, false, "paper is not live");
+  assert.equal(policy.enabled, true, "but it IS enabled — an order tool does something in paper");
+  assert.match(policy.reason, /PAPER/);
+  assert.match(policy.reason, /local ledger/);
+});
+
+test("paper never auto-confirms, however the file is written", () => {
+  // Paper exists to rehearse the live protocol. A rehearsal that skips the confirmation step
+  // rehearses the wrong thing.
+  clear();
+  const settings = defaultSettings();
+  settings.trading.mode = "paper";
+  settings.trading.autoConfirm = true;
+  settings.trading.maxOrderValueIdr = 5_000_000;
+  saveSettings(settings);
+  assert.equal(tradingPolicy({}).autoConfirm, false);
+});
+
+test("the environment can only move DOWN the ladder", () => {
+  clear();
+  const settings = defaultSettings();
+  settings.trading.mode = "live";
+  saveSettings(settings);
+
+  // live -> paper
+  const lowered = tradingPolicy({ STOCKBIT_TRADING: "paper" });
+  assert.equal(lowered.mode, "paper");
+  assert.equal(lowered.source, "env-paper");
+  assert.match(lowered.reason, /No real order can be placed/);
+
+  // live -> off
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "off" }).mode, "off");
+
+  // paper -> live is NOT possible.
+  settings.trading.mode = "paper";
+  saveSettings(settings);
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "live" }).mode, "paper", "nothing in the env raises the mode");
+
+  // off -> paper is not possible either: the env cannot turn anything on.
+  settings.trading.mode = "off";
+  saveSettings(settings);
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "paper" }).mode, "off");
+});
+
+test("a v1 file is migrated: enabled:true meant real money, so it means live", () => {
+  writeRaw(JSON.stringify({ version: 1, trading: { enabled: true, maxLotsPerOrder: 100 } }));
+  const settings = loadSettings();
+  assert.equal(settings.trading.mode, "live");
+  assert.equal(settings.trading.maxLotsPerOrder, 100, "the rest of the block survives the migration");
+
+  writeRaw(JSON.stringify({ version: 1, trading: { enabled: false } }));
+  assert.equal(loadSettings().trading.mode, "off");
+});
+
+test("an unrecognised mode is off, because an ambiguous permission is no permission", () => {
+  writeRaw(JSON.stringify({ version: 2, trading: { mode: "papr" } }));
+  assert.equal(loadSettings().trading.mode, "off");
+  writeRaw(JSON.stringify({ version: 2, trading: { mode: true } }));
+  assert.equal(loadSettings().trading.mode, "off");
+});
+
 test("STOCKBIT_TRADING=off overrides an enabled file", () => {
   const settings = defaultSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = "live";
   settings.trading.autoConfirm = true;
   settings.trading.maxOrderValueIdr = 1_000_000;
   saveSettings(settings);
@@ -101,7 +173,7 @@ test("no environment value can turn trading ON", () => {
 
 test("autoConfirm without a value cap is REFUSED, and says so", () => {
   const settings = defaultSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = "live";
   settings.trading.autoConfirm = true;
   settings.trading.maxOrderValueIdr = null;
   saveSettings(settings);
@@ -115,7 +187,7 @@ test("autoConfirm without a value cap is REFUSED, and says so", () => {
 
 test("autoConfirm WITH a cap is honoured, and the cap travels with it", () => {
   const settings = defaultSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = "live";
   settings.trading.autoConfirm = true;
   settings.trading.maxOrderValueIdr = 5_000_000;
   saveSettings(settings);
@@ -143,8 +215,9 @@ test("a hostile or half-typed file cannot smuggle a permission through", () => {
   // list are all things a hand-edited file plausibly contains.
   writeRaw(
     JSON.stringify({
-      version: 1,
+      version: 2,
       trading: {
+        mode: "yes please",
         enabled: "true",
         autoConfirm: 1,
         maxOrderValueIdr: -5,
@@ -154,7 +227,7 @@ test("a hostile or half-typed file cannot smuggle a permission through", () => {
     }),
   );
   const settings = loadSettings();
-  assert.equal(settings.trading.enabled, false, '"true" is a string, not permission');
+  assert.equal(settings.trading.mode, "off", '"yes please" is not a mode, and "true" is a string');
   assert.equal(settings.trading.autoConfirm, false);
   assert.equal(settings.trading.maxOrderValueIdr, null, "a negative cap is no cap");
   assert.deepEqual(settings.trading.allowedSymbols, []);
@@ -162,14 +235,14 @@ test("a hostile or half-typed file cannot smuggle a permission through", () => {
 });
 
 test("allowed symbols are upper-cased, so a lower-case entry still restricts", () => {
-  writeRaw(JSON.stringify({ trading: { enabled: true, allowedSymbols: ["bbri", "TLKM"] } }));
+  writeRaw(JSON.stringify({ trading: { mode: "live", allowedSymbols: ["bbri", "TLKM"] } }));
   assert.deepEqual(loadSettings().trading.allowedSymbols, ["BBRI", "TLKM"]);
 });
 
 test("the file is written atomically and owner-only", () => {
   clear();
   const settings = defaultSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = "live";
   saveSettings(settings);
   const dir = process.env.STOCKBIT_STORE_DIR!;
   assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp")), [], "a temp file survived the write");

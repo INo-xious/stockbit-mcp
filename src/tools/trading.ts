@@ -19,7 +19,7 @@
 import { z } from "zod";
 import * as account from "../trading/account.js";
 import { PERFORMANCE_KINDS } from "../trading/account.js";
-import { previewOrder, type OrderTicket } from "../trading/preview.js";
+import { previewOrder, type OrderTicket, type PreviewAccountReads } from "../trading/preview.js";
 import {
   amendOrder,
   cancelOrder,
@@ -33,6 +33,18 @@ import { hasStoredSession } from "../auth/session.js";
 import { tradingPolicy } from "../settings.js";
 import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
+import {
+  loadLedger,
+  paperLedgerPath,
+  saveLedger,
+  settlePaper,
+  snapshot,
+  PAPER_BANNER,
+  PAPER_FEES,
+  type PaperLedger,
+} from "../trading/paper.js";
+import { getQuote } from "../core/emitten.js";
+import { getIntradayPrices } from "../core/pricefeed.js";
 
 /** The sentence every description ends with. Written once so all ten agree word for word. */
 const PROJECTION_NOTE =
@@ -46,6 +58,187 @@ const LOGIN_NOTE =
   "Requires the trading session: if it is not set up the error says to run `stockbit-auth " +
   "trading-login`, which asks the user for their 6-digit PIN at their own terminal. Never ask the " +
   "user for that PIN here — no tool accepts one and this server never stores one.";
+
+/**
+ * The sentence every paper-served tool carries.
+ *
+ * It says three things a model must relay rather than paraphrase: which account this is, that no
+ * session is needed, and that the numbers are local. `mode: "paper"` on the result is the machine
+ * form of the same fact, and `summary` opens with the banner — three redundant statements, because
+ * the failure being prevented is a user believing a paper fill was real.
+ */
+/**
+ * For the three reads paper mode CANNOT answer.
+ *
+ * `account` is the account holder's identity, `trading_info` their commission schedule,
+ * `stock_tradable` the exchange's verdict on a symbol today. A ledger has no answer to any of them,
+ * and inventing one would be the first lie in a feature whose whole value is that it does not
+ * flatter. So they keep needing a real session, in every mode, and say so.
+ */
+const NO_PAPER_NOTE =
+  "THIS ONE IS NOT SERVED FROM THE PAPER LEDGER. It describes the real brokerage relationship — a " +
+  "paper account has no identity, no commission schedule of its own and no say in what the exchange " +
+  "will accept — so it needs a live trading session even when `trading_status` says paper. If there " +
+  "is none, say that rather than reporting a paper figure in its place.";
+
+const PAPER_NOTE =
+  "IN PAPER MODE this reads a LOCAL LEDGER, not the brokerage. The result carries `mode: \"paper\"` " +
+  "and its summary opens with \"PAPER ACCOUNT — no real money.\" — say so, every time, rather than " +
+  "reporting these figures as the user's actual account. No trading session and no PIN are needed " +
+  "in paper mode. Turn it on with `stockbit-auth trading-enable --paper`; `trading_status` says " +
+  "which mode is in force.";
+
+/**
+ * The reads that paper mode answers from the ledger instead of the brokerage.
+ *
+ * Seven of the account reads have a paper equivalent; three do not, and saying which is which is
+ * part of the design rather than an omission. `account`, `trading_info` and `stock_tradable`
+ * describe the real brokerage relationship — the account holder's identity, their commission
+ * schedule, whether the exchange will accept a symbol today. A paper ledger has no answer to any of
+ * those, and inventing one would be the first lie in a feature whose whole value is that it does not
+ * flatter.
+ */
+
+/**
+ * Bring the ledger up to date before anything reads it.
+ *
+ * Lazy settlement: every open order is checked against the session's minutely closes at the moment
+ * someone looks, rather than by a background process that has to be kept alive. The cost is that an
+ * order's `filledAt` is when it was noticed, not when it printed — stated on the result.
+ */
+async function currentLedger(): Promise<PaperLedger> {
+  const ledger = loadLedger();
+  const open = ledger.orders.filter((o) => o.status === "open");
+  if (!open.length) return ledger;
+
+  const intradayBySymbol: Record<string, number[]> = {};
+  for (const symbol of new Set(open.map((o) => o.symbol))) {
+    try {
+      const series = await getIntradayPrices(symbol);
+      const closes = extractCloses(series);
+      if (closes.length) intradayBySymbol[symbol] = closes;
+    } catch {
+      // No series for this symbol: its orders stay open, which is the conservative reading.
+    }
+  }
+
+  const settled = settlePaper(ledger, { intradayBySymbol }, new Date());
+  if (settled.filled.length) saveLedger(settled.ledger);
+  return settled.ledger;
+}
+
+/** Minutely closes out of whatever shape the intraday feed returned. */
+function extractCloses(payload: unknown): number[] {
+  const rows = Array.isArray(payload)
+    ? payload
+    : ((payload as { data?: unknown })?.data ?? (payload as { prices?: unknown })?.prices);
+  if (!Array.isArray(rows)) return [];
+  const out: number[] = [];
+  for (const row of rows) {
+    const value =
+      typeof row === "number"
+        ? row
+        : ((row as Record<string, unknown>)?.close ?? (row as Record<string, unknown>)?.price);
+    const n = typeof value === "number" ? value : Number(String(value).replace(/,/g, ""));
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
+/** Last traded price per symbol, for marking the paper book. A miss is `null`, never a guess. */
+async function marksFor(symbols: string[]): Promise<Record<string, number | null>> {
+  const marks: Record<string, number | null> = {};
+  for (const symbol of symbols) {
+    try {
+      const quote = await getQuote(symbol);
+      const parsed = Number(String(quote.price).replace(/,/g, ""));
+      marks[symbol] = Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      marks[symbol] = null;
+    }
+  }
+  return marks;
+}
+
+/** The whole paper account, settled and marked. */
+async function paperSnapshot() {
+  const ledger = await currentLedger();
+  return snapshot(ledger, await marksFor(Object.keys(ledger.positions)));
+}
+
+/** True when this process is serving the account reads from the ledger. */
+function inPaperMode(): boolean {
+  return tradingPolicy().mode === "paper";
+}
+
+/**
+ * The four account-side reads `order_preview` needs, answered from the ledger.
+ *
+ * Shaped to match the brokerage readers exactly, so the preview's arithmetic and every check that
+ * consumes them is the same code in both modes. Only the account side is substituted: the tick
+ * grid, the auto-rejection band, the session and tradability are still read from the real market,
+ * because a rehearsal that skipped those would teach nothing about why a real order bounces.
+ */
+function paperPreviewReads(): Partial<PreviewAccountReads> {
+  return {
+    async listOrders(options?: { symbol?: string }) {
+      const ledger = await currentLedger();
+      const symbol = options?.symbol?.toUpperCase();
+      const open = ledger.orders.filter((o) => o.status === "open" && (!symbol || o.symbol === symbol));
+      return {
+        orders: open.map((o) => ({
+          orderId: o.id,
+          symbol: o.symbol,
+          side: o.action,
+          sideRaw: o.action,
+          price: o.price,
+          lots: o.lots,
+          shares: o.lots * 100,
+          status: o.status,
+          statusRaw: o.status,
+        })),
+        request: { symbol: symbol ?? undefined },
+        unmappedKeys: [],
+      } as unknown as Awaited<ReturnType<typeof account.listOrders>>;
+    },
+    async getCashBalance() {
+      const snap = await paperSnapshot();
+      return {
+        cashIdr: snap.cashIdr,
+        buyingPowerIdr: snap.cashIdr,
+        readFrom: { cashIdr: "paper-ledger", buyingPowerIdr: "paper-ledger" },
+        unmappedKeys: [],
+      } as unknown as Awaited<ReturnType<typeof account.getCashBalance>>;
+    },
+    async getPosition(symbol: string) {
+      const snap = await paperSnapshot();
+      const holding = snap.holdings.find((h) => h.symbol === symbol.toUpperCase());
+      return {
+        symbol: symbol.toUpperCase(),
+        holding: holding
+          ? {
+              symbol: holding.symbol,
+              shares: holding.shares,
+              availableShares: holding.shares,
+              lots: holding.lots,
+              averagePrice: holding.avgPrice,
+            }
+          : null,
+        unmappedKeys: [],
+      } as unknown as Awaited<ReturnType<typeof account.getPosition>>;
+    },
+    async getFees() {
+      // `source: "default"` is the truth: a paper account has no schedule of its own to read, and
+      // the preview's own warning about defaulted commission is one the user should still see.
+      return {
+        buyPct: PAPER_FEES.buyPct,
+        sellPct: PAPER_FEES.sellPct,
+        source: "default",
+        note: `${PAPER_BANNER} Commission is the published retail rate; a paper account has none of its own.`,
+      } as unknown as Awaited<ReturnType<typeof account.getFees>>;
+    },
+  };
+}
 
 export function registerTradingTools(define: Definer): void {
   define.read(
@@ -64,9 +257,16 @@ export function registerTradingTools(define: Definer): void {
       "derived figure is arithmetic, not a reading.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     {},
-    async () => runTool(() => account.getPortfolio()),
+    async () =>
+      runTool(async () => {
+        if (!inPaperMode()) return account.getPortfolio();
+        const snap = await paperSnapshot();
+        return { ...snap, holdings: snap.holdings, ledger: paperLedgerPath() };
+      }),
   );
 
   define.read(
@@ -77,9 +277,25 @@ export function registerTradingTools(define: Definer): void {
       "the correct one to relay — it is not an error and not a failed lookup.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
-    async (a) => runTool(() => account.getPosition(String(a.symbol))),
+    async (a) =>
+      runTool(async () => {
+        if (!inPaperMode()) return account.getPosition(String(a.symbol));
+        const snap = await paperSnapshot();
+        const symbol = String(a.symbol).toUpperCase();
+        const holding = snap.holdings.find((h) => h.symbol === symbol) ?? null;
+        return {
+          mode: "paper" as const,
+          symbol,
+          holding,
+          summary: holding
+            ? `${PAPER_BANNER} ${holding.lots} lots of ${symbol} at an average of ${holding.avgPrice.toFixed(2)}.`
+            : `${PAPER_BANNER} The paper account holds no ${symbol}.`,
+        };
+      }),
   );
 
   define.read(
@@ -95,9 +311,27 @@ export function registerTradingTools(define: Definer): void {
       "account has no unsettled cash.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     {},
-    async () => runTool(() => account.getCashBalance()),
+    async () =>
+      runTool(async () => {
+        if (!inPaperMode()) return account.getCashBalance();
+        const snap = await paperSnapshot();
+        return {
+          mode: "paper" as const,
+          cashIdr: snap.cashIdr,
+          // In paper there is no trading limit, so buying power IS the cash. Said explicitly,
+          // because on a real Indonesian retail account the two differ and that matters.
+          buyingPowerIdr: snap.cashIdr,
+          startingCashIdr: snap.startingCashIdr,
+          realisedIdr: snap.realisedIdr,
+          summary:
+            `${PAPER_BANNER} Cash ${snap.cashIdr.toFixed(0)} IDR. There is no trading limit on a paper ` +
+            "account, so buying power is the cash balance — on a real account it is usually larger.",
+        };
+      }),
   );
 
   define.read(
@@ -110,9 +344,26 @@ export function registerTradingTools(define: Definer): void {
       "guessing the direction of someone's order.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     { symbol: z.string().optional().describe("IDX ticker to filter by, e.g. BBRI. Omit for all open orders.") },
-    async (a) => runTool(() => account.listOrders({ symbol: a.symbol ? String(a.symbol) : undefined })),
+    async (a) =>
+      runTool(async () => {
+        if (!inPaperMode()) return account.listOrders({ symbol: a.symbol ? String(a.symbol) : undefined });
+        const ledger = await currentLedger();
+        const symbol = a.symbol ? String(a.symbol).toUpperCase() : undefined;
+        const open = ledger.orders.filter((o) => o.status === "open" && (!symbol || o.symbol === symbol));
+        return {
+          mode: "paper" as const,
+          orders: open,
+          request: { symbol: symbol ?? null },
+          summary:
+            `${PAPER_BANNER} ${open.length} open paper order${open.length === 1 ? "" : "s"}` +
+            `${symbol ? ` in ${symbol}` : ""}. Open orders are checked against the session's minutely ` +
+            "closes each time this is read, so a fill is recorded when it is noticed rather than when it printed.",
+        };
+      }),
   );
 
   define.read(
@@ -125,9 +376,26 @@ export function registerTradingTools(define: Definer): void {
       "whole list; if the order returned does not match the id you asked for, say so.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     { order_id: z.string().describe("The order id, from the `orders` tool") },
-    async (a) => runTool(() => account.getOrderDetail(String(a.order_id))),
+    async (a) =>
+      runTool(async () => {
+        if (!inPaperMode()) return account.getOrderDetail(String(a.order_id));
+        const ledger = await currentLedger();
+        const id = String(a.order_id);
+        const order = ledger.orders.find((o) => o.id === id || o.uiRef === id) ?? null;
+        return {
+          mode: "paper" as const,
+          order,
+          fills: ledger.fills.filter((f) => f.orderId === order?.id),
+          summary: order
+            ? `${PAPER_BANNER} Paper order ${order.id}: ${order.action} ${order.lots} lots of ` +
+              `${order.symbol} at ${order.price}, ${order.status}.`
+            : `${PAPER_BANNER} No paper order with id ${JSON.stringify(id)}.`,
+        };
+      }),
   );
 
   define.read(
@@ -140,6 +408,8 @@ export function registerTradingTools(define: Definer): void {
       "unrecognised value is the server's to reject rather than this tool's. `request` echoes what " +
       "was sent.\n" +
       LOGIN_NOTE +
+      "\n" +
+      PAPER_NOTE +
       "\n" +
       PROJECTION_NOTE,
     {
@@ -156,6 +426,24 @@ export function registerTradingTools(define: Definer): void {
         page: a.page as number | undefined,
         limit: a.limit as number | undefined,
       };
+      if (inPaperMode()) {
+        return runTool(async () => {
+          const ledger = await currentLedger();
+          const fills = a.symbol
+            ? ledger.fills.filter((f) => f.symbol === String(a.symbol).toUpperCase())
+            : ledger.fills;
+          const realised = fills.filter((f) => f.realisedIdr !== undefined);
+          return {
+            mode: "paper" as const,
+            kind: a.kind === "realized" ? "realized" : "trades",
+            rows: a.kind === "realized" ? realised : fills,
+            summary:
+              `${PAPER_BANNER} ${fills.length} paper fill${fills.length === 1 ? "" : "s"} recorded` +
+              `${a.symbol ? ` in ${String(a.symbol).toUpperCase()}` : ""}. This is the local ledger, not ` +
+              "the brokerage's history — it holds nothing that happened before paper mode was turned on.",
+          };
+        });
+      }
       return runTool<account.HistoryPage | account.RealizedPage>(() =>
         a.kind === "realized" ? account.getRealizedHistory(opts) : account.getTradeHistory(opts),
       );
@@ -173,6 +461,8 @@ export function registerTradingTools(define: Definer): void {
       "`unmappedKeys` and no number is invented for it.\n" +
       LOGIN_NOTE +
       "\n" +
+      PAPER_NOTE +
+      "\n" +
       PROJECTION_NOTE,
     {
       series: z
@@ -181,9 +471,30 @@ export function registerTradingTools(define: Definer): void {
         .describe("Portfolio series to read. Omit for the aggregate trading performance."),
     },
     async (a) =>
-      runTool(() =>
-        a.series ? account.getPortfolioPerformance(String(a.series)) : account.getTradePerformance(),
-      ),
+      runTool(async () => {
+        if (!inPaperMode()) {
+          return a.series ? account.getPortfolioPerformance(String(a.series)) : account.getTradePerformance();
+        }
+        const snap = await paperSnapshot();
+        const wins = (await currentLedger()).fills.filter((f) => (f.realisedIdr ?? 0) > 0).length;
+        const closed = (await currentLedger()).fills.filter((f) => f.realisedIdr !== undefined).length;
+        return {
+          mode: "paper" as const,
+          startingCashIdr: snap.startingCashIdr,
+          cashIdr: snap.cashIdr,
+          totalValueIdr: snap.totalValueIdr,
+          realisedIdr: snap.realisedIdr,
+          closedTrades: closed,
+          winners: wins,
+          // No series: a paper ledger records fills, not a daily portfolio curve, and interpolating
+          // one would be a picture of something that was never measured.
+          series: null,
+          summary:
+            `${PAPER_BANNER} Realised P&L ${snap.realisedIdr.toFixed(0)} IDR over ${closed} closed ` +
+            `paper trade${closed === 1 ? "" : "s"}. There is no equity curve here: the ledger records ` +
+            "fills, not a daily valuation, and drawing one would be a picture of something nobody measured.",
+        };
+      }),
   );
 
   define.read(
@@ -197,6 +508,8 @@ export function registerTradingTools(define: Definer): void {
       "`fees.raw` carries what the wire actually held, before this server decided whether it was a " +
       "percentage or a fraction.\n" +
       LOGIN_NOTE +
+      "\n" +
+      NO_PAPER_NOTE +
       "\n" +
       PROJECTION_NOTE,
     {},
@@ -212,6 +525,8 @@ export function registerTradingTools(define: Definer): void {
       "Worth calling before telling a user to buy something: a confident recommendation to buy a " +
       "suspended stock is worse than no recommendation.\n" +
       LOGIN_NOTE +
+      "\n" +
+      NO_PAPER_NOTE +
       "\n" +
       PROJECTION_NOTE,
     { symbols: z.array(z.string()).describe("IDX tickers, e.g. [\"BBRI\", \"TLKM\"]") },
@@ -229,6 +544,8 @@ export function registerTradingTools(define: Definer): void {
       "Use it to confirm the session is pointed at the account the user means before discussing " +
       "their positions, not as a source of personal details.\n" +
       LOGIN_NOTE +
+      "\n" +
+      NO_PAPER_NOTE +
       "\n" +
       PROJECTION_NOTE,
     {},
@@ -251,8 +568,9 @@ export function registerTradingTools(define: Definer): void {
     async () =>
       runTool(async () => {
         const policy = tradingPolicy();
-        return {
+        const base = {
           policy,
+          mode: policy.mode,
           sessionStored: hasStoredSession("securities"),
           ticketTtlSeconds: TICKET_TTL_MS / 1000,
           orderLog: orderLogPath(),
@@ -260,7 +578,43 @@ export function registerTradingTools(define: Definer): void {
             "Two steps, always: order_preview builds a ticket and returns its `summary`; the user reads that " +
             "summary and agrees to THAT order; order_buy/order_sell/order_amend/order_cancel take the ticket " +
             "id and confirm: true. The write tools take no price and no quantity, so what is placed is what " +
-            "was shown.",
+            "was shown. Paper mode uses the identical protocol on purpose — it is a rehearsal, not a shortcut.",
+        };
+        if (policy.mode !== "paper") return base;
+
+        const snap = await paperSnapshot();
+        return {
+          ...base,
+          paper: {
+            ledger: paperLedgerPath(),
+            cashIdr: snap.cashIdr,
+            startingCashIdr: snap.startingCashIdr,
+            holdings: snap.holdings.length,
+            openOrders: snap.openOrders.length,
+            realisedIdr: snap.realisedIdr,
+            servedFromLedger: [
+              "portfolio",
+              "position",
+              "cash_balance",
+              "orders",
+              "order_detail",
+              "order_history",
+              "trade_performance",
+              "order_preview",
+              "order_buy",
+              "order_sell",
+              "order_amend",
+              "order_cancel",
+            ],
+            stillNeedALiveSession: ["account", "trading_info", "stock_tradable"],
+            refusedInPaper: ["eipo_order_preview", "eipo_order"],
+            fillModel:
+              "A limit order fills if the market is already there when it is placed, or if the session's " +
+              "minutely CLOSE series later prints through the limit. Close-only, so a price that traded " +
+              "inside a minute is invisible; no queue position, so paper is optimistic about getting filled " +
+              "at the touch; and no partial fills, so an order is whole or open.",
+            reset: "`stockbit-auth paper-reset` starts over. `trading-enable --live` switches to real orders.",
+          },
         };
       }),
   );
@@ -292,15 +646,25 @@ export function registerTradingTools(define: Definer): void {
       order_id: z.string().optional().describe("The order to amend or cancel, from the `orders` tool"),
     },
     async (a) =>
-      runTool(() =>
-        previewOrder({
+      runTool(async () => {
+        const ticket = await previewOrder({
           action: a.action as OrderTicket["action"],
           symbol: a.symbol ? String(a.symbol) : undefined,
           price: a.price as number | undefined,
           lots: a.lots as number | undefined,
           orderId: a.order_id ? String(a.order_id) : undefined,
-        }),
-      ),
+          // In paper the four ACCOUNT-side reads come from the ledger. The market-side checks — the
+          // tick grid, today's ARA/ARB band, the session, whether the exchange will take the symbol
+          // — stay real, because those are exactly what the rehearsal is for.
+          ...(inPaperMode() ? { account: paperPreviewReads() } : {}),
+        });
+        if (!inPaperMode()) return ticket;
+        return {
+          ...ticket,
+          mode: "paper" as const,
+          summary: `${PAPER_BANNER} ${ticket.summary}`,
+        };
+      }),
   );
 
   const writeArgs = {

@@ -130,12 +130,29 @@ export interface OrderTicket {
   summary: string;
 }
 
+/**
+ * The four ACCOUNT-side reads a preview needs.
+ *
+ * Injectable so paper mode can answer them from its ledger. Only these four: the tick grid, today's
+ * auto-rejection band, the market session and whether the exchange will take the symbol are all
+ * read from the real market in every mode, because those are exactly what a rehearsal is for. A
+ * paper order that skipped the ARA check would teach the user nothing about why a real one bounces.
+ */
+export interface PreviewAccountReads {
+  listOrders: typeof listOrders;
+  getCashBalance: typeof getCashBalance;
+  getPosition: typeof getPosition;
+  getFees: typeof getFees;
+}
+
 export interface PreviewInput {
   action: OrderAction;
   symbol?: string;
   price?: number;
   lots?: number;
   orderId?: string;
+  /** Substitutes for the account-side reads. Omitted means the real brokerage. */
+  account?: Partial<PreviewAccountReads>;
 }
 
 /* ---------------------------------- formatting ---------------------------------- */
@@ -228,6 +245,13 @@ async function attempt<T>(label: string, load: () => Promise<T>, notes: string[]
  */
 export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   const policy = tradingPolicy();
+  const reads: PreviewAccountReads = {
+    listOrders,
+    getCashBalance,
+    getPosition,
+    getFees,
+    ...input.account,
+  };
   const action = input.action;
   const warnings: string[] = [];
   const checks: OrderCheck[] = [];
@@ -244,7 +268,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   let target: Order | undefined;
   let targetLookupFailed = false;
   if (action === "amend" || action === "cancel") {
-    const open = await attempt("The open order list", () => listOrders(), warnings);
+    const open = await attempt("The open order list", () => reads.listOrders(), warnings);
     if (open) target = open.orders.find((o) => o.orderId === input.orderId);
     else targetLookupFailed = true;
   }
@@ -293,7 +317,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   }
 
   const tradable = await attempt("Tradability", () => getStockTradable([symbol]), warnings);
-  const fees = await attempt("The commission schedule", () => getFees(), warnings);
+  const fees = await attempt("The commission schedule", () => reads.getFees(), warnings);
   if (fees?.source === "default") {
     warnings.push(
       "This account's own commission could not be read, so every fee figure below uses this project's " +
@@ -301,9 +325,9 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
     );
   }
 
-  const cash = action === "buy" ? await attempt("Cash and buying power", () => getCashBalance(), warnings) : null;
+  const cash = action === "buy" ? await attempt("Cash and buying power", () => reads.getCashBalance(), warnings) : null;
   const position =
-    action === "sell" ? await attempt("The position", () => getPosition(symbol), warnings) : null;
+    action === "sell" ? await attempt("The position", () => reads.getPosition(symbol), warnings) : null;
 
   /* --------------------------------- the arithmetic --------------------------------- */
 

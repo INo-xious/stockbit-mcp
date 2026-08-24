@@ -42,6 +42,20 @@ import { stockbitDir } from "../paths.js";
 
 const SHARES_PER_LOT = 100;
 
+/**
+ * Why paper mode refuses an IPO rather than simulating one.
+ *
+ * An exchange order's outcome is a function of price and a queue — approximable, and paper says how
+ * approximately it approximates. An IPO ALLOTMENT is a function of total demand across every
+ * subscriber in the country, which is not knowable from here at any accuracy at all. A simulated
+ * allotment would be a number this project invented and then displayed beside real ones.
+ */
+const NO_PAPER_EIPO =
+  "There is no paper e-IPO. An allotment is decided by the underwriter from total demand across "
+  + "every subscriber, so a local simulation could only invent a number — and not flattering you is "
+  + "the one thing paper mode is for. Practise exchange orders on paper; subscribe to an IPO only "
+  + "with `stockbit-auth trading-enable --live`.";
+
 /** The same log an exchange order writes to. One file, one audit trail, whatever the venue. */
 export function eipoLogPath(): string {
   return join(stockbitDir(), "order-mutations.log");
@@ -144,6 +158,7 @@ export async function previewEipoOrder(input: {
   price: number;
 }): Promise<EipoTicket> {
   const policy = tradingPolicy();
+  if (policy.mode === "paper") refuse(NO_PAPER_EIPO);
   const emitenCode = normalizeEmiten(input.emitenCode);
   const warnings: string[] = [];
   const checks: EipoTicket["checks"] = [];
@@ -360,6 +375,7 @@ export async function placeEipoOrder(options: {
   if (!policy.enabled) {
     refuse(`${policy.reason} No subscription was sent. Settings file: ${policy.settingsPath}.`);
   }
+  if (policy.mode === "paper") refuse(NO_PAPER_EIPO);
 
   const found = peek(options.ticketId);
   if (!found) take(options.ticketId); // throws with the precise reason

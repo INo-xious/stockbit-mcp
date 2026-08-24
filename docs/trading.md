@@ -2,10 +2,45 @@
 
 This server can place orders on the Indonesian exchange with the account owner's own money, and on
 their behalf it can subscribe to an IPO. Both are **off** until they turn them on, and both take two
-steps with a person in the middle. The decision record is [ADR-0004](adr/0004-order-entry.md); this
-page is how to use it.
+steps with a person in the middle. The decision records are [ADR-0004](adr/0004-order-entry.md) and
+[ADR-0008](adr/0008-paper-trading.md); this page is how to use them.
 
-## Turning it on
+## Try it on paper first
+
+```
+stockbit-auth trading-enable --paper          # Rp 100,000,000 to practise with
+stockbit-auth trading-enable --paper --cash 250000000
+stockbit-auth paper-reset                     # start over
+stockbit-auth trading-status                  # which mode, and what the ledger holds
+```
+
+Paper mode gives you a **local ledger** to trade against. No real money, no exchange, no trading
+session, and **no PIN** — none of that is involved, because there is no brokerage on the other end.
+
+The protocol is deliberately identical. `order_preview` builds the same ticket, it still expires in
+two minutes, the write tools still take a ticket id and nothing else, and `confirm: true` is still
+required — autoconfirm is refused in paper, because a rehearsal that skips the confirmation step
+rehearses the wrong thing. The point is that nothing about the live path is a surprise later.
+
+Your portfolio, positions, cash, orders, order history and trade performance are served from the
+ledger while paper is on. Every one of those results carries `mode: "paper"` and opens with
+**"PAPER ACCOUNT — no real money."** Three reads still need a real session and say so — `account`,
+`trading_info` and `stock_tradable` describe the brokerage relationship, and a ledger has no honest
+answer for them. `eipo_order` refuses outright: an IPO allotment depends on national demand, and a
+simulated one would be a number this project made up.
+
+> [!IMPORTANT]
+> **Paper fills are approximate, in three specific ways.** A limit order fills if the market is
+> already there when you place it, or if the session's minutely **close** series later prints
+> through your limit. So: a price that traded inside a minute and closed away from it is invisible
+> (missed fills); there is no queue position, so paper is optimistic about getting filled at the
+> touch; and there are no partial fills, so an order is whole or open. Do not backtest against this
+> and believe the number.
+
+Paper also does not make the trading tools any more verified. The carina field mappings are still
+**Projected** — paper proves the protocol, not the wire.
+
+## Turning it on for real
 
 Two things are separate and both are needed.
 
@@ -24,20 +59,27 @@ accepts a PIN.** If anything ever asks you for it through the assistant, that is
 Only the resulting refresh token is kept, in its own Keychain slot, separate from the market-data
 one.
 
-**2. Permission.** Trading is off by default, and the server cannot turn it on:
+**2. Permission.** Trading is off by default, and the server cannot turn it on. `--live` is
+required and cannot be defaulted into — a bare `trading-enable` is refused, because the two things
+it could mean differ by everything:
 
 ```
-stockbit-auth trading-enable --max-order-value 5000000 --max-lots 100
-stockbit-auth trading-enable --symbols BBRI,TLKM        # optional allow-list
-stockbit-auth trading-enable --auto-confirm             # only with a value cap
+stockbit-auth trading-enable --live --max-order-value 5000000 --max-lots 100
+stockbit-auth trading-enable --live --symbols BBRI,TLKM   # optional allow-list
+stockbit-auth trading-enable --live --auto-confirm        # only with a value cap
 stockbit-auth trading-disable
 ```
 
 That writes `~/.stockbit/settings.json`, which is read fresh on every order — no restart. Nothing
 under `src/tools/`, `src/trading/` or `src/eipo/` can write it, and a test asserts that.
 
-`STOCKBIT_TRADING=off` in the environment overrides the file. The environment can only turn trading
-**off**; no value of it turns trading on.
+The environment can only move **down** the ladder — `live` → `paper` → `off` — and never up:
+
+| Value | Effect |
+|---|---|
+| `STOCKBIT_TRADING=off` (or `0`, `false`, `no`) | Trading off, whatever the file says. |
+| `STOCKBIT_TRADING=paper` | Lowers a `live` file to paper for this process. It cannot raise `off`. |
+| anything else, including `live` | Ignored. Nothing in the environment turns trading on or makes it real. |
 
 ### `autoConfirm`
 

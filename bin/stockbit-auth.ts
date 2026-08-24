@@ -25,6 +25,7 @@ import {
 import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.js";
 import { securitiesTokenUrlAllowed } from "../src/auth/capture.js";
 import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/settings.js";
+import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
@@ -322,9 +323,44 @@ function flagValue(argv: string[], name: string): string | undefined {
   return inline?.slice(name.length + 1);
 }
 
+/**
+ * Turn trading on — but say which kind.
+ *
+ * A bare `trading-enable` used to mean "real orders with real money". It is refused now, and that
+ * is the point of the change rather than a side effect of it: the two things this command can do
+ * differ by everything, and a default is a decision made for someone who did not make it.
+ */
 async function cmdTradingEnable(argv: string[]): Promise<void> {
+  const paper = argv.includes("--paper");
+  const live = argv.includes("--live");
+  if (paper && live) {
+    logStderr("Pick one: --paper or --live.");
+    process.exit(2);
+  }
+  if (!paper && !live) {
+    logStderr("Say which: `trading-enable --paper` or `trading-enable --live`.");
+    logStderr("");
+    logStderr("  --paper   orders go to a local ledger. No real money, no PIN, no session needed.");
+    logStderr("            Start here. The protocol is identical, so nothing is a surprise later.");
+    logStderr("  --live    orders reach the exchange and move real money. Needs a trading session");
+    logStderr("            (`stockbit-auth trading-login`) and its 6-digit PIN.");
+    logStderr("");
+    logStderr("A bare `trading-enable` used to mean --live. It no longer means anything, on purpose.");
+    process.exit(2);
+  }
+
   const settings = loadSettings();
-  settings.trading.enabled = true;
+  settings.trading.mode = paper ? "paper" : "live";
+
+  const cash = flagValue(argv, "--cash");
+  if (cash !== undefined) {
+    const parsed = Number(cash);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      logStderr(`--cash must be a positive number of rupiah; got ${JSON.stringify(cash)}.`);
+      process.exit(2);
+    }
+    settings.trading.paper.startingCashIdr = parsed;
+  }
 
   if (argv.includes("--auto-confirm")) settings.trading.autoConfirm = true;
   if (argv.includes("--no-auto-confirm")) settings.trading.autoConfirm = false;
@@ -358,8 +394,25 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
   }
 
   saveSettings(settings);
-  logStderr(`Trading ENABLED. Wrote ${settingsPath()}.`);
   const policy = tradingPolicy();
+
+  if (paper) {
+    logStderr(`PAPER trading enabled. Wrote ${settingsPath()}.`);
+    logStderr(`Ledger: ${paperLedgerPath()} (created on the first order).`);
+    logStderr(
+      `Starting cash Rp ${settings.trading.paper.startingCashIdr.toLocaleString("en-US")}. ` +
+        "Reset any time with `stockbit-auth paper-reset`.",
+    );
+    logStderr("");
+    logStderr("Nothing reaches the exchange. No PIN and no trading session are needed — the account");
+    logStderr("reads and the order tools are served from the ledger instead.");
+    logStderr("Every order still needs confirm: true, because rehearsing without it rehearses the");
+    logStderr("wrong thing. Fills are approximate: close-only data, no queue position, no partials.");
+    return;
+  }
+
+  logStderr(`LIVE trading ENABLED. Wrote ${settingsPath()}.`);
+  logStderr("Orders now reach the exchange and move real money.");
   if (policy.autoConfirmIgnored) logStderr(policy.autoConfirmIgnored);
   else if (policy.autoConfirm) {
     logStderr(
@@ -375,13 +428,42 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
   }
 }
 
+/**
+ * Start the paper account over.
+ *
+ * Explicit rather than automatic. The ledger is the only record of what the practice account did,
+ * and a command that silently discarded it — or a loader that replaced a corrupt one — would throw
+ * away the only thing paper mode produces.
+ */
+async function cmdPaperReset(argv: string[]): Promise<void> {
+  const settings = loadSettings();
+  const cash = flagValue(argv, "--cash");
+  let startingCashIdr = settings.trading.paper.startingCashIdr;
+  if (cash !== undefined) {
+    const parsed = Number(cash);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      logStderr(`--cash must be a positive number of rupiah; got ${JSON.stringify(cash)}.`);
+      process.exit(2);
+    }
+    startingCashIdr = parsed;
+    settings.trading.paper.startingCashIdr = parsed;
+    saveSettings(settings);
+  }
+
+  saveLedger(emptyLedger(startingCashIdr));
+  logStderr(`Paper ledger reset. Cash Rp ${startingCashIdr.toLocaleString("en-US")}.`);
+  logStderr(`Wrote ${paperLedgerPath()}. Everything the old ledger held is gone.`);
+}
+
 async function cmdTradingDisable(): Promise<void> {
   const settings = loadSettings();
-  settings.trading.enabled = false;
+  const was = settings.trading.mode;
+  settings.trading.mode = "off";
   settings.trading.autoConfirm = false;
   saveSettings(settings);
-  logStderr(`Trading DISABLED. Wrote ${settingsPath()}.`);
+  logStderr(`Trading DISABLED (was ${was}). Wrote ${settingsPath()}.`);
   logStderr("The order tools still exist and will now refuse, naming this file. The session is untouched.");
+  if (was === "paper") logStderr(`The paper ledger is left alone at ${paperLedgerPath()}.`);
 }
 
 async function main(): Promise<void> {
@@ -421,10 +503,13 @@ async function main(): Promise<void> {
     case "trading-disable":
       await cmdTradingDisable();
       break;
+    case "paper-reset":
+      await cmdPaperReset(argv);
+      break;
     default:
       logStderr(
         "Usage: stockbit-auth <login|import-har|doctor|bootstrap|status|logout|" +
-          "trading-login|trading-status|trading-enable|trading-disable|trading-logout>",
+          "trading-login|trading-status|trading-enable|trading-disable|trading-logout|paper-reset>",
       );
       logStderr("  login       one-time browser login, auto-captures your session (recommended)");
       logStderr("              --fresh-profile  use a throwaway browser profile");
@@ -442,11 +527,15 @@ async function main(): Promise<void> {
       logStderr("  trading-status   show the trading policy and whether the session still works");
       logStderr("                   --offline  skip the live validity check");
       logStderr("  trading-enable   ALLOW this server to place orders. Off until you run this.");
+      logStderr("                   --paper              a local ledger. No real money, no PIN. Start here.");
+      logStderr("                   --cash N             paper starting balance (default Rp 100,000,000)");
+      logStderr("                   --live               real orders on the exchange, with real money");
       logStderr("                   --max-order-value N  cap one order's value in IDR");
       logStderr("                   --max-lots N         cap one order's size in lots");
       logStderr("                   --symbols A,B        restrict trading to these tickers");
-      logStderr("                   --auto-confirm       skip per-order confirmation (needs --max-order-value)");
-      logStderr("  trading-disable  turn ordering off again. The session is left alone.");
+      logStderr("                   --auto-confirm       skip per-order confirmation (live only; needs --max-order-value)");
+      logStderr("  trading-disable  turn ordering off again. The session and the ledger are left alone.");
+      logStderr("  paper-reset      start the paper ledger over. --cash N sets the new balance.");
       logStderr("  trading-logout   end the trading session and delete its credential");
       process.exit(2);
   }
