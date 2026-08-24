@@ -26,19 +26,15 @@
  */
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AlertEvaluation } from "./rules.js";
+import { stockbitDir } from "../paths.js";
 
 export interface DeliveryResult {
   logged: boolean;
   desktop: "sent" | "failed" | "disabled";
   webhook: "sent" | "failed" | "disabled";
   errors: string[];
-}
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
 }
 
 export function alertLogPath(): string {

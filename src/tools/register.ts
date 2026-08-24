@@ -274,7 +274,10 @@ export function registerTools(server: McpServer): void {
       theme: z.enum(["dark", "light"]).optional().describe("Palette. Default dark."),
       top_sources: z.coerce.number().optional().describe("Source brokers to draw (default 8)"),
       top_targets: z.coerce.number().optional().describe("Counterparties to draw; the rest merge into an 'others' band (default 12)"),
-      save_path: z.string().optional().describe("Where to write the .svg. Defaults to ~/.stockbit/charts/."),
+      save_path: z
+        .string()
+        .optional()
+        .describe("Where to write the .svg. Defaults to charts/ inside the store (~/.stockbit, or $STOCKBIT_STORE_DIR)."),
       open_in_stockbit: z
         .boolean()
         .optional()
@@ -567,7 +570,10 @@ export function registerTools(server: McpServer): void {
       strategy_exit_when: z.string().optional().describe("Signal name that closes it"),
       stop_loss_pct: z.coerce.number().optional().describe("Percent stop from entry, e.g. 3"),
       take_profit_pct: z.coerce.number().optional().describe("Percent target from entry, e.g. 6"),
-      save_dir: z.string().optional().describe("Where to write the .pine files. Defaults to ~/.stockbit/pine/."),
+      save_dir: z
+        .string()
+        .optional()
+        .describe("Where to write the .pine files. Defaults to pine/ inside the store (~/.stockbit, or $STOCKBIT_STORE_DIR)."),
     },
     async (a) =>
       runTool(async () => {
@@ -781,7 +787,10 @@ export function registerTools(server: McpServer): void {
         .optional()
         .describe("Your own drawings on top of the chart"),
       theme: z.enum(["dark", "light"]).optional().describe("Default dark"),
-      save_path: z.string().optional().describe("Where to write the .svg. Defaults to ~/.stockbit/charts/."),
+      save_path: z
+        .string()
+        .optional()
+        .describe("Where to write the .svg. Defaults to charts/ inside the store (~/.stockbit, or $STOCKBIT_STORE_DIR)."),
       open_in_stockbit: z
         .boolean()
         .optional()

@@ -5,8 +5,8 @@
  * trivial to test — and the one side effect lives somewhere obvious.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { chartsDir, pineDir } from "../paths.js";
 
 /**
  * Write `svg` to `path`, creating parent directories, and return the resolved absolute path.
@@ -35,16 +35,18 @@ export function writePine(path: string, source: string): string {
 /** Where generated Pine lands by default, beside the charts for the same reasons. */
 export function defaultPinePath(symbol: string, pane: string): string {
   const name = `${symbol}-${pane}`.replace(/[^A-Za-z0-9._-]/g, "_");
-  return join(homedir(), ".stockbit", "pine", name);
+  return join(pineDir(), name);
 }
 
 /**
  * Where a chart lands when the caller does not name a path.
  *
- * Under `~/.stockbit/charts` rather than the working directory or a temp dir: the working directory
+ * Under the store's `charts/` rather than the working directory or a temp dir: the working directory
  * is whatever the MCP client happened to launch from (so files scatter into unrelated projects),
  * and a temp dir gets swept, which is the wrong behaviour for something the user is told the path of.
- * This sits beside the existing `~/.stockbit` credential directory and is easy to find again.
+ * This sits beside the credential store and is easy to find again — and it moves with
+ * `STOCKBIT_STORE_DIR`, which these three functions used to ignore while every other writer in the
+ * project honoured it.
  */
 export function defaultChartPath(parts: {
   symbol: string;
@@ -56,7 +58,7 @@ export function defaultChartPath(parts: {
   const window = parts.from && parts.to ? `${parts.from}_${parts.to}` : "latest";
   // Deterministic, so repeating the same query overwrites rather than piling up files.
   const name = `${parts.symbol}-${parts.side}-${window}-${parts.dataType}`.replace(/[^A-Za-z0-9._-]/g, "_");
-  return join(homedir(), ".stockbit", "charts", name);
+  return join(chartsDir(), name);
 }
 
 /**
@@ -73,7 +75,7 @@ export function defaultChartPath(parts: {
 export function writeChartPng(symbol: string, base64: string, at: Date = new Date()): string {
   const stamp = at.toISOString().replace(/[:.]/g, "-");
   const name = `${symbol}-chartbit-${stamp}`.replace(/[^A-Za-z0-9._-]/g, "_");
-  const target = resolve(join(homedir(), ".stockbit", "charts", `${name}.png`));
+  const target = resolve(join(chartsDir(), `${name}.png`));
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, Buffer.from(base64, "base64"));
   return target;

@@ -28,7 +28,6 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
@@ -39,12 +38,9 @@ import { idr } from "../trading/preview.js";
 import { TICKET_TTL_MS, issue, now, peek, take, type TicketBase } from "../trading/tickets.js";
 import { ensureEipoSession } from "./session.js";
 import { getMyOrderRaw, getOfferingStatus, getRdnBalance, normalizeEmiten, readEipoOrder } from "./api.js";
+import { stockbitDir } from "../paths.js";
 
 const SHARES_PER_LOT = 100;
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
 
 /** The same log an exchange order writes to. One file, one audit trail, whatever the venue. */
 export function eipoLogPath(): string {

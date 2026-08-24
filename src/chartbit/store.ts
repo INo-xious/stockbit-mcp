@@ -24,13 +24,13 @@
  * read as "we have drawn nothing", silently.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { normalizeSymbol } from "../symbol.js";
+import { stockbitPath } from "../paths.js";
 
 function storeDir(): string {
-  return join(process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit"), "chartbit-drawings");
+  return stockbitPath("chartbit-drawings");
 }
 
 function storePath(symbol: string): string {

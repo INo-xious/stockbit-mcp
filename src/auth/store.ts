@@ -9,7 +9,7 @@
  * casual disk reads but not a determined local attacker. The Keychain path is strongly preferred.
  */
 import { spawnSync } from "node:child_process";
-import { homedir, hostname, userInfo } from "node:os";
+import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import {
   closeSync,
@@ -24,6 +24,7 @@ import {
 } from "node:fs";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { KEYCHAIN } from "../config.js";
+import { stockbitDir } from "../paths.js";
 
 export interface TokenStore {
   get(): string | null;
@@ -111,7 +112,7 @@ function keychainStore(slot: StoreSlot): TokenStore {
 // (not a module-load const) so multiple test files with different dirs don't collide on a stale path.
 /** Directory holding the credential file. Exported so the refresh lock lives beside it. */
 export function fileDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
+  return stockbitDir();
 }
 function filePath(slot: StoreSlot): string {
   return join(fileDir(), KEYCHAIN.files[slot]);

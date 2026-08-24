@@ -381,6 +381,9 @@ original investigation with a correction on top.
 
 ## Files it writes
 
+All of it lives in one directory — `~/.stockbit` by default, or wherever
+`STOCKBIT_STORE_DIR` points. Nothing is written outside it.
+
 | path | what |
 |---|---|
 | `~/.stockbit/refresh.enc` | your session token, AES-256-GCM |

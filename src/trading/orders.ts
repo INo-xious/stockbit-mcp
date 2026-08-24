@@ -32,7 +32,6 @@
  * | `aborted-no-snapshot` | Thrown before the request: the before-state could not be read, so no comparison would have been possible. |
  */
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
@@ -43,6 +42,7 @@ import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { listOrdersRaw, readOrderList, type Order } from "./account.js";
 import { fingerprintOf, idr, type OrderTicket } from "./preview.js";
 import { peek, take, type TicketBase } from "./tickets.js";
+import { stockbitDir } from "../paths.js";
 
 /**
  * The ticket store holds both kinds. This narrows to an exchange order, and refuses rather than
@@ -54,10 +54,6 @@ function asOrderTicket(ticket: TicketBase): OrderTicket {
     refuse(`Ticket ${ticket.id} is an e-IPO subscription, not an exchange order. Use the e-IPO tools.`);
   }
   return ticket as OrderTicket;
-}
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
 }
 
 /** Where every order attempt is recorded, whatever its outcome. */

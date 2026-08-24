@@ -31,9 +31,9 @@
  * can widen its own permissions has no permissions.
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { stockbitDir } from "./paths.js";
 
 export interface TradingSettings {
   /** Master switch. Off unless the account owner turned it on at a terminal. */
@@ -78,12 +78,8 @@ export function defaultSettings(): Settings {
   };
 }
 
-function storeDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
-
 export function settingsPath(): string {
-  return join(storeDir(), "settings.json");
+  return join(stockbitDir(), "settings.json");
 }
 
 /** True when a file exists but could not be understood — surfaced rather than silently defaulted. */
@@ -152,7 +148,7 @@ export function settingsWereCorrupt(): boolean {
  * silently disable trading rather than merely losing an edit.
  */
 export function saveSettings(settings: Settings): void {
-  mkdirSync(storeDir(), { recursive: true, mode: 0o700 });
+  mkdirSync(stockbitDir(), { recursive: true, mode: 0o700 });
   const target = settingsPath();
   const tmp = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
