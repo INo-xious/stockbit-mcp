@@ -1,6 +1,6 @@
 /**
  * Central config. Hosts and defaults are derived from the reverse-engineered Stockbit
- * frontend (see STOCKBIT-API.md). Nothing here is secret.
+ * frontend (see docs/stockbit-api.md). Nothing here is secret.
  */
 
 /**

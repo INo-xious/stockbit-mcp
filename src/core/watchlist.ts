@@ -1,7 +1,7 @@
 /**
  * The user's own watchlists.
  *
- * The single biggest gap this server had. `STOCKBIT-API.md` defines much of the product as "for
+ * The single biggest gap this server had. `docs/stockbit-api.md` defines much of the product as "for
  * each watchlist symbol…" and there was no way to learn what those symbols were, so every scan and
  * every sweep had to be handed tickers by hand.
  *

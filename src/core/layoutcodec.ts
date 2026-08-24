@@ -3,7 +3,7 @@
  *
  * The transport declares no Chartbit write and this module issues no request. It exists because the
  * encoding was the unknown that made the write unimplementable, and that unknown is now resolved:
- * see `docs/chartbit-layout-format.md`. Having the payload correct, tested and reviewable *before*
+ * see `docs/research/chartbit-layout-format.md`. Having the payload correct, tested and reviewable *before*
  * any route exists is the order ADR-0002 asks for — a write increment arrives with its apparatus,
  * not as a POST bolted onto a guess.
  *

@@ -1,5 +1,7 @@
 # What else this server could do
 
+> **Historical (2026-08-05).** Kept as a record; conclusions superseded where noted. Most items below have since shipped.
+
 Research run 2026-08-05. 80 agents across six lenses, each proposed endpoint probed live before
 being reported. **38 capabilities confirmed working, 36 rejected.**
 
@@ -15,12 +17,12 @@ verifiers ran out of session budget mid-run, and the rule they operate under is 
 ### 1. Watchlist read — closes a loop the project has had open since day one
 **Effort: small.** `GET /watchlist` → `GET /watchlist/{id}?limit=500`
 
-`STOCKBIT-API.md` §9 defines the whole two-stage product as *"for each watchlist symbol: GET
+`../stockbit-api.md` §9 defines the whole two-stage product as *"for each watchlist symbol: GET
 /marketdetectors/{SYM}"* — and the server has never had a way to learn what those symbols are. The
 alert daemon must be fed tickers by hand. This is one GET, no new parsing concepts, and it turns
 every existing per-symbol tool into a batchable scan.
 
-Live: 26 symbols on your account (symbols omitted). Each
+Live: the probed account returned a couple of dozen symbols (tickers omitted). Each
 row carries 31 fields including `uma`, `corp_action.active`, `tradeable`, and an intraday price
 series — so a watchlist sweep answers screening questions without a second call per symbol.
 
@@ -109,7 +111,7 @@ The two-hop workflow this unlocks: *ask for the biggest net seller today → fee
 straight onto the existing `workflow_run` recipe format.
 
 **Correction it also produced:** `/marketdetectors` accepts **11** period values, not the 2 recorded
-in `STOCKBIT-API.md` — `_LATEST`, `_YESTERDAY`, `_LAST_7_DAYS`, `_THIS_MONTH`, `_LAST_1_MONTH`,
+in `../stockbit-api.md` — `_LATEST`, `_YESTERDAY`, `_LAST_7_DAYS`, `_THIS_MONTH`, `_LAST_1_MONTH`,
 `_LAST_3_MONTHS`, `_LAST_6_MONTHS`, `_YEAR_TO_DATE`, `_LAST_1_YEAR`, `_PREVIOUS_MONTH`. The doc reads
 as settled, so the next person would have trusted it. *"Who has been accumulating BBRI year to
 date?"* is one call, not a computed date pair.

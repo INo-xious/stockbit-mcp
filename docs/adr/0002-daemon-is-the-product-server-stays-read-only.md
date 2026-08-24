@@ -1,4 +1,9 @@
-# The watch daemon is the product; the server stays read-only
+# ADR-0002 — The watch daemon is the product; the server stays read-only
+
+**Status: ACCEPTED 2026-08-05.** The daemon-first conclusion stands. The read-only posture
+recorded here was superseded, one route class at a time, by ADR-0003 (Chartbit writes),
+ADR-0004 (order entry), ADR-0005 (browser-driven Chartbit) and ADR-0006 (watchlist and
+screener edits).
 
 The project was framed as workflow parity with `tradesdontlie/tradingview-mcp`, which drives a chart
 GUI because TradingView exposes no usable data API. Stockbit is the opposite — a clean JSON backend

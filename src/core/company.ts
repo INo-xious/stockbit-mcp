@@ -516,7 +516,7 @@ export async function search(keyword: string, opts: SearchOptions = {}): Promise
 /**
  * The five blocks the quote projection throws away.
  *
- * Recorded in `docs/CAPABILITY-RESEARCH.md` from a live emittenInfo payload:
+ * Recorded in `docs/research/2026-08-05-capability-research.md` from a live emittenInfo payload:
  * "returns `indexes[]`, `catalogs[]`, `uma`, `notation[]`, `corp_action`, margin and day-trade
  * eligibility. All discarded today." The five names come from that note; the eligibility flags do
  * not, because the note did not record their spellings — see `ELIGIBILITY_KEY_RE`.

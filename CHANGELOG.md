@@ -20,7 +20,7 @@ Sekuritas), `api-sekuritas` (e-IPO), each with its own store slot, its own refre
 placement rule: the main session refreshes with a header, carina with a `refresh_token` in the
 BODY, e-IPO with the token in a QUERY parameter. `AuthKind` distinguishes all three rather than
 assuming a bearer, because assuming one is how a credential gets sent somewhere it was never issued
-for. `STOCKBIT-API.md` claimed carina needed an `Authorization-Carina` header; the current bundle
+for. `docs/stockbit-api.md` claimed carina needed an `Authorization-Carina` header; the current bundle
 says a plain bearer, and it was wrong.
 
 **`/charts/{SYM}` was never locked — the spelling was wrong.** This project recorded it for months
@@ -28,7 +28,7 @@ as "real, and still unusable" after probing `timeframe` / `tf` / `interval` / `r
 `daily`, `1D`, `D`, `DAILY`, `TIMEFRAME_DAILY`. Every one of those was uppercase. The client sends
 lowercase *windows*: `?timeframe=1w|1m|3m|ytd|1y|3y|5y`. A whole series in one request, against the
 12-row paged walk it replaces — roughly 40x fewer requests for every scan, backtest and alignment.
-The lesson kept in `STOCKBIT-API.md` §11d: a 400 naming a parameter means the route is real, and
+The lesson kept in `docs/stockbit-api.md` §11d: a 400 naming a parameter means the route is real, and
 says nothing about whether the values tried were the right *shape* of value.
 
 **Chartbit saving was never retired; this project was reading the retired half.**
@@ -325,7 +325,7 @@ For that reason the two query shapes are built as separate return statements rat
 `period`, then delete it when dates exist". The delete form leaves one line between correct
 behaviour and a confident wrong answer, and its removal would look innocuous in review.
 
-Measured API behaviour (see `STOCKBIT-API.md` §4a):
+Measured API behaviour (see `docs/stockbit-api.md` §4a):
 
 | Input | Result |
 |---|---|
@@ -409,7 +409,7 @@ intercepts at `Fetch`'s Response stage, which *pauses* the request while the bod
 
 ### Changed — documentation
 
-- `STOCKBIT-API.md` §4a previously documented the `period` enum as having "likely date-range
+- `docs/stockbit-api.md` §4a previously documented the `period` enum as having "likely date-range
   variants". **It does not** — 16 candidates were swept and rejected, leaving only
   `BROKER_SUMMARY_PERIOD_LATEST` and `_UNSPECIFIED`. Replaced with the measured behaviour table.
 - **Refresh rotation confirmed.** The README listed it as unverified. Comparing SHA-256 digests of

@@ -1,7 +1,7 @@
 /**
  * Broker summary + bandar detector — the core feature. TradingView has no equivalent.
  * Endpoint: GET /marketdetectors/{symbol}?transaction_type&market_board&investor_type&limit&period
- * Field units verified in STOCKBIT-API.md §4a (blot/slot = net lots; bval/sval = net IDR value).
+ * Field units verified in docs/stockbit-api.md §4a (blot/slot = net lots; bval/sval = net IDR value).
  */
 import { z } from "zod";
 import { getJson } from "../http/client.js";
@@ -35,8 +35,8 @@ import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput
  * Preset windows, the alternative to `from`/`to`.
  *
  * Measured against a live account on 2026-08-09, which settled a direct contradiction between two
- * of this project's own documents: `STOCKBIT-API.md` §4a claimed a 16-candidate sweep had left only
- * `_LATEST` and `_UNSPECIFIED`, and `docs/CAPABILITY-RESEARCH.md` claimed eleven. **The research
+ * of this project's own documents: `docs/stockbit-api.md` §4a claimed a 16-candidate sweep had left only
+ * `_LATEST` and `_UNSPECIFIED`, and `docs/research/2026-08-05-capability-research.md` claimed eleven. **The research
  * doc was right and the catalogue was wrong.** What the endpoint actually accepts:
  *
  * ```

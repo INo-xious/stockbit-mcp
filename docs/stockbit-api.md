@@ -1,18 +1,30 @@
-# Stockbit API — Reverse-Engineered Reference
+# Stockbit API — reverse-engineered reference
 
-**Purpose:** Everything needed to build a read-only Stockbit MCP / CLI without re-deriving the
-API surface. Mapped against the TradingView-MCP feature set for parity.
+> [!CAUTION]
+> **Unofficial.** This document is not from Stockbit. It is not affiliated with, endorsed by or
+> supported by Stockbit, PT Stockbit Sekuritas Digital or the IDX. It describes a private JSON API
+> that carries no compatibility promise and can change without notice.
+>
+> **Research and educational material.** It exists so this project's own code can be read and
+> audited. Automated access may conflict with Stockbit's Terms of Use — use it at your own risk,
+> against your own account only.
+>
+> **No credentials are stored in this repo.** Auth is a per-user bearer token the user supplies at
+> runtime (see [Auth](#auth)). Never commit a token; it grants full account access.
 
-**Status:** Endpoints below are marked **[CONFIRMED]** (I called them, got 200, saw the body),
+**Purpose:** everything needed to build a read-only Stockbit MCP / CLI without re-deriving the
+API surface.
+
+**Status:** endpoints below are marked **[CONFIRMED]** (called, HTTP 200, body seen),
 **[EXISTS]** (returned 400/param-error, so the route is real but params unverified), or
-**[JS-ONLY]** (found in the web frontend bundle, not yet called).
+**[JS-ONLY]** (found in the web frontend bundle, not yet called). These describe *routes*. Tools
+carry an evidence word instead (see `CONTEXT.md`): a CONFIRMED route backs an **Observed** tool,
+while EXISTS and JS-ONLY routes back **Projected** ones — field names read off the web bundle and
+never seen on a live response.
 
-**Last mapped:** 2026-08-02, against Stockbit Desktop v1.68.0 (build 20260724) + web app
-(Next.js). Reviewer: Claude, driven by account owner Marvel Harisson on his own authenticated
-session. All calls were read-only GETs.
-
-> ⚠️ **No credentials are stored in this repo.** Auth is a per-user bearer token the user
-> supplies at runtime (see [Auth](#auth)). Never commit a token; it grants full account access.
+**First mapped:** 2026-08-02, against Stockbit Desktop v1.68.0 (build 20260724) + web app
+(Next.js); last updated 2026-08-25. Mapped by the maintainer against their own authenticated
+session; all calls read-only unless noted.
 
 ---
 
@@ -143,7 +155,7 @@ each `{accdist:"Big Acc"|…, amount, percent, vol}`.
 - `investor_type`: `INVESTOR_TYPE_ALL` ✓ · `_FOREIGN` · `_DOMESTIC`
 - `period` [**CORRECTED 2026-08-09, live**]: date-range variants **do** exist. A previous revision of
   this document said only `_LATEST` and `_UNSPECIFIED` were accepted and that "there are no
-  date-range period variants"; `docs/CAPABILITY-RESEARCH.md` disagreed, and **the research doc was
+  date-range period variants"; `research/2026-08-05-capability-research.md` disagreed, and **the research doc was
   right**. The earlier sweep tested plausible-sounding names (`_TODAY`, `_1W`, `_YTD`, `_ALL`, bare
   forms) and none of them happen to be the real spellings, which is how a wrong conclusion survived
   sixteen probes.

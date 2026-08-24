@@ -24,8 +24,6 @@
     "test": "node --test --import tsx test/*.test.ts",
     "dev:mcp": "node --import tsx bin/stockbit-mcp.ts",
     "dev:auth": "node --import tsx bin/stockbit-auth.ts",
-    "progress": "node progress/build.mjs",
-    "progress:serve": "node progress/serve.mjs",
     "alerts": "node dist/bin/stockbit-alerts.js",
     "dev:alerts": "node --import tsx bin/stockbit-alerts.ts"
   },

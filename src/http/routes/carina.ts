@@ -5,7 +5,7 @@
  *
  * Every row here carries the SECURITIES token, obtained by exchanging an exodus grant plus the
  * user's six-digit PIN. Presented as a plain `Authorization: Bearer` — **not** the
- * `Authorization-Carina` header this project's own STOCKBIT-API.md claimed until it was checked
+ * `Authorization-Carina` header this project's own docs/stockbit-api.md claimed until it was checked
  * against the bundle.
  *
  * ## Why the write rows are separate from the read rows in review, if not in the file

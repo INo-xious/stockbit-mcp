@@ -133,7 +133,7 @@ const TRADABLE_BODY = { data: { list: [{ symbol: "BBRI", tradable: true }] } };
 
 const ACCOUNT_BODY = {
   data: {
-    name: "Marvel Harisson",
+    name: "Ayu Lestari",
     account_number: "NH000123456789",
     rdn: "8801234567",
     sid: "IDD123456789012",
@@ -459,9 +459,9 @@ test("an empty symbol list is refused before any request", async () => {
 
 test("the account holder's name never leaves as a name", async () => {
   const identity = await getAccount();
-  assert.equal(identity.nameMasked, "M. H.");
-  assert.equal(JSON.stringify(identity).includes("Marvel"), false);
-  assert.equal(JSON.stringify(identity).includes("Harisson"), false);
+  assert.equal(identity.nameMasked, "A. L.");
+  assert.equal(JSON.stringify(identity).includes("Ayu"), false);
+  assert.equal(JSON.stringify(identity).includes("Lestari"), false);
 });
 
 test("identifiers keep four characters, and the bullets do not encode the length", async () => {

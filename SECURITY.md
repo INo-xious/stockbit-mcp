@@ -6,8 +6,8 @@ Security updates are currently provided for the following versions:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅        |
-| < 0.1   | ❌        |
+| 1.x     | ✅        |
+| < 1.0   | ❌        |
 
 Users should run the latest available release and install dependencies using
 the committed lockfile.
@@ -24,10 +24,21 @@ vulnerabilities, including:
 - Missing default DNS-rebinding protection for HTTP-based servers
 
 Project releases must resolve `@modelcontextprotocol/sdk` to version `1.26.0`
-or newer. Version `1.30.0` or newer is recommended.
+or newer. `package.json` requires `^1.30.0` and the committed lockfile resolves
+`1.30.0`.
 
 The current server uses the stdio transport. It does not expose an HTTP or SSE
 listener by default.
+
+## Where credentials are stored
+
+The refresh token for each of the three token domains lives in the macOS
+Keychain when one is available. **Everywhere else it is an AES-256-GCM file
+under `~/.stockbit` (or `$STOCKBIT_STORE_DIR`) whose key is derived from the
+machine's hostname and username.** That is obfuscation, not a vault: anything
+running as the same user on the same machine can derive the same key. Treat a
+Windows or Linux install as "the token is on disk" and protect the account
+accordingly. Access tokens are never written to disk on any platform.
 
 ## Reporting a Vulnerability
 
@@ -48,6 +59,9 @@ Include the following information when possible:
 - Steps required to reproduce the issue
 - A proof of concept, logs, or screenshots
 - Any suggested mitigation or fix
+- The **redacted** output of `stockbit-auth status --offline --json` and
+  `stockbit-auth doctor` — both are written to be safe to paste, but read them
+  before you do
 
 Do not include Stockbit credentials, session cookies, access tokens, or other
 secrets in the report. Replace sensitive values with redacted examples.

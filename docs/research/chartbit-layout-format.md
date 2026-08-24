@@ -1,3 +1,6 @@
+> **Historical (2026-08-05).** Kept as a record of how the layout format was recovered; the
+> conclusion below is superseded — see the note that follows.
+
 > **SUPERSEDED (2026-08-24).** The per-symbol `/chartbit/{symbol}/layout` pair this document
 > investigates is the RETIRED half of Chartbit's API, and the conclusion below that "saving is a
 > server-side stub" is correct about those two routes and wrong about Chartbit as a whole. Real

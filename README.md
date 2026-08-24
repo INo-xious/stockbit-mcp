@@ -20,7 +20,7 @@ nothing here can reach your money. See [`docs/trading.md`](./docs/trading.md).
 Stockbit Desktop is a **Tauri (WKWebView)** app — the Chrome-DevTools approach used by TradingView
 MCPs doesn't apply, and isn't needed: the desktop app is a thin client over
 `https://exodus.stockbit.com`. This server is just another client of that API. See
-[`STOCKBIT-API.md`](./STOCKBIT-API.md) for the full reverse-engineered surface.
+[`docs/stockbit-api.md`](./docs/stockbit-api.md) for the full reverse-engineered surface.
 
 ## Auth model
 
@@ -149,7 +149,7 @@ was correct about the two `/chartbit/{symbol}/layout` routes it probed and wrong
 whole — real persistence lives on `/chartbit/charts` and `/chartbit/chart-drawings`, which is where
 the chart page's own save adapter writes. The correction is in
 [`docs/chartbit-drawing.md`](./docs/chartbit-drawing.md) and ADR-0003's Amendment 2; the original
-investigation is kept in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
+investigation is kept in `docs/research/2026-08-05-session-log.md` rather than quietly dropped.
 
 ## Tools
 
@@ -257,7 +257,7 @@ watching rather than a test run.
 
 > **Refresh contract** (confirmed via source + live endpoint probe): the main/session token renews at
 > `POST {exodus}/login/refresh` with the refresh token in the `Authorization: Bearer` header and an
-> empty body (see `STOCKBIT-API.md` §3).
+> empty body (see `docs/stockbit-api.md` §3).
 >
 > **Rotation: CONFIRMED** against a live account (2026-08-03). Each refresh mints a **new** refresh
 > token with a fresh 7-day expiry, which `parseRefresh` + the store persist immediately. So the

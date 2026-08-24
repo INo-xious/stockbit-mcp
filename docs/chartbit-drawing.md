@@ -73,7 +73,7 @@ confidence than the data supports.
 Layouts live at `/chartbit/charts` and their drawings at `/chartbit/chart-drawings`; both encode
 their content as base64 of a ZIP containing a single `layout.json`, DEFLATE level 9. The per-symbol
 `/chartbit/{symbol}/layout` pair that this project targeted for months is a **server-side stub** —
-it accepts every valid body and stores nothing. See `docs/chartbit-layout-format.md` for that
+it accepts every valid body and stores nothing. See `docs/research/chartbit-layout-format.md` for that
 history and ADR-0003's Amendment 2 for the correction.
 
 Saving through the widget (`chartbit_save`, or just leaving auto-save to fire) is the reliable path,

@@ -1,6 +1,6 @@
 /**
  * MCP tool registration. Each tool is a thin wrapper over `core/`, mapped to a confirmed endpoint
- * (see STOCKBIT-API.md §4).
+ * (see docs/stockbit-api.md §4).
  *
  * The tools here read. The ones that write live in the family modules registered at the bottom of
  * `registerTools`, go through `define.write`, and are therefore unreachable from a saved workflow
@@ -158,8 +158,7 @@ export function registerTools(server: McpServer): void {
    * split is the whole mechanism, enforced by construction rather than by a list to remember.
    *
    * The families below register through it. The older tools in this file still use `server.tool`
-   * and are captured by the interception; both routes end up in the same map, and the tool-name
-   * regex in `progress/build.mjs` reads both spellings.
+   * and are captured by the interception; both routes end up in the same map.
    */
   const define = makeDefiner(server, handlers);
 

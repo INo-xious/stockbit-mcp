@@ -11,7 +11,7 @@
  * Running a screen and saving one are the SAME endpoint. Stockbit's own client separates them with a
  * single body field: `save` of "0" evaluates the rules and persists nothing, `save` of "1" creates a
  * saved screen on the account — its reducer only adopts a new screener id in the second case (see the
- * screener section of `docs/CAPABILITY-RESEARCH.md`). So the difference between a read and an account
+ * screener section of `docs/research/2026-08-05-capability-research.md`). So the difference between a read and an account
  * write here is one character, and it must not be reachable from tool input.
  *
  * `buildScreenBody` hard-codes "0" and accepts no parameter that could change it. There is no
