@@ -30,3 +30,13 @@ CODEX-BRIEF.md
 REFERENCE-REPOSITORY.md
 body.txt
 .chartpreview/
+
+# Handoff and plan-review documents — working notes, never part of the package
+plan.md
+PLAN.md
+PLAN-REVIEW-LOG.md
+
+# Build artefacts produced by `npm pack` and `npm run build:mcpb`
+*.tgz
+*.mcpb
+mcpb/build/

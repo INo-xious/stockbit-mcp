@@ -3,10 +3,14 @@
 Notable changes to `stockbit-mcp`. Entries record *why* as well as *what*, because most of the
 hazards here are undocumented API behaviours that are expensive to rediscover.
 
-Everything marked **measured** was verified against the live API with a real account, not inferred
-from naming.
+The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
+follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Where an entry says a mapping
+was **Observed**, it was read off a live response with a real account rather than inferred from a
+name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
-## Unreleased
+## [Unreleased]
+
+## Unreleased — 0.1.0 development history
 
 ### Full Stockbit coverage, confirm-gated trading, and drawing on the real chart (2026-08-24)
 
