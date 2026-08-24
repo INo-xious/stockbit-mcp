@@ -1,5 +1,7 @@
 # stockbit-mcp
 
+Accepting donations: https://saweria.co/GUBS
+
 [Model Context Protocol](https://modelcontextprotocol.io) server for **Stockbit** (Indonesian / IDX
 market) — broker summary / *bandarmology*, quotes, top movers, orderbook, fundamentals, sentiment,
 your portfolio, and your real chart. It talks to the same JSON backends the Stockbit apps use, with
