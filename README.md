@@ -1,6 +1,6 @@
 # stockbit-mcp
 
-Accepting donations: https://saweria.co/GUBS
+Accepting donations: [Saweria Link](https://saweria.co/GUBS)
 
 [Model Context Protocol](https://modelcontextprotocol.io) server for **Stockbit** (Indonesian / IDX
 market) — broker summary / *bandarmology*, quotes, top movers, orderbook, fundamentals, sentiment,
