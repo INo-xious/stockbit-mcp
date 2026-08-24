@@ -6,7 +6,7 @@
  *
  * Discovery: a prompt is something the user picks from a menu in their client — a slash command in
  * Claude Code, an attachment button in Claude Desktop. A tool is something a model finds if it
- * happens to read far enough down a list of 137 descriptions. "Do the morning scan" should not
+ * happens to read far enough down a list of 138 descriptions. "Do the morning scan" should not
  * depend on the second thing.
  *
  * Presentation: a workflow returns a pile of step results, and how those get read to a person is

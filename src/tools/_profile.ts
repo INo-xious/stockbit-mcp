@@ -1,7 +1,7 @@
 /**
  * Which tools this server registers — `STOCKBIT_TOOLS`.
  *
- * 137 tools is a lot for a protocol whose clients budget for a handful. Cursor stops at 40 and
+ * 138 tools is a lot for a protocol whose clients budget for a handful. Cursor stops at 40 and
  * refuses the rest without saying which; VS Code caps at 128; every client pays for the whole tool
  * list in the model's context on every turn, whether or not a single one is called. A server that
  * cannot be trimmed is a server people uninstall.
@@ -9,7 +9,7 @@
  * So the same surface can be registered three ways:
  *
  *   - `all` (the default, and what an empty value means) — everything.
- *   - `core` — the 39 tools that answer the questions people actually ask, chosen to fit under
+ *   - `core` — the 40 tools that answer the questions people actually ask, chosen to fit under
  *     Cursor's cap with room for a client's own tools. No order writes: someone who wants those
  *     asks for `core,trading` and has therefore thought about it once.
  *   - a comma-separated list of families and/or individual tool names — `market,bandarmology`,
@@ -32,7 +32,7 @@ import { FAMILIES, type Family, type ToolProfile } from "./_define.js";
 export { FAMILIES };
 
 /**
- * The default working set: 39 tools, no order writes.
+ * The default working set: 40 tools, no order writes.
  *
  * Chosen against the questions this server exists to answer — what is the price, who accumulated,
  * is the trend real, what do I hold, tell me when — rather than by taking the first N of anything.
@@ -59,6 +59,7 @@ export const CORE_TOOLS: readonly string[] = [
   "backtest",
   "strategy_compare",
   "timeframe_alignment",
+  "position_size",
   // Who was on each side of the tape?
   "broker_summary",
   "broker_distribution",

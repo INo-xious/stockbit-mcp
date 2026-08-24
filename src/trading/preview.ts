@@ -31,6 +31,8 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { StockbitError } from "../http/errors.js";
+import { tickSize, nearestTicks } from "../core/ticks.js";
+import { idr, pct } from "../core/format.js";
 import { normalizeSymbol } from "../symbol.js";
 import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { getQuote } from "../core/emitten.js";
@@ -57,23 +59,10 @@ import { TICKET_TTL_MS, issue, now } from "./tickets.js";
  * from the wire because it is exchange rule, not account configuration, and because a preview must
  * be able to say "that price is invalid" without a request.
  */
-export function tickSize(price: number): number {
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new StockbitError("invalid_param", `A price must be a positive number, got ${price}`);
-  }
-  if (price < 200) return 1;
-  if (price < 500) return 2;
-  if (price < 2000) return 5;
-  if (price < 5000) return 10;
-  return 25;
-}
-
-/** The nearest valid prices on either side of an off-grid one, for an error message worth reading. */
-export function nearestTicks(price: number): { below: number; above: number } {
-  const tick = tickSize(price);
-  const below = Math.floor(price / tick) * tick;
-  return { below, above: below + tick };
-}
+// The grid itself moved to `src/core/ticks.ts` so `position_size` — pure arithmetic, no account —
+// can use the same table. Re-exported here because this is where the order path and its tests
+// already look for it.
+export { tickSize, nearestTicks, onTickGrid, roundToTick } from "../core/ticks.js";
 
 /* ------------------------------------ shapes ------------------------------------ */
 
@@ -151,19 +140,8 @@ export interface PreviewInput {
 
 /* ---------------------------------- formatting ---------------------------------- */
 
-/** Rupiah with thousand separators, locale-independent so a test asserts one spelling. */
-export function idr(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "unknown";
-  const rounded = Math.round(value);
-  const sign = rounded < 0 ? "-" : "";
-  const digits = Math.abs(rounded).toString();
-  const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${sign}Rp ${grouped}`;
-}
-
-function pct(value: number | null, places = 2): string {
-  return value === null || !Number.isFinite(value) ? "unknown" : `${value.toFixed(places)}%`;
-}
+// Also moved to `core/`, for the same reason and re-exported for the same callers.
+export { idr } from "../core/format.js";
 
 /* ------------------------------------ helpers ------------------------------------ */
 

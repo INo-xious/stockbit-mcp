@@ -4,7 +4,7 @@
  *
  * The only thing this decides is which tools to register. `STOCKBIT_TOOLS` is parsed here rather
  * than inside the server so a bad value can **stop the process**: a typo that quietly fell back to
- * registering all 137 tools would blow a client's tool cap and look like a bug in the client. A
+ * registering all 138 tools would blow a client's tool cap and look like a bug in the client. A
  * server that refuses to start with a message naming every valid family is the kinder failure.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

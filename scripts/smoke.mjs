@@ -27,7 +27,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** What the surface is expected to hold when nothing else says otherwise. Update with each phase. */
-const FALLBACK_TOOLS = 137;
+const FALLBACK_TOOLS = 138;
 const FALLBACK_PROMPTS = 8;
 
 function flag(name) {

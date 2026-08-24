@@ -45,6 +45,7 @@ import { detectPatterns, type PatternId } from "../analysis/patterns.js";
 import { alignment } from "../analysis/timeframe.js";
 import { analyze, type AnalyzeDeps } from "../analysis/analyze.js";
 import { scan, symbolOf, type UniverseSource } from "../analysis/scan.js";
+import { positionSize } from "../analysis/positionsize.js";
 import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
@@ -1465,6 +1466,51 @@ export function registerTools(
           deps,
         );
       }),
+  );
+
+  defAnalysis.read(
+    "position_size",
+    "How many lots to buy, given what you are willing to lose. Pure arithmetic — it reads no " +
+      "account, checks no buying power, and places nothing.\n" +
+      "Give `entry_price`, `stop_price` (which must be BELOW the entry — IDX retail has no short " +
+      "selling), and EITHER `risk_idr` OR `account_idr` with `risk_pct`. Not both: they can disagree.\n" +
+      "Lots are floored, never rounded up, so the risk is at most the number you gave. Returns the " +
+      "position value, what is actually at risk after flooring, the round-trip commission, the " +
+      "break-even price with commission included, and 1R/2R/3R targets on the tick grid.\n" +
+      "It CHECKS that entry and stop sit on the IDX price grid — an off-grid limit is rejected by " +
+      "the exchange rather than rounded — and, if you pass `ara` and `arb` from `price_bands`, that " +
+      "neither is outside today's auto-rejection band.\n" +
+      "Commission defaults to the published retail rate (0.15% / 0.25%) and `feeSource` says so; " +
+      "pass `fee_buy_pct` and `fee_sell_pct`, or read them from `trading_info`, for this account's.\n" +
+      "This is a plan, not a permission. Use `order_preview` for the real checks — buying power, " +
+      "tradability, and the caps in the trading policy.",
+    {
+      entry_price: z.coerce.number().describe("Limit price you would buy at, in IDR."),
+      stop_price: z.coerce.number().describe("Where you would get out. Must be below entry_price."),
+      risk_idr: z.coerce.number().optional().describe("Rupiah you are willing to lose. Or use account_idr + risk_pct."),
+      account_idr: z.coerce.number().optional().describe("Account value, with risk_pct."),
+      risk_pct: z.coerce.number().optional().describe("Percent of the account to risk, e.g. 1."),
+      fee_buy_pct: z.coerce.number().optional().describe("Buy commission percent. Default 0.15."),
+      fee_sell_pct: z.coerce.number().optional().describe("Sell commission percent. Default 0.25."),
+      ara: z.coerce.number().optional().describe("Today's ceiling, from price_bands."),
+      arb: z.coerce.number().optional().describe("Today's floor, from price_bands."),
+      max_lots: z.coerce.number().optional().describe("Never suggest more lots than this."),
+    },
+    async (a) =>
+      runTool(async () =>
+        positionSize({
+          entryPrice: a.entry_price as number,
+          stopPrice: a.stop_price as number,
+          ...(a.risk_idr === undefined ? {} : { riskIdr: a.risk_idr as number }),
+          ...(a.account_idr === undefined ? {} : { accountIdr: a.account_idr as number }),
+          ...(a.risk_pct === undefined ? {} : { riskPct: a.risk_pct as number }),
+          ...(a.fee_buy_pct === undefined ? {} : { feeBuyPct: a.fee_buy_pct as number }),
+          ...(a.fee_sell_pct === undefined ? {} : { feeSellPct: a.fee_sell_pct as number }),
+          ...(a.ara === undefined ? {} : { ara: a.ara as number }),
+          ...(a.arb === undefined ? {} : { arb: a.arb as number }),
+          ...(a.max_lots === undefined ? {} : { maxLots: a.max_lots as number }),
+        }),
+      ),
   );
 
   /* ------------------------------- tool families ------------------------------- */
