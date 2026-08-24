@@ -12,7 +12,8 @@
  * six root files a consumer actually reads, is an offender — including files this project has not
  * invented yet.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
+import { basename } from "node:path";
 
 /** Exactly what belongs in the tarball. Anything else fails the run. */
 const ALLOWED = /^(dist\/(bin|src)\/.+\.js|README(\.id)?\.md|CHANGELOG\.md|SECURITY\.md|LICENSE|package\.json)$/;
@@ -29,12 +30,43 @@ const KNOWN_BAD = /(^|\/)(test|tests)\/|(^|\/)plan\.md$|(^|\/)progress\//i;
 const MIN_FILES = 100;
 const MAX_FILES = 150;
 
-function packFileList() {
-  const out = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+/**
+ * Ask npm what it would pack, without going through a shell.
+ *
+ * `execFileSync("npm", …)` is wrong on Windows, where npm is `npm.cmd`: since the fix for
+ * CVE-2024-27980 Node will not spawn a `.cmd` through `execFile` at all, so the call died with
+ * `spawnSync npm ENOENT` on every Windows machine running Node 20.12 or newer — a check that runs
+ * on three operating systems cannot be reached on one of them.
+ *
+ * `npm run` exports `npm_execpath`, the path to npm's own CLI entry point, so the normal route is
+ * to run that script with the Node already executing this file. The name is checked because under
+ * yarn or pnpm the same variable points at *their* CLI, and `pnpm pack --dry-run --json` is not
+ * the command this wants.
+ *
+ * The fallback covers `node scripts/check-pack.mjs` run directly, where the variable is absent. It
+ * is the one path that needs a shell, because resolving `npm.cmd` is exactly what a shell is for.
+ * It goes through `execSync` with a single fixed string rather than `execFileSync` with `shell:
+ * true` and an argument array: that combination earns a DEP0190 deprecation warning on Node 24,
+ * since the arguments are concatenated rather than escaped. Nothing here is interpolated, so there
+ * is nothing for the shell to reinterpret either way — this simply says so in the form Node wants.
+ */
+function npmPackJson() {
+  const options = {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
     maxBuffer: 32 * 1024 * 1024,
-  });
+  };
+
+  const cli = process.env.npm_execpath;
+  if (cli && basename(cli) === "npm-cli.js") {
+    return execFileSync(process.execPath, [cli, "pack", "--dry-run", "--json"], options);
+  }
+
+  return execSync("npm pack --dry-run --json", options);
+}
+
+function packFileList() {
+  const out = npmPackJson();
   // `npm pack --json` prints an array with one entry per tarball it would build.
   const parsed = JSON.parse(out);
   const entry = Array.isArray(parsed) ? parsed[0] : parsed;
