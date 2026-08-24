@@ -56,8 +56,8 @@ stockbit-auth trading-logout
 
 The PIN is typed at your terminal, used for exactly one request, and never stored. **No MCP tool
 accepts a PIN.** If anything ever asks you for it through the assistant, that is not this server.
-Only the resulting refresh token is kept, in its own Keychain slot, separate from the market-data
-one.
+Only the resulting refresh token is kept, in its own store slot — the macOS Keychain, or the
+encrypted file store on Windows and Linux — separate from the market-data one.
 
 **2. Permission.** Trading is off by default, and the server cannot turn it on. `--live` is
 required and cannot be defaulted into — a bare `trading-enable` is refused, because the two things
@@ -100,8 +100,11 @@ order_preview  action=buy symbol=BBRI price=4100 lots=5
 order_buy      ticket_id=tk_… confirm=true
 ```
 
-`order_buy`, `order_sell`, `order_amend` and `order_cancel` take a **ticket id and a confirmation,
-and nothing else** — no price, no quantity. What reaches the exchange is what you were shown.
+`order_buy`, `order_sell`, `order_amend` and `order_cancel` take a **ticket id, an optional
+confirmation, and nothing else** — no price, no quantity. By default the confirmation is explicit
+or directly elicited. If the operator enabled capped live autoconfirm, the caller omits `confirm`
+and server policy alone decides whether the ticket is covered. What reaches the exchange is what
+the ticket described.
 
 Tickets expire after **two minutes**, because they were priced against a market that moves. An
 expired ticket is refused, not quietly repriced.
@@ -120,8 +123,9 @@ expired ticket is refused, not quietly repriced.
 | `not-found-after-error` | The request errored and the book is clean. |
 | `outcome-unknown` | The request errored **and** the read-back failed. |
 
-The last three, and `not-visible`, all mean the same thing in practice: **do not resend.** A resend
-is how one intention becomes two orders. Read `orders` again, or look in the Stockbit app.
+Every result other than `ok` means the same thing in one practical respect: **do not resend.** For
+`landed-despite-error`, the read-back already found the order; for uncertain cases, another read may
+settle the state. Read `orders` again, or look in the Stockbit app.
 
 Nothing here ever auto-cancels. The "undo" for an order is another order, and sending one on a guess
 about a state we could not read is how a bad situation gets worse.

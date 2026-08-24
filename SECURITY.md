@@ -86,8 +86,10 @@ should be aimed at:
 
 - **Order entry** (`order_buy`, `order_sell`, `order_amend`, `order_cancel`) and
   **IPO subscription** (`eipo_order`) place real orders with real money. They
-  are **off by default**, require a per-order confirmation against a ticket the
-  user was shown, and cannot be reached from a saved workflow recipe. See
+  are **off by default**, require a preview ticket, and default to per-order
+  confirmation. The operator may deliberately enable live autoconfirm only
+  together with a maximum order value; a model cannot enable it or widen that
+  cap. Writes cannot be reached from a saved workflow recipe. See
   `docs/adr/0004-order-entry.md`.
 - **Chart drawing** drives the browser the user logged in with, over the Chrome
   DevTools Protocol. It enables only the `Page` and `Runtime` CDP domains — never
@@ -96,17 +98,18 @@ should be aimed at:
 - **Watchlist and screener edits** change what later answers are about. See
   `docs/adr/0006-account-writes.md`.
 
-Anything that lets one of those happen without the user's explicit,
-per-action agreement is a vulnerability in this project, whatever else it looks
-like. In particular:
+Anything that lets one of those happen without the user's explicit per-action
+agreement or the exact capped-autoconfirm policy they enabled is a vulnerability
+in this project, whatever else it looks like. In particular:
 
 - A path that turns trading on without the account owner running
-  `stockbit-auth trading-enable` themselves. The environment can only turn
-  trading **off**; there is deliberately no variable that turns it on, and no
-  module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
+  `stockbit-auth trading-enable` themselves. `STOCKBIT_TRADING` can only move
+  a session **down** the ladder — `off` disables trading, `paper` demotes a
+  configured `live` to paper — and there is deliberately no value that raises
+  it. No module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
   settings file.
-- A path that satisfies a confirmation the user did not give, or that redeems
-  an order ticket twice.
+- A path that satisfies a confirmation the user did not give, bypasses or widens
+  capped autoconfirm, or redeems an order ticket twice.
 - A trading PIN reaching disk, a log, a tool result, or a model. The PIN is
   typed at a terminal, used for one request, and never stored; no MCP tool
   accepts one.
@@ -122,7 +125,7 @@ like. In particular:
 Security issues may include:
 
 - Exposure of Stockbit credentials or session data
-- Any write performed without the confirmation described above
+- Any write performed without the confirmation or exact policy exception described above
 - Unauthorized access to MCP tools or returned financial data
 - Sensitive information appearing in logs or error messages
 - Dependency vulnerabilities reachable through this project

@@ -17,7 +17,7 @@ process.env.STOCKBIT_STORE_DIR = STORE;
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { renderToolsDoc } from "../src/toolsdoc.ts";
+import { escapeMarkdownTableCell, renderToolsDoc } from "../src/toolsdoc.ts";
 import { describeSurface } from "../src/tools/surface.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
@@ -124,4 +124,8 @@ test("a table cell cannot be broken by a description containing a pipe", async (
     );
   }
   assert.ok(seenTables >= 3, `expected the families table, the per-family tables and prompts; saw ${seenTables}`);
+});
+
+test("a backslash before a pipe cannot cancel the table-cell escape", () => {
+  assert.equal(escapeMarkdownTableCell(String.raw`left\|right`), String.raw`left\\\|right`);
 });

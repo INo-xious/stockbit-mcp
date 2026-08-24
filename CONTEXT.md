@@ -21,8 +21,8 @@ A glossary, not a spec. One meaning per word; the code and the docs use these wo
 - **Paper account** — the local ledger paper mode trades against; every paper result says "PAPER ACCOUNT".
 
 ## Orders
-- **Ticket** — an order intent priced and checked by `order_preview`; in memory, expires in two minutes, spent before the request goes out. Write tools take a ticket id and a confirmation and nothing else.
-- **Outcome** — what is known after a write: `ok` · `rejected` · `not-visible` · `landed-despite-error` · `not-found-after-error` · `outcome-unknown` · `write-failed`. Only `ok` means on the book and seen there; everything else means do not resend.
+- **Ticket** — an order intent priced and checked by `order_preview`; in memory, expires in two minutes, spent before the request goes out. Write tools take a ticket id, an optional confirmation, and nothing else. By default confirmation is explicit or directly elicited; capped live autoconfirm is an operator-enabled exception enforced by server policy.
+- **Outcome** — what is known after a write: `ok` · `rejected` · `not-visible` · `landed-despite-error` · `not-found-after-error` · `outcome-unknown` · `write-failed`. `ok` is the only clean success; `landed-despite-error` is also visible on read-back but followed an errored request. Never resend a non-`ok` outcome.
 - **Check** — one preview validation; `ok:false` blocks; `unverified` means the input could not be read ("not contradicted", never "confirmed").
 
 ## Provenance

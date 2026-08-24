@@ -107,8 +107,7 @@ test("a fetch error whose message contains the URL does not put the token in the
   const error = await postTelegram(TARGET, "hello", fetchImpl);
   assert.ok(error, "a failure must be reported");
   assert.ok(!error.includes(TOKEN), `the error carried the bot token: ${error}`);
-  assert.ok(!error.includes("api.telegram.org"), "the URL itself is enough to reconstruct the path");
-  assert.match(error, /request failed \(TypeError\)/);
+  assert.equal(error, "request failed (TypeError)");
 });
 
 test("a timeout is reported without the URL either", async () => {

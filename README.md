@@ -44,8 +44,9 @@ English | [Bahasa Indonesia](README.id.md)
 
 ## How it works (and why it is safe to run)
 
-It is an **HTTP client, not a bot.** There is no headless browser scraping pages, no automation of
-Stockbit's UI, no polling loop you did not start.
+It is an **HTTP client, not a bot.** Every number it reports comes from a JSON endpoint in a closed
+route table — no headless browser scraping pages, no reading data off Stockbit's UI, no polling loop
+you did not start.
 
 - **One interactive login, captured from your own browser.** You sign in on Stockbit's real page;
   the server reads the refresh token out of the response and stores it. Your password never touches
@@ -79,16 +80,19 @@ flowchart LR
 
 - **No PIN handling by any tool.** The six-digit trading PIN is typed at your terminal, used for one
   request and never stored. If anything asks you for it through an assistant, that is not this.
-- **No order without a ticket and your confirmation.** The write tools take a ticket id and nothing
-  else — no price, no quantity — so what reaches the exchange is exactly what you were shown.
+- **No order without a ticket.** By default, the write tools also need your confirmation. The only
+  exception is capped `--auto-confirm`, which you must deliberately enable for live trading at a
+  terminal; a model cannot enable it or widen its value cap. The tools take no price or quantity, so
+  what reaches the exchange is exactly what the ticket described.
 - **No auto-resend, no auto-cancel.** When an order's outcome is uncertain the server says so and
   stops. A resend is how one intention becomes two orders.
 - **Saved workflow recipes cannot write.** Enforced by construction: a write tool is never added to
   the map recipes look names up in.
 - **No route outside the table.** No day-trade or smart orders, no withdrawals, no deposits, no
   posting to the stream.
-- **No scraping and no UI automation for data.** Your browser is used for exactly two things: the
-  one-time login, and drawing on your own chart.
+- **No scraping, and no UI automation for data.** Your own browser is used for three things and
+  nothing else: the one-time login, drawing on your own chart, and opening Stockbit when you ask to
+  look at it. Nothing is ever read out of the page.
 - **Nothing leaves your machine** except to Stockbit, and to channels you configured.
 - **No short selling** — IDX retail has none — and **no financial advice**.
 
@@ -108,7 +112,7 @@ flowchart LR
 
 **Bandarmology.** `broker_summary`, `broker_distribution`, `broker_activity`, `bandar_detector` —
 who accumulated, who distributed, and who was on the other side of the tape. NET and GROSS, all four
-market boards, six period windows including year-to-date in a single request. This is the data no
+market boards, ten period windows including year-to-date in a single request. This is the data no
 other market API has, and it is why this project exists.
 
 **Market, company and fundamentals.** Quotes, full orderbook depth, auto-rejection bands, movers,
@@ -311,12 +315,15 @@ asserts that.
 **The PIN.** Typed at your terminal, used for one request, never stored. No MCP tool accepts one.
 
 **The ticket protocol.** `order_preview` prices and checks the order and returns a `summary` you
-read. The write tools take that ticket id and a confirmation and nothing else. A ticket expires in
-two minutes and carries a fingerprint that is rechecked before the request goes out. Where your
-client supports elicitation, you are asked directly as well.
+read. The write tools take that ticket id and an optional confirmation, and nothing else. By
+default, the order proceeds only after `confirm: true` or direct MCP elicitation. The server alone
+may waive that per-call step when you deliberately enabled capped live `--auto-confirm`; the model
+must never set `confirm` on your behalf. A ticket expires in two minutes and carries a fingerprint
+that is rechecked before the request goes out.
 
-**Outcomes.** After a write, `outcome` is one of seven classes and only one of them means the order
-is on the book and was seen there:
+**Outcomes.** After a write, `outcome` is one of seven classes. `ok` is the only clean success;
+`landed-despite-error` also means the read-back found the order, but the request itself errored.
+Never resend any non-`ok` result:
 
 | `outcome` | Meaning |
 |---|---|
@@ -373,7 +380,7 @@ trims it:
 else is missing. An unknown value stops the server with a message naming every family, rather than
 silently loading all 138.
 
-**Output sizes.** `analyze` makes about 22 upstream requests and returns 4–8 KB. `broker_summary`
+**Output sizes.** `analyze` makes about 27 upstream requests and returns 4–8 KB. `broker_summary`
 takes a `limit`. `financials` is large. Chart tools return a base64 SVG *and* a file path. Prefer
 `technicals` when you only need the numbers.
 
@@ -548,9 +555,9 @@ readings are computations over historical data, not predictions. Backtested resu
 future returns.
 
 **If you enable live trading, this software can send real orders that spend real money.** It is off
-by default, every order requires your explicit confirmation, and you remain solely responsible for
-every order placed through it — including one placed because you confirmed something you had not
-read.
+by default. Orders require your explicit confirmation unless you separately opt into capped
+`--auto-confirm`; you remain solely responsible for every order placed through it, including orders
+within a cap you authorised in advance.
 
 You are responsible for complying with Stockbit's terms, IDX rules, and Indonesian law.
 

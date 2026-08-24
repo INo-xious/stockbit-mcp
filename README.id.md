@@ -41,8 +41,9 @@ dari Claude Desktop, Claude Code, Cursor, atau MCP client apa pun.
 
 ## Cara kerjanya (dan kenapa aman dijalankan)
 
-Ini **HTTP client, bukan bot**. Tidak ada browser headless yang men-scrape halaman, tidak ada
-otomasi UI Stockbit, tidak ada loop polling yang tidak Anda mulai.
+Ini **HTTP client, bukan bot**. Setiap angka yang dilaporkan berasal dari endpoint JSON di tabel
+rute tertutup — tidak ada browser headless yang men-scrape halaman, tidak ada data yang dibaca dari
+UI Stockbit, tidak ada loop polling yang tidak Anda mulai.
 
 - **Satu kali login interaktif, ditangkap dari browser Anda sendiri.** Anda login di halaman asli
   Stockbit; server membaca refresh token dari respons dan menyimpannya. Password Anda tidak pernah
@@ -62,14 +63,17 @@ otomasi UI Stockbit, tidak ada loop polling yang tidak Anda mulai.
 
 - **Tidak ada tool yang menyentuh PIN.** PIN 6 digit diketik di terminal Anda, dipakai untuk satu
   request, dan tidak pernah disimpan. Kalau ada yang meminta PIN lewat asisten, itu bukan ini.
-- **Tidak ada order tanpa tiket dan konfirmasi Anda.** Tool tulis hanya menerima id tiket — tanpa
-  harga, tanpa jumlah — jadi yang sampai ke bursa persis yang Anda lihat.
+- **Tidak ada order tanpa tiket.** Secara default tool tulis juga memerlukan konfirmasi Anda. Satu-
+  satunya pengecualian adalah `--auto-confirm` dengan batas nilai, yang harus Anda aktifkan sendiri
+  untuk live trading lewat terminal; model tidak bisa menyalakan atau menaikkan batasnya. Tool tidak
+  menerima harga atau jumlah, jadi yang sampai ke bursa persis yang dijelaskan tiket.
 - **Tidak pernah mengirim ulang otomatis, tidak pernah membatalkan otomatis.** Kalau hasil sebuah
   order tidak pasti, server mengatakannya dan berhenti.
 - **Resep workflow tidak bisa menulis apa pun.** Dijamin oleh konstruksi kode, bukan oleh disiplin.
 - **Tidak ada rute di luar tabel** — tidak ada penarikan dana, setoran, atau posting ke stream.
-- **Tidak ada scraping.** Browser Anda dipakai untuk dua hal saja: login sekali, dan menggambar di
-  chart Anda sendiri.
+- **Tidak ada scraping.** Browser Anda dipakai untuk tiga hal saja: login sekali, menggambar di
+  chart Anda sendiri, dan membuka Stockbit ketika Anda ingin melihatnya. Tidak ada data yang dibaca
+  dari halaman.
 - **Tidak ada short selling** dan **tidak ada nasihat keuangan**.
 
 ## Prasyarat
@@ -147,12 +151,15 @@ atau `--live`. `trading-enable` tanpa flag ditolak — dua pilihan itu berbeda s
 tool yang menerimanya.
 
 **Protokol tiket.** `order_preview` menghitung dan memeriksa order lalu mengembalikan `summary` yang
-Anda baca. Tool tulis hanya menerima id tiket itu dan konfirmasi. Tiket kedaluwarsa dalam dua menit
-dan membawa fingerprint yang diperiksa ulang sebelum request dikirim.
+Anda baca. Tool tulis hanya menerima id tiket dan konfirmasi opsional. Secara default order hanya
+lanjut setelah `confirm: true` atau persetujuan langsung lewat MCP. Hanya kebijakan server yang bisa
+melewati langkah per-order ketika Anda sengaja mengaktifkan live `--auto-confirm` dengan batas nilai;
+model tidak boleh mengisi `confirm` atas nama Anda. Tiket kedaluwarsa dalam dua menit.
 
-**Hasilnya.** Setelah menulis, `outcome` punya tujuh kelas dan hanya `ok` yang berarti order benar
-ada di papan dan terlihat di sana. Selain itu: **jangan kirim ulang**. Mengirim ulang adalah
-bagaimana satu niat menjadi dua order.
+**Hasilnya.** Setelah menulis, `outcome` punya tujuh kelas. `ok` adalah satu-satunya sukses bersih;
+`landed-despite-error` juga berarti order ditemukan saat dibaca ulang, tetapi request-nya error.
+Untuk semua hasil selain `ok`: **jangan kirim ulang**. Mengirim ulang adalah bagaimana satu niat
+menjadi dua order.
 
 **Audit.** Setiap percobaan order dan setiap perubahan akun menambah satu baris ke log, tersensor,
 apa pun hasilnya — dan kalau baris itu gagal ditulis, hasilnya mengatakan demikian.
@@ -198,9 +205,9 @@ aliran broker adalah perhitungan atas data historis, bukan ramalan. Hasil backte
 memprediksi imbal hasil di masa depan.
 
 **Kalau Anda menyalakan live trading, perangkat lunak ini bisa mengirim order sungguhan yang
-membelanjakan uang sungguhan.** Fitur itu mati secara default, setiap order butuh konfirmasi
-eksplisit dari Anda, dan Anda sepenuhnya bertanggung jawab atas setiap order yang dikirim
-lewatnya — termasuk order yang dikirim karena Anda mengkonfirmasi sesuatu yang belum Anda baca.
+membelanjakan uang sungguhan.** Fitur itu mati secara default. Order membutuhkan konfirmasi eksplisit
+kecuali Anda juga memilih `--auto-confirm` dengan batas nilai; Anda sepenuhnya bertanggung jawab atas
+setiap order yang dikirim, termasuk order di dalam batas yang Anda izinkan sebelumnya.
 
 Anda bertanggung jawab mematuhi ketentuan Stockbit, aturan IDX, dan hukum Indonesia.
 

@@ -58,9 +58,9 @@ interface Row {
   inputs: string;
 }
 
-/** Escape a cell so a description containing `|` cannot break the table. */
-function cell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
+/** Escape a Markdown table cell without letting a preceding backslash neutralise the pipe escape. */
+export function escapeMarkdownTableCell(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
 }
 
 /**
@@ -152,7 +152,7 @@ export async function renderToolsDoc(): Promise<string> {
       const evidence =
         seen.size === 1 ? EVIDENCE_LABEL[[...seen][0] as Evidence] : "Mixed";
       out.push(
-        `| [${family}](#${family}) | ${inFamily.length} | ${cell(FAMILY_COVERS[family])} | ${evidence} |`,
+        `| [${family}](#${family}) | ${inFamily.length} | ${escapeMarkdownTableCell(FAMILY_COVERS[family])} | ${evidence} |`,
       );
     }
     out.push("");
@@ -163,14 +163,14 @@ export async function renderToolsDoc(): Promise<string> {
       const inFamily = rows.filter((r) => r.family === family);
       out.push(`## ${family}`);
       out.push("");
-      out.push(cell(FAMILY_COVERS[family]) + ".");
+      out.push(escapeMarkdownTableCell(FAMILY_COVERS[family]) + ".");
       out.push("");
       out.push("| Tool | Kind | When to use | Evidence | Inputs |");
       out.push("|---|---|---|---|---|");
       for (const row of inFamily) {
         out.push(
-          `| \`${row.name}\` | ${row.kind} | ${cell(row.whenToUse)} | ${EVIDENCE_LABEL[row.evidence]} | ` +
-            `${cell(row.inputs)} |`,
+          `| \`${row.name}\` | ${row.kind} | ${escapeMarkdownTableCell(row.whenToUse)} | ${EVIDENCE_LABEL[row.evidence]} | ` +
+            `${escapeMarkdownTableCell(row.inputs)} |`,
         );
       }
       out.push("");
@@ -193,7 +193,7 @@ export async function renderToolsDoc(): Promise<string> {
         const args = (prompt.arguments ?? [])
           .map((a) => (a.required ? `${a.name}*` : a.name))
           .join(", ");
-        out.push(`| \`${prompt.name}\` | ${cell(prompt.description ?? "")} | ${args || "—"} |`);
+        out.push(`| \`${prompt.name}\` | ${escapeMarkdownTableCell(prompt.description ?? "")} | ${args || "—"} |`);
       }
       out.push("");
     }

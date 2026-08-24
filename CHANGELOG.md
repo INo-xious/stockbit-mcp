@@ -73,7 +73,7 @@ installable by someone who is not the author.
 - The Telegram bot-token redaction pattern could not match the one place the token actually leaks —
   inside the Bot API URL — because a `\b` anchor never matches after the letters `bot`.
 - `npm pack` shipped 247 files and 3 MB, including the source tree, the tests and a `dist/` left
-  over from an earlier refactor. It now ships 128, checked by an allow-list on every push.
+  over from an earlier refactor. It now ships 129, checked by an allow-list on every push.
 
 ### Security
 

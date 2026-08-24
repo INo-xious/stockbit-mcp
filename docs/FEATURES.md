@@ -4,9 +4,10 @@ Tools over Stockbit's private APIs, plus a standalone alert daemon. The complete
 every tool, its evidence and its arguments — is [`TOOLS.md`](TOOLS.md); this page is the tour.
 
 Most of them read. Twenty-four write: the four order tools, the e-IPO subscription, the eight
-Chartbit drawing and layout tools, the nine watchlist and screener edits, and `login`/`logout`. Every
-one requires an explicit per-action confirmation, and trading is **off** until you turn it on
-yourself at a terminal. If you never do, nothing here can reach your money.
+Chartbit drawing and layout tools, the nine watchlist and screener edits, and `login`/`logout`. They
+are confirmation-gated; order entry defaults to per-action confirmation, with a deliberately enabled,
+value-capped live autoconfirm exception. Trading is **off** until you turn it on yourself at a
+terminal. If you never do, nothing here can reach your money.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
 argument names below matter when you want to be specific ("broker summary for BBRI from 2026-07-01
@@ -77,7 +78,7 @@ the real cause instead, which for an expired token is "run `stockbit-auth login`
 auto-rejection floor, every broker on both sides fills at one price and accumulation-versus-
 distribution carries no information. Read that as unreliable, not as bearish.
 
-Cost is about 22 upstream requests at the default 260 bars, issued **sequentially** — a fan-out of
+Cost is about 27 upstream requests at the default 260 bars — 22 bar pages plus five single-shot reads, issued **sequentially** — a fan-out of
 concurrent first-calls is what invalidated the stored session token on 2026-08-05. Use `technicals`
 or `timeframe_alignment` if you only want the numbers.
 
@@ -445,10 +446,12 @@ than the happy path.
 
 ## What this cannot do
 
-- **It cannot turn trading on.** That is `stockbit-auth trading-enable`, run by you. The environment
-  can only turn it **off**, and no module the assistant can reach may write the settings file.
-- **It cannot place an order you did not agree to.** The write tools take a ticket id and a
-  confirmation, and no price and no quantity, so what reaches the exchange is what you were shown.
+- **It cannot turn trading on.** That is `stockbit-auth trading-enable`, run by you.
+  `STOCKBIT_TRADING` only moves a session **down** the ladder — never up — and no module the
+  assistant can reach may write the settings file.
+- **It cannot place an order outside the policy you chose.** The write tools take a ticket id, an
+  optional confirmation, and no price or quantity. The default requires per-order agreement; capped
+  live autoconfirm is an operator-enabled exception that a model cannot switch on or widen.
 - **A saved workflow recipe cannot reach anything that writes.** Recipes are data — a name and a
   list of steps — and `define.write` deliberately never registers a tool in the map the workflow
   engine looks names up in.
