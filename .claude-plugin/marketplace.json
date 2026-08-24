@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Stockbit for the IDX — market data, bandarmology and your own brokerage account, with the trading half honest about what has never been observed live.",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "plugins": [
     {
