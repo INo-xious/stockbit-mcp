@@ -15,6 +15,26 @@
  * construction rather than by a list someone must remember to update, and `test/tools.test.ts`
  * asserts the map holds no write tool.
  *
+ * ## Families
+ *
+ * A family is one registration module, which is one section of the Stockbit UI. It is not a
+ * decoration: it is what `STOCKBIT_TOOLS` filters on, what `docs/TOOLS.md` groups by, and what a
+ * client with a tool-count cap selects with. `define.family("market")` returns a child definer that
+ * shares this one's handler map and write list but stamps its own family onto everything it
+ * registers, so a module cannot forget to say what it is.
+ *
+ * ## Evidence
+ *
+ * Every tool carries one of three words — see `CONTEXT.md`. It rides on `_meta` so a client, the
+ * generated reference and a reviewer all read the same value rather than three drifting copies.
+ *
+ * The default is **derived from the description**, because the description is where the fact
+ * already lives: dozens of tools say "PENDING VERIFICATION: this route has not been observed live"
+ * and a second, hand-maintained flag saying the same thing would be a second thing to forget. An
+ * explicit `evidence` still wins — except that claiming a tool is Observed while its own
+ * description says it has never been observed throws at registration, which is a contradiction
+ * nobody should be able to ship.
+ *
  * ## Annotations
  *
  * MCP's `ToolAnnotations` are hints to the client, not a security boundary — the SDK says so and
@@ -24,33 +44,131 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodRawShape } from "zod";
+import type { ZodRawShape, ZodTypeAny, objectOutputType } from "zod";
 
-/** What a registered handler looks like once the schema has been applied. */
+/**
+ * One registration module = one section of the Stockbit UI.
+ *
+ * `system` is the exception: `status`, `login` and `logout` are how a user finds out what is wrong,
+ * so they are never filtered out of a profile.
+ */
+export const FAMILIES = [
+  "system",
+  "market",
+  "bandarmology",
+  "analysis",
+  "company",
+  "fundamentals",
+  "insider",
+  "corpaction",
+  "stream",
+  "screener",
+  "account",
+  "chartbit",
+  "alerts",
+  "pine",
+  "workflows",
+  "trading",
+  "eipo",
+] as const;
+export type Family = (typeof FAMILIES)[number];
+
+/** How a tool's field mapping is known. Defined once in `CONTEXT.md`; this is the machine copy. */
+export type Evidence = "observed" | "read-back" | "projected";
+
+/** `_meta` keys. Namespaced because `_meta` is shared with the client and the SDK. */
+export const FAMILY_META_KEY = "stockbit-mcp/family";
+export const EVIDENCE_META_KEY = "stockbit-mcp/evidence";
+
+/**
+ * A description that says, in this project's own words, that nobody has seen this route answer.
+ *
+ * Kept broad on purpose: the phrasing varies across modules ("PENDING VERIFICATION", "Pending
+ * verification", "PENDING:", "has not been observed live"), and a marker that only matched one
+ * spelling would silently let the others through as Observed.
+ */
+const NEVER_OBSERVED = /PENDING[ _]?VERIFICATION|PENDING:|(has|have) not been observed/i;
+
+/** What a registered handler looks like once the schema has been applied and the type forgotten. */
 export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
 
+/** The handler a caller writes: its argument is typed from the shape, exactly as the SDK types it. */
+export type TypedHandler<S extends ZodRawShape> = (
+  args: objectOutputType<S, ZodTypeAny>,
+) => Promise<unknown>;
+
+/** Per-tool overrides. `evidence` overrides the family default; the rest are MCP annotations. */
+export interface ToolOptions extends ToolAnnotations {
+  evidence?: Evidence;
+}
+
+/**
+ * Which families and tools a server instance registers.
+ *
+ * Structural on purpose so `_profile.ts` can own the parsing without this module importing it —
+ * registration must not depend on configuration.
+ */
+export interface ToolProfile {
+  /** What to call this profile in an error message or in `status`. */
+  label: string;
+  allows(family: Family, name: string): boolean;
+}
+
+/** One registered tool, as the surface recorder and the doc generator see it. */
+export interface ToolRecord {
+  name: string;
+  family: Family;
+  evidence: Evidence;
+  kind: "read" | "write";
+  description: string;
+  annotations: ToolAnnotations;
+  inputs: { name: string; required: boolean }[];
+}
+
 export interface Definer {
-  /**
-   * A tool that only reads. Registered, and reachable from `workflow_run`.
-   */
-  read(name: string, description: string, shape: ZodRawShape, handler: ToolHandler): void;
+  /** The family everything registered through this definer belongs to. */
+  readonly familyName: Family;
+
+  /** A child definer for one family, sharing this one's handler map, write list and skip list. */
+  family(name: Family, options?: { evidence?: Evidence }): Definer;
+
+  /** A tool that only reads. Registered, and reachable from `workflow_run`. */
+  read<S extends ZodRawShape>(
+    name: string,
+    description: string,
+    shape: S,
+    handler: TypedHandler<S>,
+    options?: { evidence?: Evidence },
+  ): void;
+
   /**
    * A tool that changes something. Registered, and deliberately NOT reachable from `workflow_run`.
    *
-   * `annotations` overrides the defaults below per tool: an order is destructive and
+   * `options` overrides the annotation defaults per tool: an order is destructive and
    * non-idempotent, a watchlist add is neither, and a Chartbit drawing is reversible in the user's
    * own UI. Saying so accurately is the point — marking everything destructive teaches a client to
    * ignore the flag.
    */
-  write(
+  write<S extends ZodRawShape>(
     name: string,
     description: string,
-    shape: ZodRawShape,
-    handler: ToolHandler,
-    annotations?: ToolAnnotations,
+    shape: S,
+    handler: TypedHandler<S>,
+    options?: ToolOptions,
   ): void;
-  /** The names registered as writes, for the guard test and for `server.ts`'s instructions. */
+
+  /** The names registered as writes, for the guard test and for the instructions. */
   writeNames(): string[];
+
+  /** Every name actually registered, in registration order. */
+  names(): string[];
+
+  /** Names a profile kept out. Empty when the profile is `all`. */
+  skippedNames(): string[];
+
+  /** Everything registered, with its family, evidence and shape. Feeds `docs/TOOLS.md`. */
+  records(): ToolRecord[];
+
   /**
    * Ask the human directly, when the client can.
    *
@@ -63,7 +181,21 @@ export interface Definer {
    * answers "unavailable" rather than throwing when the client advertises no elicitation support,
    * because a client that cannot ask must not become a client that cannot trade.
    */
-  elicit?(message: string): Promise<"accepted" | "declined" | "unavailable">;
+  elicit?(
+    message: string,
+    prompt?: { title?: string; description?: string },
+  ): Promise<"accepted" | "declined" | "unavailable">;
+}
+
+/** Everything the definers of one server share. */
+interface Shared {
+  server: McpServer;
+  handlers: Map<string, ToolHandler>;
+  writes: string[];
+  registered: string[];
+  skipped: string[];
+  records: ToolRecord[];
+  profile?: ToolProfile;
 }
 
 /**
@@ -73,52 +205,148 @@ export interface Definer {
  * keeps the workflow engine's view and this module's decision about what belongs in it in one
  * place — the `read`/`write` call itself.
  */
-export function makeDefiner(server: McpServer, handlers: Map<string, ToolHandler>): Definer {
-  const writes: string[] = [];
+export function makeDefiner(
+  server: McpServer,
+  handlers: Map<string, ToolHandler>,
+  options: { profile?: ToolProfile } = {},
+): Definer {
+  const shared: Shared = {
+    server,
+    handlers,
+    writes: [],
+    registered: [],
+    skipped: [],
+    records: [],
+    profile: options.profile,
+  };
+  return makeScoped(shared, "system", undefined);
+}
+
+function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence | undefined): Definer {
+  const resolveEvidence = (name: string, description: string, explicit?: Evidence): Evidence => {
+    const looksUnobserved = NEVER_OBSERVED.test(description);
+    if (explicit) {
+      if (looksUnobserved && explicit !== "projected") {
+        throw new Error(
+          `Tool ${JSON.stringify(name)} is declared evidence "${explicit}" but its own description ` +
+            `says it has not been observed live. One of the two is wrong.`,
+        );
+      }
+      return explicit;
+    }
+    if (looksUnobserved) return "projected";
+    return familyEvidence ?? "observed";
+  };
+
+  const shapeInputs = (shape: ZodRawShape): ToolRecord["inputs"] =>
+    Object.entries(shape).map(([name, schema]) => ({
+      name,
+      required: !(schema as { isOptional?: () => boolean }).isOptional?.(),
+    }));
 
   const register = (
+    kind: "read" | "write",
     name: string,
     description: string,
     shape: ZodRawShape,
     handler: ToolHandler,
     annotations: ToolAnnotations,
-  ): void => {
-    server.registerTool(
+    evidence: Evidence,
+  ): boolean => {
+    // `system` is never skippable: it is how a user finds out why everything else is missing.
+    if (familyName !== "system" && shared.profile && !shared.profile.allows(familyName, name)) {
+      shared.skipped.push(name);
+      return false;
+    }
+    shared.server.registerTool(
       name,
-      { description, inputSchema: shape, annotations },
+      {
+        description,
+        inputSchema: shape,
+        annotations,
+        _meta: { [FAMILY_META_KEY]: familyName, [EVIDENCE_META_KEY]: evidence },
+      },
       handler as never,
     );
+    shared.registered.push(name);
+    shared.records.push({
+      name,
+      family: familyName,
+      evidence,
+      kind,
+      description,
+      annotations,
+      inputs: shapeInputs(shape),
+    });
+    return true;
   };
 
   return {
-    read(name, description, shape, handler) {
-      register(name, description, shape, handler, {
-        readOnlyHint: true,
-        destructiveHint: false,
-        // Every read here goes to Stockbit's API, whose responses are not enumerable in advance.
-        openWorldHint: true,
-      });
-      handlers.set(name, handler);
+    familyName,
+
+    family(name, options) {
+      return makeScoped(shared, name, options?.evidence);
     },
 
-    write(name, description, shape, handler, annotations) {
-      register(name, description, shape, handler, {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: true,
-        ...annotations,
-      });
-      writes.push(name);
+    read(name, description, shape, handler, options) {
+      const evidence = resolveEvidence(name, description, options?.evidence);
+      const registered = register(
+        "read",
+        name,
+        description,
+        shape,
+        handler as ToolHandler,
+        {
+          readOnlyHint: true,
+          destructiveHint: false,
+          // Every read here goes to Stockbit's API, whose responses are not enumerable in advance.
+          openWorldHint: true,
+        },
+        evidence,
+      );
+      if (registered) shared.handlers.set(name, handler as ToolHandler);
+    },
+
+    write(name, description, shape, handler, options) {
+      const { evidence: explicit, ...annotations } = options ?? {};
+      const evidence = resolveEvidence(name, description, explicit);
+      const registered = register(
+        "write",
+        name,
+        description,
+        shape,
+        handler as ToolHandler,
+        {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+          ...annotations,
+        },
+        evidence,
+      );
+      if (registered) shared.writes.push(name);
       // Deliberately no `handlers.set`. See the module note: this is the whole mechanism.
     },
 
     writeNames() {
-      return [...writes].sort();
+      return [...shared.writes].sort();
     },
 
-    async elicit(message: string) {
-      const inner = (server as unknown as { server?: ElicitCapableServer }).server;
+    names() {
+      return [...shared.registered];
+    },
+
+    skippedNames() {
+      return [...shared.skipped];
+    },
+
+    records() {
+      return [...shared.records];
+    },
+
+    async elicit(message, prompt) {
+      const inner = (shared.server as unknown as { server?: ElicitCapableServer }).server;
       if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) return "unavailable";
       try {
         const result = await inner.elicitInput({
@@ -128,8 +356,8 @@ export function makeDefiner(server: McpServer, handlers: Map<string, ToolHandler
             properties: {
               confirm: {
                 type: "boolean",
-                title: "Place this order?",
-                description: "Yes places it on the exchange. There is no undo.",
+                title: prompt?.title ?? "Place this order?",
+                description: prompt?.description ?? "Yes places it on the exchange. There is no undo.",
               },
             },
             required: ["confirm"],

@@ -48,7 +48,7 @@ import { scan, symbolOf, type UniverseSource } from "../analysis/scan.js";
 import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
-import { makeDefiner } from "./_define.js";
+import { makeDefiner, type Definer, type ToolHandler, type ToolProfile } from "./_define.js";
 import { registerStreamTools } from "./stream.js";
 import { registerCompanyTools } from "./company.js";
 import { registerFundamentalsTools } from "./fundamentals.js";
@@ -139,42 +139,41 @@ function foldSummary(fold: Fold) {
   };
 }
 
-export function registerTools(server: McpServer): void {
+export function registerTools(server: McpServer, options: { profile?: ToolProfile } = {}): Definer {
   /**
-   * Every tool handler registered below, so `workflow_run` can call them.
+   * Every read tool registered below, so `workflow_run` can call them.
    *
-   * Captured by intercepting `server.tool` rather than by maintaining a second table: a hand-kept
-   * list would drift the first time a tool was renamed, and the workflow would fail at run time
-   * naming a tool that no longer exists. The interception is undone at the end of this function so
-   * nothing outside it sees a patched server.
+   * This used to be filled by monkey-patching `server.tool` and capturing whatever went past.
+   * That captured writes as readily as reads — the only reason a recipe could not place an order
+   * was that no order tool existed yet — and it meant the tool surface could not be described
+   * without starting a server. Now there is one door: `define.read` puts a handler in this map and
+   * `define.write` never does.
    */
-  const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
+  const handlers = new Map<string, ToolHandler>();
+
+  const define = makeDefiner(server, handlers, { profile: options.profile });
 
   /**
-   * The read/write registration pair.
+   * One scoped definer per section of this file, so every tool declares the family it belongs to.
    *
-   * `define.read` adds a tool to `handlers`; `define.write` deliberately does not, so a saved
-   * workflow recipe cannot reach a tool that changes anything. See `src/tools/_define.ts` — that
-   * split is the whole mechanism, enforced by construction rather than by a list to remember.
-   *
-   * The families below register through it. The older tools in this file still use `server.tool`
-   * and are captured by the interception; both routes end up in the same map.
+   * The sections were already there as comment banners; this makes them mean something — it is
+   * what `STOCKBIT_TOOLS` filters on and what `docs/TOOLS.md` groups by.
    */
-  const define = makeDefiner(server, handlers);
-
-  const realTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
-  (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
-    const name = args[0] as string;
-    const handler = args[args.length - 1];
-    if (typeof handler === "function") {
-      handlers.set(name, handler as (a: Record<string, unknown>) => Promise<unknown>);
-    }
-    return realTool(...args);
-  };
+  const defBandar = define.family("bandarmology");
+  const defAlerts = define.family("alerts");
+  const defPine = define.family("pine");
+  const defChartbit = define.family("chartbit");
+  const defAnalysis = define.family("analysis");
+  const defMarket = define.family("market");
+  const defFundamentals = define.family("fundamentals");
+  // Account READS were confirmed live on 2026-08-09 (the index/detail split, the screener GET).
+  // The account WRITES are Read-back and get their own scope where they register.
+  const defAccount = define.family("account");
+  const defWorkflows = define.family("workflows");
 
   /* ------------------------------ broker / bandar ------------------------------ */
 
-  server.tool(
+  defBandar.read(
     "broker_summary",
     "Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with " +
       "foreign/local/govt classification. This is the core bandarmology signal — TradingView has " +
@@ -236,7 +235,7 @@ export function registerTools(server: McpServer): void {
       ),
   );
 
-  server.tool(
+  defBandar.read(
     "broker_distribution",
     "Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out " +
       "BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers on the left, " +
@@ -364,7 +363,7 @@ export function registerTools(server: McpServer): void {
 
   /* ----------------------------------- alerts ----------------------------------- */
 
-  server.tool(
+  defAlerts.read(
     "alert_create",
     "Create a price or indicator alert on an IDX stock, stored on this machine.\n" +
       "The condition uses the SAME grammar as `pine_script` signals and is evaluated with the same " +
@@ -418,7 +417,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAlerts.read(
     "alert_list",
     "List the alert rules stored on this machine, with when each last fired.",
     { symbol: z.string().optional().describe("Only rules for this ticker") },
@@ -433,7 +432,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAlerts.read(
     "alert_delete",
     "Delete an alert rule by id, or disable it instead with `disable_only`.",
     {
@@ -453,7 +452,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAlerts.read(
     "alert_check",
     "Evaluate stored alert rules against current Stockbit bars and report which fired.\n" +
       "Fetches only the symbols with rules, and only as much history as the slowest indicator needs. " +
@@ -521,7 +520,7 @@ export function registerTools(server: McpServer): void {
 
   /* --------------------------------- pine script --------------------------------- */
 
-  server.tool(
+  defPine.read(
     "pine_script",
     "Generate TradingView Pine Script v6 for an IDX stock — indicators, support/resistance, " +
       "signals, alert conditions, or a backtestable strategy.\n" +
@@ -642,7 +641,7 @@ export function registerTools(server: McpServer): void {
 
   /* --------------------------------- the browser --------------------------------- */
 
-  server.tool(
+  defChartbit.read(
     "stockbit_web",
     "Check whether Stockbit is already open in the user's browser, and open it if it is not.\n" +
       "Use this when the user should be LOOKING at Stockbit — before walking them through a chart, " +
@@ -685,7 +684,7 @@ export function registerTools(server: McpServer): void {
 
   /* ------------------------------ charts & technicals ------------------------------ */
 
-  server.tool(
+  defAnalysis.read(
     "technicals",
     "Technical indicator readings for an IDX stock, computed from daily bars: SMA/EMA, RSI, MACD, " +
       "Bollinger Bands, ATR, and support/resistance levels found by pivot clustering.\n" +
@@ -743,7 +742,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAnalysis.read(
     "price_chart",
     "Candlestick chart for an IDX stock, ALWAYS rendered as an SVG: daily candles with volume, " +
       "optional overlays (SMA/EMA/Bollinger) and sub-panels (RSI, MACD), plus support/resistance " +
@@ -927,7 +926,7 @@ export function registerTools(server: McpServer): void {
 
   /* ---------------------------------- quotes ---------------------------------- */
 
-  server.tool(
+  defMarket.read(
     "quote",
     "Real-time quote for an IDX symbol: last price, change, and best bid/offer. Also resolves the " +
       "symbol's internal company id.",
@@ -935,7 +934,7 @@ export function registerTools(server: McpServer): void {
     async (a) => runTool(() => core.getQuote(a.symbol)),
   );
 
-  server.tool(
+  defMarket.read(
     "top_movers",
     "Top gainers, losers, or most-active IDX stocks (hotlist). Returns an empty list when the " +
       "market is closed — that is expected, not an error.",
@@ -946,14 +945,14 @@ export function registerTools(server: McpServer): void {
     async (a) => runTool(() => core.getTopMovers(a.type, a.limit ?? 25)),
   );
 
-  server.tool(
+  defMarket.read(
     "trending",
     "Trending IDX stocks right now (community-driven).",
     {},
     async () => runTool(() => core.getTrending()),
   );
 
-  server.tool(
+  defMarket.read(
     "sectors",
     "List IDX sectors (id, name).",
     {},
@@ -962,7 +961,7 @@ export function registerTools(server: McpServer): void {
 
   /* --------------------------------- price feed --------------------------------- */
 
-  server.tool(
+  defMarket.read(
     "intraday_prices",
     "Intraday minutely close-price series for a symbol (the basis for volume/price-move signals).",
     {
@@ -972,14 +971,14 @@ export function registerTools(server: McpServer): void {
     async (a) => runTool(() => core.getIntradayPrices(a.symbol, a.interval ?? 1)),
   );
 
-  server.tool(
+  defMarket.read(
     "price_performance",
     "Multi-timeframe price performance (1D/1W/1M/…): close, high, low, and % change per timeframe.",
     { symbol: z.string().describe("IDX ticker") },
     async (a) => runTool(() => core.getPricePerformance(a.symbol)),
   );
 
-  server.tool(
+  defMarket.read(
     "orderbook",
     "Full order-book depth ladder for a symbol.",
     { symbol: z.string().describe("IDX ticker") },
@@ -988,21 +987,21 @@ export function registerTools(server: McpServer): void {
 
   /* -------------------------------- fundamentals -------------------------------- */
 
-  server.tool(
+  defFundamentals.read(
     "keystats",
     "Key statistics for a company (valuation, size, performance metrics).",
     { symbol: z.string().describe("IDX ticker") },
     async (a) => runTool(() => core.getKeystats(a.symbol)),
   );
 
-  server.tool(
+  defFundamentals.read(
     "ratios",
     "Financial ratios for a company.",
     { symbol: z.string().describe("IDX ticker") },
     async (a) => runTool(() => core.getRatios(a.symbol)),
   );
 
-  server.tool(
+  defFundamentals.read(
     "financials",
     "Financial statements (structured tables; the large HTML report is stripped). data_type/" +
       "report_type/statement_type are integer selectors matching Stockbit's UI toggles.",
@@ -1025,7 +1024,7 @@ export function registerTools(server: McpServer): void {
 
   /* ---------------------------------- sentiment ---------------------------------- */
 
-  server.tool(
+  defFundamentals.read(
     "sentiment_stream",
     "Recent community posts mentioning a symbol (sentiment/news proxy — not price data).",
     {
@@ -1037,7 +1036,7 @@ export function registerTools(server: McpServer): void {
 
   /* ------------------------------- chart layout ------------------------------- */
 
-  server.tool(
+  defChartbit.read(
     "chart_settings",
     "Read the user's saved chart CONFIGURATION — theme, chart properties, drawing-toolbar state, " +
       "last-used resolution.\n" +
@@ -1052,7 +1051,7 @@ export function registerTools(server: McpServer): void {
 
   /* ---------------------- backtesting, patterns & screening ---------------------- */
 
-  server.tool(
+  defAnalysis.read(
     "backtest",
     "Run a trading strategy over Stockbit's own daily history and report what it would actually " +
       "have done: every trade, an equity curve, and metrics (return, CAGR, Sharpe, max drawdown, " +
@@ -1124,7 +1123,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAnalysis.read(
     "strategy_compare",
     "Run every built-in strategy over ONE stock's history and rank them — the bars are fetched once " +
       "for all nine, so this costs the same as a single backtest.\n" +
@@ -1173,7 +1172,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAnalysis.read(
     "patterns",
     "Candlestick patterns on an IDX stock's daily bars — 16 classic formations with the prior trend " +
       "they were read against.\n" +
@@ -1215,7 +1214,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAnalysis.read(
     "timeframe_alignment",
     "Whether the daily, weekly and monthly views of a stock agree, and what each one can actually " +
       "support.\n" +
@@ -1241,7 +1240,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAnalysis.read(
     "scan",
     "Run a condition across many IDX stocks at once — alert_check for stocks you have no rules for.\n" +
       "COST: bars are the expensive part. Throughput is capped at roughly 6.6 upstream requests a " +
@@ -1313,7 +1312,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defMarket.read(
     "price_bands",
     "The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock.\n" +
       "A stock at its ARA has no seller at any price and one at its ARB has no buyer — \"1,200 and " +
@@ -1326,7 +1325,7 @@ export function registerTools(server: McpServer): void {
   );
 
 
-  server.tool(
+  defAccount.read(
     "watchlist",
     "The user's own Stockbit watchlists, and the symbols in one.\n" +
       "Call with no arguments to list them; pass `id` to read a list's contents. This is usually the " +
@@ -1353,7 +1352,7 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  server.tool(
+  defAccount.read(
     "screener",
     "Stockbit's stock screener — the user's own saved screens, and the results of running one.\n" +
       "Call with no arguments to list saved screens; pass `template_id` (and the `type` from the " +
@@ -1389,7 +1388,7 @@ export function registerTools(server: McpServer): void {
 
   /* ---------------------------------- synthesis ---------------------------------- */
 
-  server.tool(
+  defAnalysis.read(
     "analyze",
     "Weigh several readings of one IDX stock into a single lean — bullish, neutral or bearish — with " +
       "a confidence score and the evidence behind both.\n" +
@@ -1459,18 +1458,18 @@ export function registerTools(server: McpServer): void {
   /* ------------------------------- tool families ------------------------------- */
   // One module per section of the Stockbit UI. They register through `define`, so a read joins the
   // workflow handler map and a write never does.
-  registerStreamTools(define);
-  registerCompanyTools(define);
-  registerFundamentalsTools(define);
-  registerInsiderTools(define);
-  registerMarketTools(define);
-  registerBrokerTools(define);
-  registerCorpactionTools(define);
-  registerScreenerTools(define);
-  registerChartbitTools(define);
-  registerTradingTools(define);
-  registerEipoTools(define);
-  registerAccountWriteTools(define);
+  registerStreamTools(define.family("stream"));
+  registerCompanyTools(define.family("company"));
+  registerFundamentalsTools(define.family("fundamentals"));
+  registerInsiderTools(define.family("insider"));
+  registerMarketTools(define.family("market"));
+  registerBrokerTools(define.family("bandarmology"));
+  registerCorpactionTools(define.family("corpaction"));
+  registerScreenerTools(define.family("screener"));
+  registerChartbitTools(define.family("chartbit"));
+  registerTradingTools(define.family("trading", { evidence: "projected" }));
+  registerEipoTools(define.family("eipo", { evidence: "projected" }));
+  registerAccountWriteTools(define.family("account", { evidence: "read-back" }));
 
   /* --------------------------------- workflows --------------------------------- */
   // Registered last, so every handler above is already captured.
@@ -1507,7 +1506,7 @@ export function registerTools(server: McpServer): void {
     return parsed;
   }
 
-  server.tool(
+  defWorkflows.read(
     "workflow_list",
     "List the saved multi-step workflows and what each one needs.\n" +
       "A workflow runs several tools in one call, always the same way — use it when the user wants " +
@@ -1526,7 +1525,7 @@ export function registerTools(server: McpServer): void {
       })),
   );
 
-  server.tool(
+  defWorkflows.read(
     "workflow_run",
     "Run a saved workflow by name — several tools in one call, the same way every time.\n" +
       "Returns each step's output in order, with the time it took. A step that fails ABORTS the run " +
@@ -1561,6 +1560,5 @@ export function registerTools(server: McpServer): void {
       }),
   );
 
-  // Undo the interception: nothing outside this function should see a patched server.
-  (server as unknown as { tool: unknown }).tool = realTool;
+  return define;
 }
