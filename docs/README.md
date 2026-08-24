@@ -19,6 +19,14 @@ Start at the [README](../README.md). This is everything else.
 | [**Verification status**](VERIFICATION.md) | The evidence ladder, what each family is, what was compared against what, and how to settle a projection. |
 | [**Pending verification**](PENDING-VERIFICATION.md) | What is still guessed, in the order of what goes wrong if the guess is wrong. |
 
+## Installing it somewhere
+
+The [README](../README.md) has copy-paste config for each client. The manifests behind them:
+`server.json` (MCP Registry), `.claude-plugin/` plus `.mcp.json` (Claude Code plugin, which also
+ships the six skills under [`skills/`](../skills/)), and `mcpb/manifest.json` (Claude Desktop
+Extension, built by `npm run build:mcpb`). All four repeat the version number, and
+`test/distribution.test.ts` fails when they stop agreeing.
+
 ## For developers
 
 | | |

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.INo-xious/stockbit-mcp",
+  "title": "Stockbit MCP",
+  "description": "Stockbit (IDX, Indonesia) for AI assistants: bandarmology, quotes, fundamentals, watchlists, portfolio, alerts, chart drawing and confirm-gated order entry through your own account. Unofficial.",
+  "websiteUrl": "https://github.com/INo-xious/stockbit-mcp#readme",
+  "repository": {
+    "url": "https://github.com/INo-xious/stockbit-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "stockbit-mcp",
+      "version": "1.0.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "STOCKBIT_TOOLS",
+          "description": "all (default) | core | a comma-separated list of families or tool names",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "STOCKBIT_TRADING",
+          "description": "off or paper. It can only lower the trading mode, never raise it; turning trading on is done at a terminal.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "STOCKBIT_NO_BROWSER",
+          "description": "1 = never open a browser window",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "STOCKBIT_STORE_DIR",
+          "description": "Where the token store, settings, alerts, charts and the paper ledger live. Defaults to ~/.stockbit.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

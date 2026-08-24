@@ -82,6 +82,11 @@ installable by someone who is not the author.
   inside the Bot API URL — because a `\b` anchor never matches after the letters `bot`.
 - `npm pack` shipped 247 files and 3 MB, including the source tree, the tests and a `dist/` left
   over from an earlier refactor. It now ships 129, checked by an allow-list on every push.
+- **`STOCKBIT_NO_BROWSER` is read truthily**, not as `=== "1"`. The Desktop Extension exposes it as
+  a checkbox, and Claude Desktop substitutes a ticked box into the environment as the string
+  `"true"` — so a user could tick "never open a browser window" and watch one open. `0`, `false`,
+  `no`, `off` and empty mean not suppressed; anything else suppresses, which is the safe way round
+  for a flag whose only job is to refuse.
 
 ### Security
 

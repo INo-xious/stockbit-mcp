@@ -23,6 +23,8 @@ is not enough.
 | `npm run check:pack` | Asserts `npm publish` would ship the build and nothing else. |
 | `npm run docs:tools` | Regenerates `docs/TOOLS.md`. |
 | `npm run docs:images` | Regenerates the README's sample SVGs. |
+| `npm run docs:icon` | Regenerates `mcpb/icon.png`. Committed, but generated — no unreviewable blob. |
+| `npm run build:mcpb` | Builds the Claude Desktop Extension, `stockbit-mcp-<version>.mcpb`. |
 | `npm run dev:mcp` | The server from source, through `tsx`. |
 
 CI runs typecheck, test, build, smoke, check:pack and a `docs/TOOLS.md` freshness check on Ubuntu,

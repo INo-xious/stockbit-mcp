@@ -24,7 +24,8 @@
  *
  *   - `confirm: true` — the caller states the user agreed.
  *   - elicitation, where the client supports it — the user themselves clicks yes.
- *   - `STOCKBIT_NO_BROWSER=1` refuses outright and names the terminal command instead. A headless
+ *   - `STOCKBIT_NO_BROWSER` set to anything but 0/false/no/off refuses outright and names the
+ *     terminal command instead. A headless
  *     box, a CI runner and a locked-down desktop all set it, and all of them mean "not from here".
  *   - a directory lock, so two logins cannot fight over one browser profile.
  *
@@ -49,6 +50,7 @@ import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
 import { stockbitPath } from "../paths.js";
 import { redactValue } from "../redact.js";
+import { browserSuppressed } from "../desktop/browser.js";
 
 /** How long the login lock is held before it is assumed to belong to a dead process. */
 const LOGIN_LOCK_STALE_MS = 20 * 60_000;
@@ -105,7 +107,8 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "progress.\n" +
       "The captured token goes straight to the keychain (or the encrypted file store off macOS). It " +
       "is never returned here and never shown to you.\n" +
-      "Refuses when STOCKBIT_NO_BROWSER=1, and names the terminal command instead. It also refuses " +
+      "Refuses when STOCKBIT_NO_BROWSER is set (to anything but 0/false/no/off), and names the "
+      + "terminal command instead. It also refuses " +
       "if a session is already stored, unless `force: true`.\n" +
       "This does NOT log in to the trading account: that needs a 6-digit PIN typed at the user's own " +
       "terminal via `stockbit-auth trading-login`, and no tool here accepts a PIN.",
@@ -167,9 +170,10 @@ function refusal(reason: string, nextStep: string): ReturnType<typeof jsonResult
 }
 
 async function startLogin(define: Definer, request: LoginRequest) {
-  if (process.env.STOCKBIT_NO_BROWSER === "1") {
+  if (browserSuppressed()) {
     return refusal(
-      "STOCKBIT_NO_BROWSER=1 is set in this server's environment, so it will not open a browser window.",
+      `STOCKBIT_NO_BROWSER=${process.env.STOCKBIT_NO_BROWSER} is set in this server's environment, ` +
+        "so it will not open a browser window.",
       `Run \`${CLI_LOGIN}\` in a terminal instead, then call status. If the machine has no browser at ` +
         "all, `stockbit-auth import-har` imports a login captured in any browser.",
     );

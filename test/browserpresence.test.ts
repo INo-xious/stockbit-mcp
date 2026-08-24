@@ -5,6 +5,7 @@ process.env.STOCKBIT_NO_BROWSER = "1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  browserSuppressed,
   detectStockbit,
   ensureStockbitOpen,
   installedBrowsers,
@@ -67,6 +68,28 @@ test("STOCKBIT_NO_BROWSER suppresses opening entirely", () => {
   // window was launched on someone's machine by running the test suite.
   assert.deepEqual(openUrl("https://stockbit.com/"), { opened: false, via: "suppressed" });
   assert.deepEqual(openUrl("https://stockbit.com/", "Edge"), { opened: false, via: "suppressed" });
+});
+
+test("the opt-out is read truthily, because a Desktop Extension checkbox arrives as \"true\"", () => {
+  // Claude Desktop substitutes a boolean user setting into the environment as a string. An exact
+  // match against "1" would have let someone tick "never open a browser window" and watch one open.
+  const original = process.env.STOCKBIT_NO_BROWSER;
+  try {
+    for (const on of ["1", "true", "TRUE", " True ", "yes", "on"]) {
+      process.env.STOCKBIT_NO_BROWSER = on;
+      assert.equal(browserSuppressed(), true, `${JSON.stringify(on)} should suppress`);
+      assert.equal(openUrl("https://stockbit.com/").via, "suppressed");
+    }
+    for (const off of ["0", "false", "FALSE", "no", "off", "", "   "]) {
+      process.env.STOCKBIT_NO_BROWSER = off;
+      assert.equal(browserSuppressed(), false, `${JSON.stringify(off)} should not suppress`);
+    }
+    delete process.env.STOCKBIT_NO_BROWSER;
+    assert.equal(browserSuppressed(), false, "unset means not suppressed");
+  } finally {
+    // Every later test in this file depends on the suppression being back on.
+    process.env.STOCKBIT_NO_BROWSER = original;
+  }
 });
 
 /* -------------------------------- choosing a browser -------------------------------- */
