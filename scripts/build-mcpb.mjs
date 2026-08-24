@@ -9,16 +9,38 @@
  *
  * Requires `npm run build` to have produced `dist/` (it runs it if it has not).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const stage = join(root, "mcpb", "build");
 
-const run = (cmd, args, cwd = root) =>
-  execFileSync(cmd, args, { cwd, stdio: "inherit", shell: process.platform === "win32" });
+/**
+ * Run one of npm's own CLIs without going through a shell, for the reason spelled out in
+ * `scripts/check-pack.mjs`: npm on Windows is `npm.cmd`, and since the fix for CVE-2024-27980 Node
+ * refuses to spawn a `.cmd` through `execFile`. `npm run` exports `npm_execpath` — the path to
+ * npm's entry script — so the normal route runs that with the Node already executing this file.
+ * The basename is checked because under yarn or pnpm the variable points at THEIR CLI.
+ *
+ * The fallback covers this script being run directly, where the variable is absent, and is the one
+ * path that needs a shell. It uses `execSync` with a fixed command string rather than
+ * `execFileSync` with `shell: true`, which is DEP0190 on Node 24. Only `cwd` varies, and it is a
+ * path this script created.
+ */
+function npm(args, cwd = root) {
+  const options = { cwd, stdio: "inherit" };
+  const cli = process.env.npm_execpath;
+  if (cli && basename(cli) === "npm-cli.js") {
+    execFileSync(process.execPath, [cli, ...args], options);
+    return;
+  }
+  execSync(`npm ${args.join(" ")}`, options);
+}
+
+/** Anything that is not npm — plain executables, safe through `execFile` on every platform. */
+const run = (cmd, args, cwd = root) => execFileSync(cmd, args, { cwd, stdio: "inherit" });
 
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const manifest = JSON.parse(readFileSync(join(root, "mcpb", "manifest.json"), "utf8"));
@@ -34,7 +56,7 @@ if (manifest.version !== pkg.version) {
 
 if (!existsSync(join(root, "dist", "bin", "stockbit-mcp.js"))) {
   console.log("dist/ is missing — building first.");
-  run("npm", ["run", "build"]);
+  npm(["run", "build"]);
 }
 
 // The icon is committed, but it is also generated, so a fresh checkout that lost it still builds.
@@ -75,8 +97,8 @@ writeFileSync(
 // keeps tsx and typescript out of a user-facing archive.
 cpSync(join(root, "package-lock.json"), join(stage, "package-lock.json"));
 console.log("Installing runtime dependencies into the staged extension…");
-run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts"], stage);
+npm(["install", "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts"], stage);
 
 const out = `stockbit-mcp-${pkg.version}.mcpb`;
-run("npx", ["--yes", "@anthropic-ai/mcpb", "pack", stage, join(root, out)]);
+npm(["exec", "--yes", "--", "@anthropic-ai/mcpb", "pack", stage, join(root, out)]);
 console.log(`\n${out} written.`);
