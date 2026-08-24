@@ -26,6 +26,6 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     { instructions: buildInstructions(surface) },
   );
 
-  registerTools(server, { profile: options.profile });
+  registerTools(server, { profile: options.profile, toolCount: surface.tools.length });
   return server;
 }

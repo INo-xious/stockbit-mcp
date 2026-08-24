@@ -17,7 +17,6 @@ import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
 import {
-  decodeJwt,
   forceRefresh,
   hasStoredSession,
   missingSessionMessage,
@@ -27,11 +26,12 @@ import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.js";
 import { securitiesTokenUrlAllowed } from "../src/auth/capture.js";
 import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/settings.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
-import { clearBrowserProfile, readBrowserProfile } from "../src/auth/browserprofile.js";
+import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
-import { logStderr } from "../src/redact.js";
+import { logStderr, redactValue } from "../src/redact.js";
+import { collectStatus, formatStatus } from "../src/status.js";
 
 async function promptSecret(question: string): Promise<string> {
   const rl = createInterface({ input: stdin, output: stdout, terminal: true });
@@ -158,44 +158,25 @@ async function cmdBootstrap(): Promise<void> {
  * available or a round trip is unwanted, and says plainly that it did not check.
  */
 async function cmdStatus(argv: string[]): Promise<void> {
-  const store = getStore();
-  const token = store.get();
-  logStderr(`Backend: ${store.backend}`);
-  const pinned = readBrowserProfile();
-  logStderr(
-    pinned
-      ? `Browser profile: ${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""} (${pinned.browserPath})`
-      : "Browser profile: not pinned — Chartbit drawing needs `stockbit-auth login` to record one.",
-  );
-  // Every slot, not just the main one: "am I logged in?" now has three answers and a user
-  // debugging a portfolio call needs to see which of them is missing.
-  logStderr(`Trading session: ${hasStoredSession("securities") ? "present" : "not set (stockbit-auth trading-login)"}`);
-  logStderr(`e-IPO session:   ${hasStoredSession("eipo") ? "present" : "not set (minted on first use)"}`);
-  const policy = tradingPolicy();
-  logStderr(`Order placing:   ${policy.enabled ? "ENABLED" : "off"} — ${policy.reason}`);
+  // The same report the `status` MCP tool returns. One implementation, so a user reading the
+  // terminal and a model reading the tool result cannot be told two different stories.
+  const live = !argv.includes("--offline");
+  const report = await collectStatus({ live });
 
-  if (!token) {
-    logStderr("Refresh token: NOT set. Run `stockbit-auth login` (or `bootstrap`).");
-    return;
+  if (argv.includes("--json")) {
+    // Redacted on the way out even though `collectStatus` never copies a token in: this output is
+    // what SECURITY.md asks a reporter to paste into a public issue.
+    stdout.write(`${JSON.stringify(redactValue(report), null, 2)}\n`);
+  } else {
+    logStderr(formatStatus(report));
+    if (!live) {
+      logStderr("Validity: NOT CHECKED (--offline). An expiry in the payload does not mean the token still works.");
+    }
   }
 
-  const exp = decodeJwt(token)["exp"];
-  const expiry =
-    typeof exp === "number" ? `expires in ~${((exp - Date.now() / 1000) / 86400).toFixed(1)} day(s)` : "no exp in payload";
-
-  if (argv.includes("--offline")) {
-    logStderr(`Refresh token: present, ${expiry}.`);
-    logStderr("Validity: NOT CHECKED (--offline). An expiry in the payload does not mean the token still works.");
-    return;
-  }
-
-  logStderr(`Refresh token: present, ${expiry}. Checking it against Stockbit…`);
-  try {
-    await forceRefresh();
-    logStderr("Validity: OK — the token refreshed successfully.");
-  } catch (err) {
-    logStderr(`Validity: FAILED — ${err instanceof Error ? err.message : String(err)}`);
-    logStderr("Run `stockbit-auth login` to re-authenticate.");
+  // Exit non-zero when the live check actually ran and failed, so a script can act on it. A missing
+  // session is not a failure of this command — it is the answer, and `nextStep` says what to run.
+  if (live && report.checks.some((c) => c.name === "live check" && c.status === "fail")) {
     process.exit(1);
   }
 }
@@ -450,8 +431,9 @@ async function main(): Promise<void> {
       logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");
-      logStderr("  status      show store backend, token expiry, and whether it still works");
+      logStderr("  status      show store backend, every session, the trading mode and the IDX clock");
       logStderr("              --offline  skip the live validity check");
+      logStderr("              --json     print the whole report as JSON (redacted; safe to paste)");
       logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
       logStderr("              --keep-profile  keep the browser profile (still logged in)");
       logStderr("");

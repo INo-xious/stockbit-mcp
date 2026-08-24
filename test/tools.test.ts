@@ -40,6 +40,8 @@ const WRITES = [
   "chartbit_save",
   "chartbit_study",
   "eipo_order",
+  "login",
+  "logout",
   "order_amend",
   "order_buy",
   "order_cancel",

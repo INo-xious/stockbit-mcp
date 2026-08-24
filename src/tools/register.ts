@@ -49,6 +49,7 @@ import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
 import { makeDefiner, type Definer, type ToolHandler, type ToolProfile } from "./_define.js";
+import { registerSystemTools } from "./system.js";
 import { registerStreamTools } from "./stream.js";
 import { registerCompanyTools } from "./company.js";
 import { registerFundamentalsTools } from "./fundamentals.js";
@@ -139,7 +140,10 @@ function foldSummary(fold: Fold) {
   };
 }
 
-export function registerTools(server: McpServer, options: { profile?: ToolProfile } = {}): Definer {
+export function registerTools(
+  server: McpServer,
+  options: { profile?: ToolProfile; toolCount?: number } = {},
+): Definer {
   /**
    * Every read tool registered below, so `workflow_run` can call them.
    *
@@ -170,6 +174,14 @@ export function registerTools(server: McpServer, options: { profile?: ToolProfil
   // The account WRITES are Read-back and get their own scope where they register.
   const defAccount = define.family("account");
   const defWorkflows = define.family("workflows");
+
+  /* ---------------------------------- the server ---------------------------------- */
+  // `status`, `login`, `logout`. Registered first so they exist even when a profile has filtered
+  // everything else out — they are how a user finds out why.
+  registerSystemTools(define.family("system"), {
+    profileLabel: options.profile?.label ?? "all",
+    ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
+  });
 
   /* ------------------------------ broker / bandar ------------------------------ */
 
