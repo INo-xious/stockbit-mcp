@@ -60,7 +60,19 @@ function check(ok, message) {
 
 async function main() {
   const doc = fromToolsDoc();
-  const expectTools = flag("--expect-tools") ?? doc.tools ?? FALLBACK_TOOLS;
+  // A profile changes the count, and `docs/TOOLS.md` only ever describes the full surface, so an
+  // explicit --expect-tools is required once STOCKBIT_TOOLS is set to anything but `all`.
+  const profile = (process.env.STOCKBIT_TOOLS ?? "").trim().toLowerCase();
+  const profiled = profile !== "" && profile !== "all";
+  const explicit = flag("--expect-tools");
+  if (profiled && explicit === undefined) {
+    console.error(
+      `smoke FAILED — STOCKBIT_TOOLS=${process.env.STOCKBIT_TOOLS} filters the surface, so pass ` +
+        "--expect-tools N with the count that profile should register.",
+    );
+    process.exit(1);
+  }
+  const expectTools = explicit ?? doc.tools ?? FALLBACK_TOOLS;
   const expectPrompts = flag("--expect-prompts") ?? doc.prompts ?? FALLBACK_PROMPTS;
 
   const entry = join(ROOT, "dist", "bin", "stockbit-mcp.js");
@@ -80,6 +92,10 @@ async function main() {
       STOCKBIT_FORCE_FILE_STORE: "1",
       STOCKBIT_STORE_DIR: store,
       STOCKBIT_NO_BROWSER: "1",
+      // Forwarded so a profile can be smoke-tested the way a user would configure it:
+      //   STOCKBIT_TOOLS=core npm run smoke -- --expect-tools 39
+      ...(process.env.STOCKBIT_TOOLS ? { STOCKBIT_TOOLS: process.env.STOCKBIT_TOOLS } : {}),
+      ...(process.env.STOCKBIT_TRADING ? { STOCKBIT_TRADING: process.env.STOCKBIT_TRADING } : {}),
     },
     stderr: "pipe",
   });

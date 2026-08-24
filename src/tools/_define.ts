@@ -166,6 +166,9 @@ export interface Definer {
   /** Names a profile kept out. Empty when the profile is `all`. */
   skippedNames(): string[];
 
+  /** The same, with the family each one would have belonged to, so a refusal can say what to enable. */
+  skipped(): { name: string; family: Family }[];
+
   /** Everything registered, with its family, evidence and shape. Feeds `docs/TOOLS.md`. */
   records(): ToolRecord[];
 
@@ -193,7 +196,7 @@ interface Shared {
   handlers: Map<string, ToolHandler>;
   writes: string[];
   registered: string[];
-  skipped: string[];
+  skipped: { name: string; family: Family }[];
   records: ToolRecord[];
   profile?: ToolProfile;
 }
@@ -255,7 +258,7 @@ function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence
   ): boolean => {
     // `system` is never skippable: it is how a user finds out why everything else is missing.
     if (familyName !== "system" && shared.profile && !shared.profile.allows(familyName, name)) {
-      shared.skipped.push(name);
+      shared.skipped.push({ name, family: familyName });
       return false;
     }
     shared.server.registerTool(
@@ -338,6 +341,10 @@ function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence
     },
 
     skippedNames() {
+      return shared.skipped.map((s) => s.name);
+    },
+
+    skipped() {
       return [...shared.skipped];
     },
 

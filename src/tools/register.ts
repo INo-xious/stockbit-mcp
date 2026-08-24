@@ -1561,7 +1561,19 @@ export function registerTools(
             `No workflow named ${JSON.stringify(a.name)}. Available: ${BUILTIN_WORKFLOWS.map((w) => w.name).join(", ")}`,
           );
         }
-        // Fails before running half the recipe if a step names a tool that no longer exists.
+        // Fails before running half the recipe if a step names a tool that is not registered.
+        // A tool filtered out by STOCKBIT_TOOLS gets its own message: "not registered" reads like a
+        // broken build, and the fix here is one environment variable rather than a bug report.
+        const disabled = new Map(define.skipped().map((s) => [s.name, s.family]));
+        const missing = workflow.steps.find((step) => disabled.has(step.tool));
+        if (missing) {
+          throw new StockbitError(
+            "invalid_param",
+            `Workflow ${JSON.stringify(workflow.name)} needs \`${missing.tool}\`, which is disabled by ` +
+              `STOCKBIT_TOOLS=${options.profile?.label ?? "all"} — enable the ` +
+              `\`${disabled.get(missing.tool)}\` family, or set STOCKBIT_TOOLS=all.`,
+          );
+        }
         validateWorkflow(workflow, new Set(handlers.keys()));
 
         const started = Date.now();
