@@ -160,3 +160,51 @@ test("none of the distribution manifests are shipped to npm", () => {
     );
   }
 });
+
+/* ------------------------- the skills name real tools and real arguments ------------------------- */
+
+/**
+ * Words the skills use that are result fields, modes or English, not tools or arguments.
+ *
+ * Spelled out rather than derived, because the point of the test below is to catch a plausible name
+ * that does not exist — `ownership` for `ownership_composition`, say — and a rule loose enough to
+ * let that through would let anything through.
+ */
+const PROSE_IDENTIFIERS = new Set([
+  // Result fields the skills tell the model to read.
+  "outcome",
+  "summary",
+  "warnings",
+  "inconclusive",
+  "unverified",
+  "readFrom",
+  // Trading modes.
+  "off",
+  "paper",
+  "live",
+]);
+
+test("every tool-shaped name in a skill is a real tool or a real argument", async () => {
+  const { describeSurface } = await import("../src/tools/surface.ts");
+  const surface = describeSurface();
+
+  const known = new Set<string>(PROSE_IDENTIFIERS);
+  for (const tool of surface.tools) {
+    known.add(tool.name);
+    for (const input of tool.inputs) known.add(input.name);
+  }
+
+  const problems: string[] = [];
+  for (const dir of readdirSync(join(ROOT, "skills"))) {
+    const body = readFileSync(join(ROOT, "skills", dir, "SKILL.md"), "utf8");
+    for (const [, identifier] of body.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)) {
+      if (!known.has(identifier)) problems.push(`${dir}: \`${identifier}\``);
+    }
+  }
+
+  assert.deepEqual(
+    problems,
+    [],
+    "a skill names something that is neither a tool nor an argument — a model told to call it will fail",
+  );
+});

@@ -22,7 +22,8 @@ To drive it yourself, or to go deeper on one part:
    anything. A hammer in a downtrend is a signal; a hammer in chop is a candle.
 3. **`timeframe_alignment symbol=…`** — daily against weekly against monthly. A setup that only
    exists on one timeframe is worth saying out loud.
-4. **Fundamentals** — `keystats`, `ratios`, `financials`, `ownership` for the balance-sheet half.
+4. **Fundamentals** — `keystats`, `ratios`, `financials`, `ownership_composition` and
+   `shareholders` for the balance-sheet half.
 5. **`news symbol=…`** — a catalyst, or its absence.
 
 ## Presenting it
