@@ -52,6 +52,13 @@ function script(body: string): string {
  * Reports the three states separately, because they need three different messages. A signed-out
  * Stockbit chart renders an EMPTY WHITE BODY — no login wall, no text — so "blank" and "still
  * loading" are indistinguishable from a screenshot and must be distinguished here.
+ *
+ * `hasChart` alone is not "ready": `activeChart()` returns a real object as soon as the widget shell
+ * mounts, well before the datafeed has delivered a single bar. A screenshot or a shape taken on
+ * `hasChart` alone lands on a chart that reads as ready and paints nothing. `hasBars` closes that gap
+ * by asking the series itself, which is `false` until Stockbit's price/daily response has actually
+ * landed — the wrapping try/catch is because `getSeries` is a further widget-internal call this
+ * script has no control over, and "not ready yet" must never be confused with "the page threw".
  */
 export const READINESS = script(`
   var path = String(location.pathname || "");
@@ -61,11 +68,17 @@ export const READINESS = script(`
   var key = bag ? Object.keys(bag).find(function (k) { return bag[k]; }) : undefined;
   var w = key ? bag[key] : undefined;
   var chart = w && typeof w.activeChart === "function" ? w.activeChart() : undefined;
+  var hasBars = false;
+  try {
+    var series = chart && chart.getSeries ? chart.getSeries() : null;
+    hasBars = Boolean(series && !series.isLoading() && series.barsCount() > 0);
+  } catch (e) { hasBars = false; }
   return {
     loggedOut: loggedOut,
     blank: !loggedOut && bodyText.length === 0,
     widgetKey: key || null,
     hasChart: Boolean(chart),
+    hasBars: hasBars,
     symbol: chart && typeof chart.symbol === "function" ? String(chart.symbol()) : null,
     readyState: document.readyState
   };
@@ -77,16 +90,23 @@ export const READINESS = script(`
  * A single-point tool goes through `createShape`, a multi-point one through `createMultipointShape`;
  * TradingView will not accept a two-point request on the single-point call and answers with `null`
  * rather than throwing, which would surface as "drawn" with nothing on the chart.
+ *
+ * `Promise.resolve(id)` rather than a bare `id`: this library version returns the entity id
+ * asynchronously (a Promise), and returning that unresolved into `evaluateInPage` serialises to `{}`
+ * over CDP's `returnByValue` — silent, since `{}` is still valid JSON. The id this project then
+ * stores as `tvEntityId` is unusable for its one job (`chartbit_clear scope:"ours"` matching it
+ * against a later `chart.getAllShapes()`), so cleanup silently no-ops while reporting success and the
+ * drawing survives on the user's real chart. `Promise.resolve` also covers an older library that
+ * still returns the id synchronously, so this does not have to know which one it is talking to.
  */
 export const CREATE_SHAPE = script(PROLOGUE + `
   var req = SHAPE_REQUEST;
-  var id;
-  if (req.points.length > 1) {
-    id = chart.createMultipointShape(req.points, req.options);
-  } else {
-    id = chart.createShape(req.points[0], req.options);
-  }
-  return { ready: true, id: id === undefined ? null : id, widgetKey: key };
+  var idOrPromise = req.points.length > 1
+    ? chart.createMultipointShape(req.points, req.options)
+    : chart.createShape(req.points[0], req.options);
+  return Promise.resolve(idOrPromise).then(function (id) {
+    return { ready: true, id: id === undefined ? null : id, widgetKey: key };
+  });
 `);
 
 /** Every shape on the chart, with whatever properties TradingView will hand back. */
@@ -147,11 +167,18 @@ export const SET_VIEW = script(PROLOGUE + `
   };
 `);
 
-/** Add an indicator by its TradingView study name. The name is whitelisted before it gets here. */
+/**
+ * Add an indicator by its TradingView study name. The name is whitelisted before it gets here.
+ *
+ * Same `Promise.resolve` as `CREATE_SHAPE`, and for the same reason: `createStudy` also answers with
+ * a Promise in this library version, not the id directly.
+ */
 export const CREATE_STUDY = script(PROLOGUE + `
   var study = STUDY_REQUEST;
-  var id = chart.createStudy(String(study.name), false, false, study.inputs || []);
-  return { ready: true, id: id === undefined ? null : id, widgetKey: key };
+  var idOrPromise = chart.createStudy(String(study.name), false, false, study.inputs || []);
+  return Promise.resolve(idOrPromise).then(function (id) {
+    return { ready: true, id: id === undefined ? null : id, widgetKey: key };
+  });
 `);
 
 /**
