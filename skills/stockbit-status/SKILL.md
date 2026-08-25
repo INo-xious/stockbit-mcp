@@ -1,35 +1,44 @@
 ---
 name: stockbit-status
-description: Check whether the Stockbit session is still valid — token present, days until expiry, and a live check against Stockbit. Use when the user asks "am I still logged in to Stockbit", "has my session expired", or when any stockbit MCP tool starts failing with an auth error.
+description: Check whether the Stockbit session is still valid — main session expiry, whether trading credentials are stored, and the current trading mode. Use when the user asks "am I still logged in to Stockbit", "has my session expired", "is trading on", or when a stockbit MCP tool starts failing with an auth error.
 ---
 
 # Stockbit session status
 
-Report whether the stored refresh token is still alive, and what to do if it is not.
+Report whether the stored session is alive, and what to do if it is not.
 
 ## Run
 
 ```bash
-stockbit-auth status
+stockbit-auth status --json
 ```
 
-If the bin is not on PATH, run it from the repo root: `node dist/bin/stockbit-auth.js status`.
+If the bin is not on PATH, run `node dist/bin/stockbit-auth.js status --json` from the repo root.
 
-Add `--offline` only when the user explicitly wants to skip the network round-trip. Offline reports expiry arithmetic from the stored token — it can say "present" for a token the server has already rejected, so it answers "when does this expire" but never "is this still good".
+Prefer `--json`: it is redacted and safe to paste, and it spares you parsing prose. Add `--offline` when the user only wants expiry arithmetic without a network round-trip — offline can report a token as `stored` that the server would reject, so it answers "when does this expire", never "is this still good".
 
-## Judge by the printed text, not the exit code
+## Read the report
 
-On Windows this command can print its full result correctly and *then* die on a libuv assertion (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`), exiting non-zero. The crash is intermittent and happens after the work is done.
+```jsonc
+{
+  "auth": {
+    "main":       { "stored": true,  "expiresInDays": 7 },  // the market-data session
+    "securities": { "stored": false },                      // trading; optional
+    "eipo":       { "stored": false }                       // minted on first use
+  },
+  "trading": { "mode": "off", "live": false, "enabled": false }
+}
+```
 
-**Parse the output text.** Never report a healthy session as broken because the exit code was non-zero, and never surface the assertion line to the user as though it were the diagnosis.
+- **`auth.main`** is the one every market-data tool depends on. `stored: false`, or a failed live check, means every stockbit tool will fail until the user logs in again — see the `stockbit-auth` skill.
+- **`expiresInDays`** counts down a sliding window. Every refresh pushes it back out, so ordinary use keeps the session alive indefinitely; only a long idle gap forces a new login. Warn when it is under 2.
+- **`auth.securities`** is only needed for portfolio, positions and orders. `stored: false` is the normal, safer state — do not treat it as a problem to fix unless the user asked for trading.
+- **`trading.mode`** is the thing to state plainly. `off` means no orders can be placed at all. If it is `paper`, say so. **If it is live, say that first and clearly** — with `live: true` the order tools reach a real brokerage account.
 
-## Interpret
+Never run `trading-enable`, `trading-login`, or anything else that changes the trading posture as part of a status check. Reporting state and changing state are different jobs, and this one only reports.
 
-| Output | Meaning | What to tell the user |
-|---|---|---|
-| `Validity: OK` | Session live | Logged in. Report the `expires in ~N day(s)` figure. Every refresh slides the window forward, so regular use keeps it alive indefinitely. |
-| `Validity: OK`, expiry < 2 days | Live but closing | Warn that no activity before then means a re-login; a single call resets the window. |
-| `Validity: FAILED`, `HTTP 401`, or negative days | Token expired or revoked | The session is dead and every stockbit tool will fail. Offer to re-authenticate (see the `stockbit-auth` skill). |
-| no token / empty store | Never logged in here, or logged out | Offer to log in. The token store is bound to this machine and user — it cannot be copied from another machine. |
+## Exit codes
 
-Keep the report to two or three sentences: state, days remaining, and the action if one is needed.
+Judge by the report, not the exit code. Current builds exit 0 cleanly, but older Windows builds could print a correct result and then die on a libuv assertion (`UV_HANDLE_CLOSING`) — if you see that, the crash came after the work and the report above it is still valid. Never surface the assertion line as though it were the diagnosis.
+
+Keep the answer to two or three sentences: session state, days remaining, trading mode, and the one action needed if any.
