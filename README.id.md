@@ -2,6 +2,8 @@
 
 **Bawa Claude ke meja trading IDX Anda.**
 
+Accepting donations: [Saweria Link](https://saweria.co/GUBS)
+
 Bandarmologi, quote, orderbook, fundamental, watchlist dan portofolio Anda — dan, hanya kalau Anda
 sendiri yang menyalakannya, order entry yang wajib dikonfirmasi — lewat akun Stockbit Anda sendiri,
 dari Claude Desktop, Claude Code, Cursor, atau MCP client apa pun.
