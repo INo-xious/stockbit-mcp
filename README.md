@@ -2,6 +2,8 @@
 
 **Bring Claude to your IDX trading desk.**
 
+Accepting donations: [Saweria Link](https://saweria.co/GUBS)
+
 Bandarmology, quotes, orderbook, fundamentals, your watchlists and portfolio — and, only if you
 switch it on, confirm-gated order entry — through your own Stockbit account, from Claude Desktop,
 Claude Code, Cursor or any MCP client.
