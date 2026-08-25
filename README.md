@@ -1,267 +1,570 @@
-# stockbit-mcp
+# Stockbit MCP
+
+**Bring Claude to your IDX trading desk.**
 
 Accepting donations: [Saweria Link](https://saweria.co/GUBS)
 
-[Model Context Protocol](https://modelcontextprotocol.io) server for **Stockbit** (Indonesian / IDX
-market) — broker summary / *bandarmology*, quotes, top movers, orderbook, fundamentals, sentiment,
-your portfolio, and your real chart. It talks to the same JSON backends the Stockbit apps use, with
-**your own** session.
+Bandarmology, quotes, orderbook, fundamentals, your watchlists and portfolio — and, only if you
+switch it on, confirm-gated order entry — through your own Stockbit account, from Claude Desktop,
+Claude Code, Cursor or any MCP client.
 
-**Most of it reads. A few things write, and they are the interesting part of this README.** It can
-place an order on the exchange, subscribe to an IPO, draw on your chart, and edit your watchlists —
-each off by default, each behind an explicit per-action confirmation, each verified by reading the
-account back afterwards. If you never turn trading on, this is a read-only market-data server and
-nothing here can reach your money. See [`docs/trading.md`](./docs/trading.md).
+[![npm](https://img.shields.io/npm/v/stockbit-mcp?color=cb3837&logo=npm)](https://www.npmjs.com/package/stockbit-mcp)
+[![CI](https://github.com/INo-xious/stockbit-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/INo-xious/stockbit-mcp/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-> ⚠️ **Unofficial.** Not affiliated with, endorsed by, or associated with Stockbit or TradingView.
-> Automated access may conflict with Stockbit's Terms of Use — you use this at your own risk on your
-> own account. Data is delayed/unofficial and is **not** financial advice.
+English | [Bahasa Indonesia](README.id.md)
 
-## Why an HTTP client (not desktop automation)
+> [!WARNING]
+> **Unofficial and unaffiliated.** This project is not affiliated with, endorsed by or supported by
+> Stockbit, PT Stockbit Sekuritas Digital or the Indonesia Stock Exchange. Nothing it produces is
+> investment advice, and the author is not a licensed adviser.
 
-Stockbit Desktop is a **Tauri (WKWebView)** app — the Chrome-DevTools approach used by TradingView
-MCPs doesn't apply, and isn't needed: the desktop app is a thin client over
-`https://exodus.stockbit.com`. This server is just another client of that API. See
-[`STOCKBIT-API.md`](./STOCKBIT-API.md) for the full reverse-engineered surface.
+> [!IMPORTANT]
+> **What you need.** A Stockbit account you log into yourself with a username and password — Google
+> and Facebook sign-in are broken on Stockbit's own site. Node.js 22 or newer. A Chromium-family
+> browser (Chrome, Edge, Brave, Vivaldi) for the one-time login. `broker_distribution` additionally
+> needs a Rp 10,000,000 balance, which is Stockbit's gate, not this project's.
 
-## Auth model
+> [!NOTE]
+> **Your data stays with you.** This runs on your machine, talks only to Stockbit's own API hosts
+> with your own session, and keeps the refresh token in the macOS Keychain (an encrypted file
+> elsewhere). Nothing is sent to the author. The only channels that leave your machine are the alert
+> webhook and Telegram bot you configure yourself.
 
-Three separate credentials for three separate hosts, each with its own store slot, its own refresh
-chain and its own consequences if leaked:
+> [!CAUTION]
+> **Undocumented API; trading off by default.** This uses the private JSON API behind Stockbit's own
+> apps, which can change without notice. Automated access may conflict with Stockbit's Terms of Use
+> — use it at your own risk, on your own account. Nothing here can place an order until you run
+> `stockbit-auth trading-enable` yourself, at a terminal.
 
-| Host | What it reaches | Credential |
+![Broker-to-broker flow for one stock over a month](docs/images/broker-distribution-sample.svg)
+
+<sub>Broker-to-broker flow, rendered by the server. Synthetic data.</sub>
+
+---
+
+## How it works (and why it is safe to run)
+
+It is an **HTTP client, not a bot.** Every number it reports comes from a JSON endpoint in a closed
+route table — no headless browser scraping pages, no reading data off Stockbit's UI, no polling loop
+you did not start.
+
+- **One interactive login, captured from your own browser.** You sign in on Stockbit's real page;
+  the server reads the refresh token out of the response and stores it. Your password never touches
+  this code.
+- **Three token domains, three separate stores.** `exodus` (market data), `carina` (Stockbit
+  Sekuritas), `api-sekuritas` (e-IPO). Logging out of one leaves the others alone, and the route
+  table decides which credential each request may carry.
+- **Access tokens are never written to disk.** Only the refresh token is stored, and it is rotated
+  on every use.
+- **A closed route table.** 153 permitted request shapes across three hosts, enumerated in
+  `src/http/routes/`. Anything not in that table cannot be requested — `test/transport.test.ts`
+  asserts it, and every one of the 32 non-GET routes is admitted by a named decision record.
+- **Every log and every tool result is redacted.** Tokens, PINs and bot tokens are matched by shape
+  as well as by key name.
+- **A rate limit that behaves like a person.** Three concurrent requests, 150 ms apart.
+- **Trading is a ladder you climb deliberately**: `off` → `stockbit-auth trading-enable --paper` →
+  `--live`. The environment can only move you *down* it. Orders are two steps with a human in the
+  middle, and where your client supports elicitation you are asked directly as well.
+
+```mermaid
+flowchart LR
+  C["Claude Desktop / Code / Cursor"] <-->|MCP over stdio| S["stockbit-mcp<br/>(your machine)"]
+  S -->|market data| E["exodus.stockbit.com"]
+  S -->|portfolio, orders| K["carina.stockbit.com"]
+  S -->|IPO| A["api-sekuritas.stockbit.com"]
+  S -.->|drawing only| B["your logged-in browser"]
+  S -.->|paper mode| L["local ledger"]
+```
+
+## What this tool does not do
+
+- **No PIN handling by any tool.** The six-digit trading PIN is typed at your terminal, used for one
+  request and never stored. If anything asks you for it through an assistant, that is not this.
+- **No order without a ticket.** By default, the write tools also need your confirmation. The only
+  exception is capped `--auto-confirm`, which you must deliberately enable for live trading at a
+  terminal; a model cannot enable it or widen its value cap. The tools take no price or quantity, so
+  what reaches the exchange is exactly what the ticket described.
+- **No auto-resend, no auto-cancel.** When an order's outcome is uncertain the server says so and
+  stops. A resend is how one intention becomes two orders.
+- **Saved workflow recipes cannot write.** Enforced by construction: a write tool is never added to
+  the map recipes look names up in.
+- **No route outside the table.** No day-trade or smart orders, no withdrawals, no deposits, no
+  posting to the stream.
+- **No scraping, and no UI automation for data.** Your own browser is used for three things and
+  nothing else: the one-time login, drawing on your own chart, and opening Stockbit when you ask to
+  look at it. Nothing is ever read out of the page.
+- **Nothing leaves your machine** except to Stockbit, and to channels you configured.
+- **No short selling** — IDX retail has none — and **no financial advice**.
+
+## Prerequisites
+
+| | |
+|---|---|
+| **Stockbit account** | Username and password. Google/Facebook sign-in is broken upstream. |
+| **Node.js** | 22 or newer. (`src/auth/cdp.ts` needs a global `WebSocket`.) |
+| **A browser** | Chromium-family for the one-time login. Or import a HAR from any browser. |
+| **macOS** | The Keychain prompts once when the token is stored. |
+| **Windows** | Run the login in a terminal, or use the `login` tool from your client. |
+| **Linux** | `notify-send` for desktop alerts; the encrypted file store is used instead of a keychain. |
+| **Rp 10,000,000** | Only for `broker_distribution`. Stockbit's gate. Everything else works without it. |
+
+## What it does
+
+**Bandarmology.** `broker_summary`, `broker_distribution`, `broker_activity`, `bandar_detector` —
+who accumulated, who distributed, and who was on the other side of the tape. NET and GROSS, all four
+market boards, ten period windows including year-to-date in a single request. This is the data no
+other market API has, and it is why this project exists.
+
+**Market, company and fundamentals.** Quotes, full orderbook depth, auto-rejection bands, movers,
+daily bars, seasonality, key statistics, ratios, financial statements, ownership, insider activity,
+corporate actions, analyst ratings and peer comparison.
+
+**One analysis engine.** Indicators, 16 candlestick patterns, multi-timeframe alignment, 9 strategy
+presets, backtests with walk-forward validation, universe scans, and TradingView Pine generation —
+all over the same series grammar, so the Pine you paste into TradingView fires on the condition that
+was actually measured.
+
+**Your account.** Watchlists and saved screens, read and edited, with every write verified by
+reading the account back.
+
+**Your chart.** Read and draw on your real Stockbit chart, in your own logged-in browser.
+
+**Automation.** Eight workflows, also offered as MCP prompts. An alert daemon that keeps watching
+while no client is open, delivering to a log, a desktop notification, a webhook and Telegram.
+
+![A daily chart with moving averages, Bollinger bands, RSI and MACD](docs/images/price-chart-sample.svg)
+
+<sub>What `price_chart` returns. Synthetic data.</sub>
+
+### Why not a TradingView MCP?
+
+| | TradingView | Stockbit MCP |
 |---|---|---|
-| `exodus.stockbit.com` | market data, stream, screener, watchlist, Chartbit | the main session |
-| `carina.stockbit.com` | Stockbit Sekuritas: portfolio, cash, orders | a **securities** token, unlocked with your trading PIN |
-| `api-sekuritas.stockbit.com` | e-IPO | its own token, minted from the main login |
+| IDX broker-level flow | none | the core of it |
+| Data access | drives a chart GUI | a JSON API, read directly |
+| Your portfolio | no | yes, with your own session |
+| Order entry | no | yes, confirm-gated and off by default |
+| Indonesian corporate data | thin | financials, ownership, corporate actions, IPO pipeline |
 
-The market-data half:
+## Installation
 
-- A bearer **access token** (24h), minted from a **refresh token** via
-  `POST {exodus}/login/refresh` (refresh token in the `Authorization` header; no reCAPTCHA on refresh).
-- Initial login is OAuth + reCAPTCHA gated, so a human logs in **once**. `stockbit-auth login` drives
-  your own browser over the DevTools Protocol (no extra browser download — Node 24's built-in
-  WebSocket) and captures the refresh token from the login response automatically.
-- The refresh token is stored in the **macOS Keychain** (AES-encrypted file fallback elsewhere).
-  Access tokens are never written to disk. All logs/errors are secret-redacted.
-
-## Setup
+**Claude Code**
 
 ```bash
-npm install
-npm run build
-
-# One-time login. Opens your existing Chrome/Edge/Brave; log into Stockbit normally and the
-# session is captured automatically — no DevTools, no copy-paste.
-node dist/bin/stockbit-auth.js login
-node dist/bin/stockbit-auth.js status   # check backend + expiry
-node dist/bin/stockbit-auth.js doctor   # diagnose browsers + the capture path
+claude mcp add --scope user stockbit -- npx -y stockbit-mcp
 ```
 
-`doctor` checks every stage the login depends on and reports each separately, including a
-**self-test that runs the real capture against a local fixture serving its token from a
-self-closing popup** — no account, credentials, or open market required. See
-[`docs/TESTING-LOGIN.md`](./docs/TESTING-LOGIN.md).
-
-> ⚠️ **Google / Facebook login does not work on Stockbit's website** — in any browser, with or
-> without this tool. Their login page still loads `gapi.auth2`, the Google Sign-In platform Google
-> retired, and never migrated to Google Identity Services; the button opens a popup that renders
-> nothing. **Use username + password.** This is upstream of anything this project can reach.
-
-On macOS, the first login may ask once for permission to update the `stockbit-mcp` Keychain item.
-The server does not grant unrestricted Keychain access, and subsequent token rotations should not
-reset the item's access permissions.
-
-After this single login, the server auto-refreshes indefinitely — you won't log in again until the
-refresh token itself expires. The one interactive login is unavoidable (Stockbit's OAuth + reCAPTCHA
-require a human once); only the *token handling* is automated away.
-
-**Fallback — any browser.** `login` drives a Chromium-family browser over CDP. Firefox removed CDP
-in v141 and Safari exposes no reachable debugging protocol to third parties, so for those, log in
-however you like and import the network log instead:
-
-```bash
-node dist/bin/stockbit-auth.js import-har login.har --shred
-```
-
-Turn on **Preserve log** in DevTools before logging in, and export with the **download** button —
-Chrome's "Copy all as HAR" omits response bodies. A login HAR contains your password, cookies and
-the token in plain text, so `--shred` deletes it after import; the command warns you if you don't.
-
-Or paste a refresh token manually — input is hidden:
-
-```bash
-node dist/bin/stockbit-auth.js bootstrap
-```
-
-### Quick test without a refresh token
-
-If you can only grab the 24h **access** token (the `Bearer eyJ…` on any `/marketdetectors` request),
-run in access-token-only mode — no refresh, stops working at expiry, good for a smoke test:
-
-```bash
-STOCKBIT_ACCESS_TOKEN='eyJ...' node dist/bin/stockbit-mcp.js
-```
-
-For hands-off operation, bootstrap a refresh token instead (above). The refresh token is in the
-**response body** of a fresh login (log out → log in with DevTools Network open, filter `login`),
-not in a request header.
-
-### MCP client registration
-
-Register with your MCP client (e.g. Claude Desktop `mcpServers`):
+**Claude Desktop** — `claude_desktop_config.json`:
 
 ```json
-{
-  "mcpServers": {
-    "stockbit": { "command": "node", "args": ["/absolute/path/to/dist/bin/stockbit-mcp.js"] }
-  }
-}
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
 ```
 
-## How this compares
+On Windows, npx needs a shell:
 
-Two good MCP servers exist for TradingView: [atilaahmettaner/tradingview-mcp](https://github.com/atilaahmettaner/tradingview-mcp)
-(screener + backtesting, Python) and [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp)
-(drives the TradingView desktop app over the Chrome DevTools Protocol). Neither covers IDX in any
-depth, and neither has broker-flow data at all.
+```json
+{ "mcpServers": { "stockbit": { "command": "cmd", "args": ["/c", "npx", "-y", "stockbit-mcp"] } } }
+```
 
-| | atila | tradesdontlie | **stockbit-mcp** |
-|---|---|---|---|
-| **Broker-to-broker flow (*bandarmology*)** | — | — | ✅ *nobody else has this* |
-| IDX coverage | thin | thin | ✅ native |
-| Backtesting + walk-forward | ✅ | — | ✅ |
-| Candlestick patterns | ✅ | — | ✅ |
-| Multi-timeframe | ✅ | — | ✅ (daily→weekly→monthly; see the caveat below) |
-| Universe scan | ✅ | — | ✅ (incl. your own watchlist and saved screens) |
-| Pine generation | — | ✅ | ✅ |
-| Chart rendering | — | ✅ (screenshots) | ✅ (SVG, no browser) |
-| Alerts | — | ✅ | ✅ + a standalone daemon |
-| Drives a desktop app | — | ✅ | — (it drives your **browser**, for drawing only) |
-| Draws on your real chart | — | ✅ | ✅ |
-| Portfolio / order entry | — | — | ✅ (off by default) |
+**Claude Desktop Extension** — download `stockbit-mcp-1.0.0.mcpb` from
+[Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
-**Why not desktop automation.** Stockbit Desktop is a Tauri/WKWebView app, so the CDP approach does
-not apply to it — and it is not needed, because the desktop app is a thin client over the same JSON
-API this server talks to.
+**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools, so use the `core` profile:
 
-Drawing is the exception, and it drives the **browser** you logged in with rather than the desktop
-app. An earlier pass concluded that writing drawings back to Stockbit was a server-side no-op; that
-was correct about the two `/chartbit/{symbol}/layout` routes it probed and wrong about Chartbit as a
-whole — real persistence lives on `/chartbit/charts` and `/chartbit/chart-drawings`, which is where
-the chart page's own save adapter writes. The correction is in
-[`docs/chartbit-drawing.md`](./docs/chartbit-drawing.md) and ADR-0003's Amendment 2; the original
-investigation is kept in `docs/SESSION-2026-08-05.md` rather than quietly dropped.
+```json
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"],
+  "env": { "STOCKBIT_TOOLS": "core" } } } }
+```
 
-## Tools
+**VS Code** — `.vscode/mcp.json`. Its cap is 128 and there are 138 tools:
 
-**Bandarmology** — the thing no other MCP has.
+```json
+{ "servers": { "stockbit": { "type": "stdio", "command": "npx", "args": ["-y", "stockbit-mcp"],
+  "env": { "STOCKBIT_TOOLS": "core" } } } }
+```
 
-| Tool | What it returns |
-|---|---|
-| `broker_summary` | Net buyers/sellers per broker (lots + IDR + foreign/local/govt). Optional `from`/`to` query any historical window — the server aggregates net flow across it in a single request. |
-| `broker_distribution` | Broker-to-broker flow, **always an SVG diagram** written to `~/.stockbit/charts/`, laid out buyer → seller like Stockbit's own view. Each seller bar is that seller's true total. Returns the picture, not a table. Requires a Stockbit balance of Rp 10,000,000. |
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`, same shape as Claude Desktop.
 
-**Strategy & analysis**
+**Codex CLI** — `~/.codex/config.toml`:
 
-| Tool | What it returns |
-|---|---|
-| `backtest` | Every trade a strategy would have taken, an equity curve, and metrics against buy-and-hold over the **same** window. Next-bar fills, stops win ties, gaps fill at the open, ARA/ARB-locked sessions cannot be filled. Optional walk-forward. Read `warnings` before quoting a number. |
-| `strategy_compare` | All nine built-in strategies over one history — one bar fetch — ranked by return *above* buy-and-hold. |
-| `technicals` | Indicator readings plus support/resistance from pivot clustering. |
-| `patterns` | 16 candlestick formations, each with the prior trend it was read against. `confidence` scores the shape, not the outcome. |
-| `timeframe_alignment` | Whether daily, weekly and monthly agree — and, in `limits`, exactly what the data cannot support. |
-| `scan` | One condition across many symbols. Misses distinguish "condition false" from "not enough history yet". |
-| `price_chart` | Candles + volume + overlays + RSI/MACD panels + annotations, as SVG. No browser involved. |
-| `pine_script` | TradingView Pine v6, with Stockbit-derived levels embedded as constants. |
+```toml
+[mcp_servers.stockbit]
+command = "npx"
+args = ["-y", "stockbit-mcp"]
+```
 
-**Alerts** — `alert_create`, `alert_list`, `alert_delete`, `alert_check`, plus a standalone
-`stockbit-alerts` daemon (an MCP server only lives while a client holds it open).
+**Claude Code plugin** (adds six trading-desk skills):
 
-**Market data** — `quote`, `orderbook`, `price_bands` (ARA/ARB + foreign flow), `intraday_prices`,
-`price_performance`, `top_movers`, `trending`, `sectors`.
+```
+/plugin marketplace add INo-xious/stockbit-mcp
+/plugin install stockbit@stockbit-mcp
+```
 
-**Your own account** — `watchlist` (your lists, and what's in them) and `screener` (your saved
-screens, and running one). `scan` can sweep a watchlist directly.
-
-Editing them is separate and confirm-gated: `watchlist_create`, `watchlist_rename`,
-`watchlist_delete`, `watchlist_add`, `watchlist_remove`, `watchlist_favorite`, `screener_save`,
-`screener_delete`, `screener_favorite`. Each reads the account back afterwards and reports what it
-actually saw; deleting a watchlist that still holds symbols refuses once, names the count, and needs
-a second flag. [ADR-0006](./docs/adr/0006-account-writes.md).
-
-**Your portfolio** — `portfolio`, `position`, `cash_balance`, `orders`, `order_detail`,
-`order_history`, `trade_performance`, `trading_info`, `stock_tradable`, `account` (identifiers
-masked before they leave this server). Needs a trading session; see below.
-
-**Trading** — `trading_status`, `order_preview`, then `order_buy` / `order_sell` / `order_amend` /
-`order_cancel`. **Off by default.** Two steps, always: preview builds a ticket and the write tools
-take a ticket id and a confirmation and nothing else, so what reaches the exchange is what you were
-shown. Read [`docs/trading.md`](./docs/trading.md) before turning it on.
-
-**e-IPO** — `eipo_list`, `eipo_detail`, `eipo_status`, `eipo_my_order`, `eipo_price_groups`,
-`eipo_rdn_balance`, `eipo_unboxing`, and `eipo_order_preview` → `eipo_order` under the same switch.
-
-**Fundamentals** — `keystats`, `ratios`, `financials`, `sentiment_stream`.
-
-**Your chart** — `chartbit_open`, `chartbit_draw`, `chartbit_analyze`, `chartbit_study`,
-`chartbit_shapes`, `chartbit_clear`, `chartbit_screenshot`, `chartbit_save`, plus the saved-layout
-REST tools. It draws on the **real** Stockbit chart by driving the browser you logged in with, in a
-visible window, and Stockbit's own auto-save persists it. `chart_settings` and `stockbit_web` are
-still here. See [`docs/chartbit-drawing.md`](./docs/chartbit-drawing.md).
-
-**Workflows** — `workflow_list` / `workflow_run`: seven recipes including `deep_dive`,
-`bandar_watch`, `strategy_check` and `screen_and_dive`.
-
-### One grammar, three consumers
-
-`sma20 crosses above sma50` means exactly one thing here. The same condition is evaluated locally to
-fire an alert, replayed over history by the backtester, run across a universe by `scan`, and emitted
-as Pine for TradingView — all from one registry (`src/analysis/series.ts`) that carries each
-indicator's Pine expression and its local implementation side by side. Written twice, those drift:
-one gets a Wilder-smoothed RSI and the other a simple one, and then the alert fires on a day the
-chart says it should not have.
-
-### What this data cannot do
-
-Stated here rather than discovered at run time:
-
-- **Daily bars only.** Weekly and monthly are resampled from them. There is no 4H/1H/15m OHLC — the
-  intraday feed is a minutely *close-only* series for the current session.
-- **~500 sessions (about two years).** That is ~104 weekly and ~24 monthly bars, so a monthly
-  RSI(14) is reported as `null` rather than computed from a window that has not converged.
-- **Scans cost real time.** Throughput caps at roughly 6.6 upstream requests a second, so a
-  20-symbol moving-average screen takes ~15s and anything using `sma200` takes ~50s. Bar pages are
-  cached for six hours once settled, so a second scan over an overlapping universe is far cheaper.
-- **Walk-forward will usually say `inconclusive`** on real data, because three folds over two years
-  yields single-digit trade counts. That is the honest answer, not a bug.
-
-## Development
+**From source**
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm test            # node --test (redaction, error mapping, refresh rotation, schema drift)
-npm run dev:mcp     # run from source via tsx
+git clone https://github.com/INo-xious/stockbit-mcp && cd stockbit-mcp
+npm ci && npm run build
+node dist/bin/stockbit-mcp.js
 ```
 
-## Status
+`npm i -g stockbit-mcp` avoids the npx cold start on every launch.
 
-Full coverage of what the Stockbit web UI shows, plus confirm-gated trading and live chart drawing.
-The `src/core/` layer is UI-agnostic, which is how the CLI and the standalone **watch/alert daemon**
-exist without duplicating the data layer.
+## Quick start
 
-What is **not** verified: nothing on the trading host or the e-IPO host has been observed against a
-live account, because reading them needs a PIN this project never stores. Field names there are
-projected against candidates read out of Stockbit's own web client, `readFrom` says where each value
-came from, and `docs/PENDING-VERIFICATION.md` lists every guess ordered by what goes wrong if it is
-wrong — including the protocol for the first real order, which is a live gate with the account owner
-watching rather than a test run.
+1. **Install** — one of the above.
+2. **Log in, once.** Say *"log me into Stockbit"* and sign in in the browser window that opens. Or,
+   at a terminal: `npx -y -p stockbit-mcp stockbit-auth login`. No browser? `stockbit-auth
+   import-har` takes a login captured in any browser; `stockbit-auth doctor` diagnoses the rest.
+3. **Restart your client** so it picks up the tools.
+4. **Ask: *"Is my Stockbit MCP working?"*** — Claude calls **`status`**, which reports the version,
+   which sessions exist (never the tokens), the trading mode, where the IDX trading day is in WIB,
+   and the single next command if anything is missing. It answers with no session at all, which is
+   where everyone starts.
+5. **Optional — practise first.** `npx -y -p stockbit-mcp stockbit-auth trading-enable --paper`,
+   then *"buy 1 lot of BBRI on paper"*. No real money, no PIN, and the same protocol as the real
+   thing.
 
-> **Refresh contract** (confirmed via source + live endpoint probe): the main/session token renews at
-> `POST {exodus}/login/refresh` with the refresh token in the `Authorization: Bearer` header and an
-> empty body (see `STOCKBIT-API.md` §3).
->
-> **Rotation: CONFIRMED** against a live account (2026-08-03). Each refresh mints a **new** refresh
-> token with a fresh 7-day expiry, which `parseRefresh` + the store persist immediately. So the
-> single interactive login really is one-time *provided the server runs at least weekly* — the
-> expiry keeps sliding forward. Go idle past the window and a re-login is required.
+## Example prompts
+
+> "analyze BBRI"
+> "who accumulated GOTO between 2026-07-01 and 2026-07-31"
+> "broker distribution for BRMS"
+> "technicals for BBRI"
+> "chart BBRI with bollinger bands and a MACD panel"
+> "give me Pine for BBRI with a golden cross alert"
+> "alert me when BBRI's RSI drops below 30"
+> "run a deep dive on BBRI"
+> "do the morning scan"
+> "draw the support and resistance on BBRI's chart"
+> "which of my watchlist stocks had brokers accumulating yesterday"
+> "size a BBRI position: entry 4100, stop 3900, risk 1% of Rp 50 million"
+
+## How Claude knows which tool to use
+
+| You say… | Claude uses… |
+|---|---|
+| "is this working?" | `status` |
+| "who is accumulating BBRI?" | `broker_summary` → `broker_distribution` |
+| "look at BBRI properly" | the `deep_dive` prompt, or `analyze` |
+| "what moved today?" | `market_session` → `top_movers` → `technicals` |
+| "has this strategy worked?" | `backtest` → `strategy_compare` (with walk-forward) |
+| "scan my watchlist for oversold" | `scan` over `universe: watchlist` |
+| "tell me when BBRI hits 4000" | `alert_create`, then the `stockbit-alerts` daemon |
+| "draw support and resistance" | `chartbit_analyze` → `chartbit_draw` |
+| "how many lots should I buy?" | `position_size` |
+| "buy 2 lots of BBRI" | `trading_status` → `order_preview` → *you confirm* → `order_buy` |
+| "what do I hold?" | `portfolio` → `cash_balance` |
+| "what IPOs are open?" | `eipo_list` → `eipo_detail` |
+| "when does BBRI pay a dividend?" | `dividend_calendar` |
+| "what is the news on GOTO?" | `news` / `stream` |
+
+## Tool reference
+
+**138 tools in 17 families.** The full generated reference — every tool, its evidence, its arguments
+— is [`docs/TOOLS.md`](docs/TOOLS.md).
+
+| Family | Tools | When to use | Evidence |
+|---|---|---|---|
+| [system](docs/TOOLS.md#system) | 3 | Is this working; log in; log out | Observed |
+| [market](docs/TOOLS.md#market) | 18 | Prices, depth, movers, bars, the session | Mixed |
+| [bandarmology](docs/TOOLS.md#bandarmology) | 6 | Who accumulated, who distributed | Mixed |
+| [analysis](docs/TOOLS.md#analysis) | 9 | Indicators, patterns, backtests, charts, sizing | Observed |
+| [company](docs/TOOLS.md#company) | 9 | Profile, ownership, management, peers, ratings | Projected |
+| [fundamentals](docs/TOOLS.md#fundamentals) | 10 | Key stats, ratios, statements, seasonality | Mixed |
+| [insider](docs/TOOLS.md#insider) | 4 | Insider and affiliate transactions | Projected |
+| [corpaction](docs/TOOLS.md#corpaction) | 7 | Dividends, splits, rights, the calendar | Projected |
+| [stream](docs/TOOLS.md#stream) | 7 | Posts, news, research | Projected |
+| [screener](docs/TOOLS.md#screener) | 5 | The catalogue, the presets, running a screen | Projected |
+| [account](docs/TOOLS.md#account) | 11 | Your watchlists and saved screens, and editing them | Mixed |
+| [chartbit](docs/TOOLS.md#chartbit) | 17 | Reading and drawing on your real chart | Observed |
+| [alerts](docs/TOOLS.md#alerts) | 4 | Rules that fire while no client is open | Observed |
+| [pine](docs/TOOLS.md#pine) | 1 | TradingView Pine generation | Observed |
+| [workflows](docs/TOOLS.md#workflows) | 2 | Saved recipes, also offered as prompts | Observed |
+| [trading](docs/TOOLS.md#trading) | 16 | Your brokerage account and order entry | Projected |
+| [eipo](docs/TOOLS.md#eipo) | 9 | The IPO pipeline and subscribing | Projected |
+
+## Verification status
+
+Every tool carries one of three words, and they mean exactly this:
+
+- **Observed** — a real response from a live account was seen, and the code was written against it.
+- **Read-back** — a write whose effect is verified by re-reading the account afterwards. The request
+  body may still be a guess, but a wrong guess shows up as `not-visible`, never as a false success.
+- **Projected** — field names taken from Stockbit's web bundle, never seen on a live response.
+  `readFrom` names the wire key each value came from, and an absent field means "not recognised",
+  not zero.
+
+**Projected is not a warning that something is broken.** It is a statement that nobody has checked
+it, and that the code is built so an unchecked guess fails loudly rather than quietly.
+
+The **trading and e-IPO families have never been observed live** — reading them needs a securities
+session, which needs the account owner's PIN at their own terminal. Per-family detail, with dates
+and what was compared against what, is in [`docs/VERIFICATION.md`](docs/VERIFICATION.md); what is
+still open, and in what order it matters, is in
+[`docs/PENDING-VERIFICATION.md`](docs/PENDING-VERIFICATION.md).
+
+## Safety model
+
+**The switches.** Trading is `off` until you run `stockbit-auth trading-enable --paper` or `--live`
+yourself. A bare `trading-enable` is refused — the two differ by everything. `STOCKBIT_TRADING` can
+only move the mode *down* the ladder (`live` → `paper` → `off`); no value of it turns anything on.
+No module under `src/tools/`, `src/trading/` or `src/eipo/` may write the settings file, and a test
+asserts that.
+
+**The PIN.** Typed at your terminal, used for one request, never stored. No MCP tool accepts one.
+
+**The ticket protocol.** `order_preview` prices and checks the order and returns a `summary` you
+read. The write tools take that ticket id and an optional confirmation, and nothing else. By
+default, the order proceeds only after `confirm: true` or direct MCP elicitation. The server alone
+may waive that per-call step when you deliberately enabled capped live `--auto-confirm`; the model
+must never set `confirm` on your behalf. A ticket expires in two minutes and carries a fingerprint
+that is rechecked before the request goes out.
+
+**Outcomes.** After a write, `outcome` is one of seven classes. `ok` is the only clean success;
+`landed-despite-error` also means the read-back found the order, but the request itself errored.
+Never resend any non-`ok` result:
+
+| `outcome` | Meaning |
+|---|---|
+| `ok` | On the book, confirmed by reading the orders back. |
+| `rejected` | Refused by the exchange. Not working. |
+| `write-failed` | Refused before it left. Nothing was sent. |
+| `not-found-after-error` | The request errored and the book read back clean. |
+| `not-visible` | Accepted, but not found on the read-back. **Do not resend.** |
+| `landed-despite-error` | The request errored and the order is there anyway. |
+| `outcome-unknown` | The state could not be established. **Do not resend.** |
+
+**Audit.** Every order attempt and every account edit appends a line to a log, redacted, whatever
+the outcome — and if that line could not be written, the result says so rather than implying an
+audit trail that does not exist.
+
+**Credential storage.** macOS Keychain where available. Elsewhere an AES-256-GCM file whose key is
+derived from hostname and username: that is **obfuscation, not a vault** — anything running as you
+on your machine can derive the same key. See [`SECURITY.md`](SECURITY.md).
+
+Decision records: [ADR-0004](docs/adr/0004-order-entry.md) (order entry),
+[ADR-0007](docs/adr/0007-auth-tools-in-the-server.md) (login as a tool),
+[ADR-0008](docs/adr/0008-paper-trading.md) (paper mode). Full guide:
+[`docs/trading.md`](docs/trading.md).
+
+## Paper trading
+
+```bash
+stockbit-auth trading-enable --paper          # Rp 100,000,000 to practise with
+stockbit-auth paper-reset --cash 250000000
+```
+
+A local ledger, no exchange, no session, no PIN — and the identical protocol, so nothing about the
+live path is a surprise later. Your portfolio, positions, cash, orders and history are served from
+the ledger while it is on, and every result says `PAPER ACCOUNT — no real money.`
+
+Fills are approximate in three specific ways, stated on every result: close-only minutely data (so
+some real fills are missed), no queue position (so paper is optimistic), and no partial fills. Do
+not backtest against it and believe the number.
+
+## Tool profiles and context management
+
+Every client pays for the whole tool list in the model's context on every turn. `STOCKBIT_TOOLS`
+trims it:
+
+| Value | Effect |
+|---|---|
+| unset or `all` | All 138. |
+| `core` | 40 tools — the questions people actually ask. Fits Cursor's cap. No order writes. |
+| `market,bandarmology` | Those families only. |
+| `core,trading` | Core plus order entry. |
+| `quote,analyze` | Individual tools, mixed freely with families. |
+
+`system` (`status`, `login`, `logout`) is never filtered out — it is how you find out why everything
+else is missing. An unknown value stops the server with a message naming every family, rather than
+silently loading all 138.
+
+**Output sizes.** `analyze` makes about 27 upstream requests and returns 4–8 KB. `broker_summary`
+takes a `limit`. `financials` is large. Chart tools return a base64 SVG *and* a file path. Prefer
+`technicals` when you only need the numbers.
+
+## Alerts and the daemon
+
+An MCP server exists only while a client holds it open, so a rule that fires at 14:20 on a Tuesday
+needs a separate process:
+
+```bash
+npx -y -p stockbit-mcp stockbit-alerts watch      # every 60s during IDX hours
+npx -y -p stockbit-mcp stockbit-alerts check      # one pass
+npx -y -p stockbit-mcp stockbit-alerts test       # exercise every channel
+```
+
+Channels: an append-only log (always, and first — a channel that fails silently is worse than none),
+a desktop notification, a webhook (`STOCKBIT_ALERT_WEBHOOK`, https or localhost only), and Telegram.
+
+For Telegram: get a token from [@BotFather](https://t.me/BotFather), message your bot once, then
+read the numeric chat id from `https://api.telegram.org/bot<token>/getUpdates`. Set
+`STOCKBIT_TELEGRAM_BOT_TOKEN` and `STOCKBIT_TELEGRAM_CHAT_ID` — environment only, because a token on
+the command line is visible to every user on the machine through `ps`.
+
+Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user unit (Linux).
+
+## CLI reference
+
+| Command | |
+|---|---|
+| `stockbit-mcp` | The MCP server. Speaks stdio; your client launches it. |
+| `stockbit-auth login [--fresh-profile]` | One-time browser login. |
+| `stockbit-auth import-har` | Import a login captured in any browser. |
+| `stockbit-auth doctor` | Diagnose browsers, the token store and the capture path. |
+| `stockbit-auth bootstrap` | Paste a refresh token by hand. |
+| `stockbit-auth status [--offline] [--json]` | Everything, redacted. `--json` is safe to paste into an issue. |
+| `stockbit-auth logout [--keep-profile]` | Clear the token and the logged-in browser profile. |
+| `stockbit-auth trading-login [--browser]` | Unlock Stockbit Sekuritas with your PIN. Never stored. |
+| `stockbit-auth trading-status [--offline]` | The trading policy, and whether the session works. |
+| `stockbit-auth trading-enable --paper [--cash N]` | Practise mode. |
+| `stockbit-auth trading-enable --live [--max-order-value N] [--max-lots N] [--symbols A,B] [--auto-confirm]` | Real orders. |
+| `stockbit-auth trading-disable` | Back to off. The session and the ledger are left alone. |
+| `stockbit-auth paper-reset [--cash N]` | Start the paper ledger over. |
+| `stockbit-auth trading-logout` | End the trading session and delete its credential. |
+| `stockbit-alerts watch\|check\|test` | The alert daemon. |
+
+## Files it writes
+
+Everything lives in one directory — `~/.stockbit`, or wherever `STOCKBIT_STORE_DIR` points. Nothing
+is written outside it.
+
+| Path | |
+|---|---|
+| `refresh.enc` | Your session token, AES-256-GCM (off macOS). |
+| `settings.json` | The trading switches. Written by `stockbit-auth`, never by the server. |
+| `paper/ledger.json` | The paper account. |
+| `charts/`, `pine/` | Rendered charts and generated Pine. |
+| `alerts.json`, `alerts.log` | Alert rules, and every alert that fired. |
+| `order-mutations.log` | Every order and IPO attempt, append-only. |
+| `account-mutations.log` | Every watchlist and screener edit, append-only. |
+| `layout-backups/`, `layout-mutations.log` | Pre-write chart snapshots and the write log. |
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `STOCKBIT_TOOLS` | `all` (default), `core`, or a comma-separated list of families and tool names. |
+| `STOCKBIT_STORE_DIR` | Where everything on disk lives. Default `~/.stockbit`. |
+| `STOCKBIT_TRADING` | `off` forces off; `paper` lowers `live` to paper. It can only lower the mode. |
+| `STOCKBIT_BROWSER` | Absolute path to the Chromium binary used for login. |
+| `STOCKBIT_WEB_BROWSER` | Which browser to open Stockbit in, e.g. `"Microsoft Edge"`. |
+| `STOCKBIT_NO_BROWSER=1` | Never open a browser window; `login` refuses and names the CLI. |
+| `STOCKBIT_LOGIN_TIMEOUT_MS` | How long the login capture waits. |
+| `STOCKBIT_ACCESS_TOKEN` | Use this bearer instead of the stored session. Memory only. |
+| `STOCKBIT_FORCE_FILE_STORE=1` | Skip the Keychain and use the encrypted file store. |
+| `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts. |
+| `STOCKBIT_TELEGRAM_BOT_TOKEN`, `STOCKBIT_TELEGRAM_CHAT_ID` | Telegram delivery. |
+| `STOCKBIT_DEBUG=1` | Log response shapes on parse failures. |
+
+## Troubleshooting
+
+| Symptom | |
+|---|---|
+| `status` says no session | Log in. Say *"log me into Stockbit"* or run `stockbit-auth login`. |
+| HTTP 401 after a week away | The refresh token rotates on a sliding 7-day window. Log in again. |
+| Google sign-in does nothing | Broken on Stockbit's own site (deprecated `gapi.auth2`). Use username and password. |
+| Cloudflare challenge on `trading-login` | `stockbit-auth trading-login --browser`. |
+| A blank white Chartbit page | You are signed out in that browser. |
+| `broker_distribution` errors | Stockbit's Rp 10,000,000 balance gate. |
+| Empty movers | Weekend or a holiday. Check `market_session`. |
+| VS Code or Cursor: "too many tools" | Set `STOCKBIT_TOOLS=core`. |
+| Windows: `npx` ENOENT | Use `"command": "cmd", "args": ["/c", "npx", …]`. |
+| Something else | `stockbit-auth doctor`, then `stockbit-auth status --json` — both are safe to paste. |
+
+## Testing
+
+```bash
+npm ci
+npm run typecheck
+npm test          # ~1,160 tests, entirely offline — fetch is stubbed, no network, no skips
+npm run build
+npm run smoke     # starts the built binary over stdio and asks it what it registered
+npm run check:pack
+```
+
+CI runs all of that on Ubuntu, macOS and Windows against Node 22 and 24, plus a dependency audit, an
+offline link check, and `npm run docs:tools && git diff --exit-code docs/TOOLS.md`.
+
+## Architecture
+
+```
+bin/         three entry points: the MCP server, auth, the alert daemon
+src/
+  http/      the closed route table and the transport that enforces it
+  auth/      login capture, the three token stores, refresh with a cross-process lock
+  core/      one module per Stockbit domain — the readers everything else is built on
+  analysis/  indicators, patterns, strategies, backtests, scans, position sizing
+  render/    pure SVG: candles, flow diagrams. No browser.
+  tools/     MCP registration, one module per family
+  trading/   tickets, previews, order submission, the paper ledger
+  eipo/      the IPO pipeline
+  alerts/    rules, the daemon, delivery
+  workflows/ the eight built-in recipes
+```
+
+Three invariants, each enforced by a test rather than a convention:
+
+1. **Nothing can reach a Stockbit host outside the route table** (`test/transport.test.ts`).
+2. **A write tool is never reachable from a saved workflow recipe** — `define.write` does not add to
+   the handler map (`test/tools.test.ts`).
+3. **Nothing that serves a model can write the settings file** (`test/settings.test.ts`).
+
+## Roadmap
+
+A trade journal; rasterising charts to PNG for vision models; Windows DPAPI and Linux libsecret
+credential stores; CSV export; a `stockbit run <tool>` CLI. After that: converting the carina and
+e-IPO families from Projected to Observed, which takes one live session and is the account owner's
+call.
+
+## Contributing · Security
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) ·
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) · [`CONTEXT.md`](CONTEXT.md) (the vocabulary) ·
+[`docs/README.md`](docs/README.md) (the index).
+
+Longer than this page: the [**user guide**](docs/FEATURES.md) walks through every feature and what to
+ask for; [`docs/TOOLS.md`](docs/TOOLS.md) is the generated reference; [`docs/adr/`](docs/adr/README.md)
+records every decision that changed what this server may do.
+
+Please report vulnerabilities privately through GitHub Security Advisories, not a public issue.
+
+## Acknowledgements
+
+**[Garit32](https://github.com/Garit32)** — collaborator, and the author of most of the commits on
+this project's history, including the Windows login capture and browser detection.
+
+[`tradesdontlie/tradingview-mcp`](https://github.com/tradesdontlie/tradingview-mcp) — the polish
+this README was measured against. Stockbit's chart page is built on TradingView's charting library,
+which is why Chartbit works the way it does.
+
+## Disclaimer
+
+This software is for **personal, educational and research use**.
+
+It is **not affiliated with, endorsed by or supported by** Stockbit, PT Stockbit Sekuritas Digital,
+or the Indonesia Stock Exchange. Stockbit's Terms of Use restrict automated access to their
+services, and using this software may conflict with them; **account suspension is a possible
+consequence** and it is yours to weigh. The API it uses is undocumented and can change or break at
+any time without notice.
+
+**Nothing this software produces is investment advice.** The author is not a licensed investment
+adviser and is not registered with OJK. Indicators, backtests, pattern detections and broker-flow
+readings are computations over historical data, not predictions. Backtested results do not predict
+future returns.
+
+**If you enable live trading, this software can send real orders that spend real money.** It is off
+by default. Orders require your explicit confirmation unless you separately opt into capped
+`--auto-confirm`; you remain solely responsible for every order placed through it, including orders
+within a cap you authorised in advance.
+
+You are responsible for complying with Stockbit's terms, IDX rules, and Indonesian law.
+
+Provided under the MIT licence, **without warranty of any kind**.
+
+## License
+
+[MIT](LICENSE) © Marvel Harisson
