@@ -22,6 +22,7 @@
  * only succeeded on a lucky `loadingFinished` retry.
  */
 import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { removeDirWithRetry } from "./tempdir.js";
@@ -32,6 +33,7 @@ import { fileDir, getStore, type StoreSlot } from "./store.js";
 import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
 import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
+import { captureWebSession, saveWebSession } from "./websession.js";
 import { findBrowser, findBrowsers } from "./browsers.js";
 
 // Re-exported so existing importers (and tests) keep their entry point while the rules themselves
@@ -60,6 +62,20 @@ const BROWSER_START_TIMEOUT_MS = 30_000;
  * store and moves with `STOCKBIT_STORE_DIR` — which is how a test gets a profile path that is not
  * the developer's real logged-in one.
  */
+/**
+ * How long to wait for the logged-in page to appear before closing the login browser.
+ *
+ * Bounded rather than generous: this runs after the credential is already stored, so every extra
+ * second is one the user spends watching a browser they were just told they could close.
+ */
+const SESSION_SETTLE_TIMEOUT_MS = 12_000;
+
+/** Grace for the page's own storage writes once it has landed. */
+const SESSION_WRITE_GRACE_MS = 2_000;
+
+/** How long a graceful browser close may take before it is killed instead. */
+const BROWSER_CLOSE_TIMEOUT_MS = 8_000;
+
 export function defaultProfileDir(): string {
   return join(fileDir(), "browser-profile");
 }
@@ -184,9 +200,82 @@ export async function captureViaBrowserLogin(
      * holding live Stockbit session cookies. (Observed: a `--fresh-profile` run left its profile
      * behind every time.)
      */
-    const cleanup = async (): Promise<void> => {
+    /**
+     * Shut the browser down in a way that leaves the profile usable.
+     *
+     * The token is intercepted on the `/auth/v1/login` RESPONSE — the instant the server confirms
+     * the credential, before the page has run the script that turns it into a signed-in session.
+     * Chromium writes its cookie jar and Local Storage lazily, so killing the process here left a
+     * profile with a half-written session: the API token worked, the Chartbit driver opened the same
+     * profile minutes later and was bounced to `/login`, and the user was told to log in again. That
+     * is the "log in every time" complaint, and it is entirely self-inflicted — the message printed
+     * one line earlier already says "you can close the browser window", which is what should happen.
+     *
+     * So: wait for the app to actually land somewhere signed-in, give it a moment to write, then ask
+     * the browser to close, which flushes. `child.kill()` remains the fallback for a browser that
+     * will not go, because refusing to exit must not hang the login.
+     */
+    const flushAndCloseBrowser = async (): Promise<void> => {
+      // Capturing the web session is worth the settle even for a disposable profile — arguably
+      // especially so, because that profile is about to be deleted and the captured session is the
+      // only thing that will survive it.
+      const wantsWebSession = persist && (options.slot ?? "main") === "main";
+      if (!profileIsDisposable || wantsWebSession) {
+        const settleDeadline = Date.now() + SESSION_SETTLE_TIMEOUT_MS;
+        while (Date.now() < settleDeadline) {
+          try {
+            const { targetInfos } = (await cdp.send("Target.getTargets", {}, undefined, 5_000)) as {
+              targetInfos?: Array<{ type?: string; url?: string }>;
+            };
+            const landed = (targetInfos ?? []).some(
+              (t) => t.type === "page" && /stockbit\.com/i.test(t.url ?? "") && !/\/login/i.test(t.url ?? ""),
+            );
+            if (landed) break;
+          } catch {
+            break;
+          }
+          await delay(500);
+        }
+        // Even once the URL is right, the store write that follows it is asynchronous.
+        await delay(SESSION_WRITE_GRACE_MS);
+
+        // Snapshot the browser's own session — cookies and Local Storage — alongside the API token.
+        // They are different credentials for different transports, and keeping only the token is
+        // what made a successful login still land the chart page on `/login`. Best-effort: a login
+        // that captured the token is a successful login whether or not this part works.
+        if (wantsWebSession) {
+          try {
+            const web = await captureWebSession(cdp);
+            if (web) {
+              saveWebSession(web);
+              dbg("web session captured:", web.cookies.length, "cookies,", web.origins.length, "origin(s)");
+            } else {
+              dbg("web session capture found nothing to store");
+            }
+          } catch (err) {
+            dbg("web session capture failed:", err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+
+      try {
+        // A graceful close is what flushes; it also lets Windows release the profile's file handles,
+        // which `removeDirWithRetry` below otherwise has to fight.
+        await cdp.send("Browser.close", {}, undefined, BROWSER_CLOSE_TIMEOUT_MS);
+      } catch {
+        /* fall through to the kill */
+      }
       cdp.close();
-      child.kill();
+
+      const exited = await Promise.race([
+        new Promise<boolean>((res) => child.once("exit", () => res(true))),
+        delay(BROWSER_CLOSE_TIMEOUT_MS).then(() => false),
+      ]);
+      if (!exited) child.kill();
+    };
+
+    const cleanup = async (): Promise<void> => {
+      await flushAndCloseBrowser();
       if (!profileIsDisposable) return;
       if (!(await removeDirWithRetry(profile))) {
         logStderr(

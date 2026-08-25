@@ -28,6 +28,7 @@
  * off by default because `status` is the thing you call when you suspect the network.
  */
 import { getStore, type StoreSlot } from "./auth/store.js";
+import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
 import { decodeJwt, ensureFresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
@@ -85,6 +86,14 @@ export interface StatusReport {
     corrupt?: true;
   };
   market: SessionClock;
+  /**
+   * The BROWSER's Stockbit website session — a different credential from every slot in `auth`.
+   *
+   * Reported separately because conflating them is what made this confusing to diagnose: `auth.main`
+   * could be healthy and refreshing cleanly while the website was logged out, and nothing in the
+   * output said those were different things. Age-based and side-effect free; see `webSessionHealth`.
+   */
+  webSession: WebSessionHealth;
   store: {
     dir: string;
     backend: "keychain" | "file" | "unknown";
@@ -269,12 +278,19 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
+  const web = webSessionHealth();
   let browserPinned: string | null = null;
   try {
     const pinned = readBrowserProfile();
     browserPinned = pinned ? `${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""}` : null;
   } catch {
     browserPinned = null;
+  }
+  if (web.present && !web.likelyValid) {
+    // Distinct from the token slots on purpose: this is the credential Chartbit needs, and it can be
+    // dead while every slot above is perfectly healthy. That combination is exactly what made the
+    // failure so hard to read.
+    checks.push({ name: "website session", status: "warn", detail: web.hint });
   }
   if (!browserPinned) {
     checks.push({
@@ -335,6 +351,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     login: loginStatus(),
     trading,
     market: sessionClock(options.now),
+    webSession: web,
     store: { dir, backend: auth.main.backend, browserPinned },
     checks,
     nextStep: nextStepFor(auth, trading),
@@ -358,6 +375,16 @@ export function formatStatus(report: StatusReport): string {
     `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${report.store.browserPinned ?? "not pinned"}`,
+    `Website session  ${
+      !report.webSession.present
+        ? "not stored — chart drawing needs a login"
+        : report.webSession.ageHours === null
+          ? "stored, age unknown — treat as needing a login"
+          : `${report.webSession.likelyValid ? "stored" : "AGED OUT"}, ${report.webSession.ageHours.toFixed(1)}h old` +
+            (report.webSession.likelyValid
+              ? `, ~${(WEB_SESSION_LIFETIME_HOURS - report.webSession.ageHours).toFixed(1)}h left`
+              : " — a fresh login is needed")
+    }`,
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),

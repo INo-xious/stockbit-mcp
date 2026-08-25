@@ -36,6 +36,7 @@ import type { ChildProcess } from "node:child_process";
 import { CDP } from "../auth/cdp.js";
 import { launchDebuggableBrowser } from "../auth/launch.js";
 import { defaultProfileDir } from "../auth/login.js";
+import { seedWebSession, webSessionHealth } from "../auth/websession.js";
 import { pinnedBrowserExists, readBrowserProfile } from "../auth/browserprofile.js";
 import { fileDir } from "../auth/store.js";
 import { StockbitError } from "../http/errors.js";
@@ -236,6 +237,20 @@ export class ChartbitSession {
     const cdp = await CDP.connect(wsUrl);
     const session = new ChartbitSession(cdp, child, warnings, keepOpen);
     try {
+      // Seed the browser with the session captured at login, before anything navigates. The driver
+      // never learns what is in it — `auth/websession` owns the credential and this only asks it to
+      // apply itself — but the effect is that a profile which has gone stale opens signed in instead
+      // of bouncing to `/login` and demanding another interactive login.
+      try {
+        const seeded = await seedWebSession(session.cdp);
+        if (seeded.seeded && seeded.cookies > 0) {
+          const age = seeded.ageHours === null ? "unknown age" : `${Math.round(seeded.ageHours)}h old`;
+          session.notes.push(`Applied the stored Stockbit web session (${seeded.cookies} cookies, ${age}).`);
+        }
+      } catch {
+        // A profile that is already signed in does not need this at all.
+      }
+
       const tab = await session.openChartTab(options.symbol, options.readyTimeoutMs ?? CHART_READY_TIMEOUT_MS);
       return { session, tab };
     } catch (err) {
@@ -274,6 +289,7 @@ export class ChartbitSession {
     // work) is the frontmost window. Without this, `hasChart`/`symbol` below can both be true while
     // the canvas never painted a single bar — a chart that reads as ready but screenshots as empty.
     await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+    await this.raiseWindow(targetId);
 
     // Page and Runtime only. Never Network or Fetch — see the module note; the driver must not be
     // able to observe the session token it is drawing under.
@@ -291,6 +307,39 @@ export class ChartbitSession {
   }
 
   /**
+   * Raise the OS window, not just the tab inside it.
+   *
+   * `Target.activateTarget` selects the tab within its window; it does nothing about a window that is
+   * minimised or buried behind the user's own work. The point of drawing on the user's REAL chart
+   * rather than rendering a picture is that they can look at it and keep using it, so a window they
+   * cannot see is the feature failing quietly. `windowState: "normal"` un-minimises; sending it on an
+   * already-normal window is a no-op rather than an error.
+   *
+   * Best-effort throughout: a browser that will not raise its own window is not a reason to fail a
+   * draw that otherwise succeeded, so every step swallows its error.
+   */
+  private async raiseWindow(targetId: string): Promise<void> {
+    try {
+      const found = (await this.cdp.send("Browser.getWindowForTarget", { targetId })) as {
+        windowId?: number;
+        bounds?: { windowState?: string };
+      };
+      if (typeof found?.windowId !== "number") return;
+      if (found.bounds?.windowState === "minimized") {
+        await this.cdp.send("Browser.setWindowBounds", {
+          windowId: found.windowId,
+          bounds: { windowState: "normal" },
+        });
+      }
+      // Re-assert focus after the state change; on Windows the un-minimise alone can restore the
+      // window behind whatever was in front of it.
+      await this.cdp.send("Target.activateTarget", { targetId });
+    } catch {
+      // A browser that refuses to raise itself still drew the chart correctly.
+    }
+  }
+
+  /**
    * Poll until the TradingView widget is up and showing the right symbol.
    *
    * The three failure states are reported separately because they need three different messages, and
@@ -301,9 +350,22 @@ export class ChartbitSession {
   private async waitForChart(sessionId: string, symbol: string, timeoutMs: number): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     let last: Readiness | null = null;
+    let lastThrow: string | null = null;
 
     for (;;) {
-      last = await evaluateInPage<Readiness>(this.cdp, sessionId, READINESS);
+      try {
+        last = await evaluateInPage<Readiness>(this.cdp, sessionId, READINESS);
+      } catch (err) {
+        // A page that throws is not a page that failed: for the first second or so of a cold boot
+        // the widget answers `typeof activeChart === "function"` while calling it still throws from
+        // inside TradingView's own bundle. That is "not ready yet" wearing an exception, and it is
+        // exactly what this loop exists to wait out. Keep the reason and retry until the deadline,
+        // so a genuinely broken page still reports something rather than an empty timeout.
+        lastThrow = err instanceof Error ? err.message : String(err);
+        if (Date.now() >= deadline) break;
+        await delay(500);
+        continue;
+      }
       if (last?.loggedOut) {
         throw new StockbitError(
           "auth",
@@ -318,6 +380,20 @@ export class ChartbitSession {
       await delay(500);
     }
 
+    if (last?.shellOnly) {
+      // The document arrived and rendered nothing. That is not "not signed in" and not "still
+      // loading" — it is an app whose own API calls are being refused, which on Stockbit means the
+      // browser profile's session has gone stale even though the CLI's API token is fine. Those are
+      // two different credentials and only one of them is being reported by `status`.
+      throw new StockbitError(
+        "auth",
+        `The chart page for ${symbol} loaded but rendered nothing: the markup is there and its height ` +
+          "is zero, which is what Stockbit does when the browser session is stale and every request " +
+          "behind the page is answered with 401. The API token being valid does not help here — the " +
+          "website session is a SEPARATE credential and cannot be minted from the API one. " +
+          webSessionHealth().hint,
+      );
+    }
     if (last?.blank) {
       throw new StockbitError(
         "auth",
@@ -329,6 +405,7 @@ export class ChartbitSession {
     throw new StockbitError(
       "upstream",
       `The chart for ${symbol} did not finish loading within ${Math.round(timeoutMs / 1000)}s ` +
+        (lastThrow ? `(the page kept throwing: ${lastThrow}) ` : "") +
         `(widget ${last?.widgetKey ? "found" : "not found"}, showing ${last?.symbol ?? "nothing"}` +
         `${last?.hasChart ? `, bars ${last.hasBars ? "loaded" : "not loaded yet"}` : ""}).`,
     );
@@ -356,6 +433,7 @@ interface Readiness {
   hasChart: boolean;
   hasBars: boolean;
   symbol: string | null;
+  shellOnly?: boolean;
   readyState: string;
 }
 

@@ -17,6 +17,7 @@ import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
 import {
+  decodeJwt,
   forceRefresh,
   hasStoredSession,
   missingSessionMessage,
@@ -28,6 +29,7 @@ import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/
 import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
+import { clearWebSession } from "../src/auth/websession.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
@@ -93,9 +95,13 @@ async function cmdImportHar(argv: string[]): Promise<void> {
   }
 
   logStderr(`Found a session token in entry #${report.match.entryIndex} (${report.match.url}).`);
-  const result = await bootstrap(report.match.refresh);
+  const result = await bootstrap(report.match.refresh, { verify: argv.includes("--verify") });
   logStderr(`Stored in: ${result.backend}`);
-  logStderr(`Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — the token may already be stale"}`);
+  logStderr(
+    result.verified
+      ? `Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — the token may already be stale"}`
+      : `Stored${result.accessOk ? "" : " — but the token looks expired"}. Not verified against Stockbit: a test refresh would rotate the token and log you out of the website. Pass --verify to do it anyway.`,
+  );
 
   if (argv.includes("--shred")) {
     try {
@@ -121,27 +127,65 @@ async function cmdLogin(argv: string[]): Promise<void> {
     logStderr("No session captured. You can retry, or use `stockbit-auth bootstrap`.");
     process.exit(1);
   }
-  // Validate by minting a fresh access token from the captured refresh token.
-  resetSession();
+  // Validate WITHOUT spending the token.
+  //
+  // This used to call `forceRefresh()`, and that one line was why a successful login left the user
+  // logged out of the website. Stockbit's refresh endpoint ROTATES: spending a refresh token
+  // invalidates the previous one, and the browser profile that was just logged in holds that
+  // previous one. So the validation step reached back and killed the session it had just validated.
+  // Measured: eight HTTP 401s from exodus.stockbit.com on the very next chart load, `/login/refresh`
+  // among them, and a page rendering a body of zero height — which the Chartbit driver then reported
+  // as "the session is not signed in", sending every diagnosis in the wrong direction.
+  //
+  // The token arrived seconds ago in a live `/auth/v1/login` response. What is worth checking is that
+  // it is a readable, unexpired JWT, and that is a local question. `--verify` keeps the round trip for
+  // anyone who wants it, and now says plainly what it costs.
+  const stored = getStore("main").get();
+  let exp: number | null = null;
   try {
-    await forceRefresh();
-    logStderr("Test refresh: OK ✓  — you're set. Run stockbit-mcp.");
-  } catch (err) {
-    logStderr("Captured a token but the test refresh failed:", String(err));
-    logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+    const claims = stored ? decodeJwt(stored) : null;
+    exp = claims && typeof claims["exp"] === "number" ? (claims["exp"] as number) : null;
+  } catch {
+    exp = null;
+  }
+  if (!stored) {
+    logStderr("Captured a session but nothing reached the store. Tell the maintainer this message.");
     process.exit(1);
+  }
+  if (exp !== null && exp - Math.floor(Date.now() / 1000) <= 0) {
+    logStderr("Captured a token that is already expired. Try logging in again.");
+    process.exit(1);
+  }
+
+  if (argv.includes("--verify")) {
+    resetSession();
+    try {
+      await forceRefresh();
+      logStderr("Test refresh: OK ✓ — note this ROTATED the token, so the browser session is now stale.");
+    } catch (err) {
+      logStderr("Captured a token but the test refresh failed:", String(err));
+      logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+      process.exit(1);
+    }
+  } else {
+    const days = exp === null ? null : Math.floor((exp - Math.floor(Date.now() / 1000)) / 86_400);
+    logStderr(`Session stored${days === null ? "" : ` (valid ~${days} day(s))`} — you're set. Run stockbit-mcp.`);
   }
 }
 
-async function cmdBootstrap(): Promise<void> {
+async function cmdBootstrap(argv: string[]): Promise<void> {
   const token = (await promptSecret("Paste refresh token (input hidden): ")).trim();
   if (!token) {
     logStderr("No token entered. Aborting.");
     process.exit(2);
   }
-  const result = await bootstrap(token);
+  const result = await bootstrap(token, { verify: argv.includes("--verify") });
   logStderr(`Stored in: ${result.backend}`);
-  logStderr(`Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — verify the token / refresh host"}`);
+  logStderr(
+    result.verified
+      ? `Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — verify the token / refresh host"}`
+      : `Stored${result.accessOk ? "" : " — but the token looks expired"}. Not verified against Stockbit: a test refresh would rotate the token and log you out of the website. Pass --verify to do it anyway.`,
+  );
   if (!result.accessOk) process.exit(1);
   logStderr("Bootstrap complete. You can now run stockbit-mcp.");
 }
@@ -185,6 +229,12 @@ async function cmdStatus(argv: string[]): Promise<void> {
 async function cmdLogout(argv: string[]): Promise<void> {
   getStore().clear();
   logStderr("Cleared stored refresh token.");
+
+  // A THIRD copy: the captured web session (cookies + Local Storage) that the Chartbit driver seeds
+  // its browser from. It is a working Stockbit session on its own, so a logout that left it on disk
+  // would not be a logout — the same reasoning that already removes the browser profile below.
+  clearWebSession();
+  logStderr("Cleared the stored browser web session.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
   // Chartbit driver at a browser with no session and no explanation.
@@ -474,7 +524,7 @@ async function main(): Promise<void> {
       await cmdLogin(argv);
       break;
     case "bootstrap":
-      await cmdBootstrap();
+      await cmdBootstrap(argv);
       break;
     case "import-har":
       await cmdImportHar(argv);

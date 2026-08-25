@@ -563,6 +563,58 @@ test(
   },
 );
 
+test(
+  "a widget whose activeChart() throws reads as not-ready, it does not propagate the throw",
+  { skip: browser ? false : "no drivable browser" },
+  async () => {
+    // The boot state that broke every cold chartbit call: for roughly the first second the widget
+    // answers `typeof activeChart === "function"` while CALLING it still throws from inside
+    // TradingView's own bundle. The readiness probe has to read that as "not ready yet". If the
+    // throw escapes, `waitForChart` dies on its first poll and never uses its 45s budget at all.
+    const server: Server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(
+        "<!doctype html><html><body>chart shell<" +
+          "script>window.tvWidget={web:{activeChart:function(){" +
+          "throw new TypeError(\"Cannot read properties of undefined (reading 'activeChart')\");}}};<" +
+          "/script></body></html>",
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const profile = mkdtempSync(join(tmpdir(), "stockbit-chartbit-throw-"));
+    const launched = await launchDebuggableBrowser({ bin: browser!, profileDir: profile, headless: true });
+    const cdp = await CDP.connect(launched.wsUrl);
+    try {
+      const target = (await cdp.send("Target.createTarget", { url: `http://127.0.0.1:${port}/` })) as {
+        targetId: string;
+      };
+      const attached = (await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true })) as {
+        sessionId: string;
+      };
+      await cdp.send("Runtime.enable", {}, attached.sessionId, 5_000).catch(() => {});
+
+      const readiness = await evaluateInPage<{
+        blank: boolean;
+        hasChart: boolean;
+        hasBars: boolean;
+        loggedOut: boolean;
+        symbol: string | null;
+      }>(cdp, attached.sessionId, READINESS);
+
+      assert.equal(readiness.hasChart, false, "a throwing activeChart() is not a chart");
+      assert.equal(readiness.hasBars, false);
+      assert.equal(readiness.symbol, null);
+      assert.equal(readiness.blank, false, "the body has text; this is a boot state, not a signed-out page");
+    } finally {
+      cdp.close();
+      launched.child.kill();
+      server.close();
+      await removeDirWithRetry(profile);
+    }
+  },
+);
+
 after(() => {
   // Nothing persistent to clean beyond the temp store dir, which the OS sweeps.
 });
