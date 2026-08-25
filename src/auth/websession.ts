@@ -34,10 +34,10 @@
  * line. The driver's job stays "open a profile that is already signed in", and it never learns why.
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { fileDir } from "./store.js";
+import { fileDir, writeFileAtomic } from "./store.js";
 import type { CDP } from "./cdp.js";
 
 /** One cookie, in the shape `Storage.setCookies` will take straight back. */
@@ -97,7 +97,11 @@ export function saveWebSession(session: WebSession): void {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", fileKey(), iv);
   const data = Buffer.concat([cipher.update(JSON.stringify(session), "utf8"), cipher.final()]);
-  writeFileSync(sessionPath(), Buffer.concat([iv, cipher.getAuthTag(), data]), { mode: 0o600 });
+  // Atomic, matching the token store: this file has two writers — the login capture and the
+  // post-chart re-capture in `chartbit/driver.ts` — and a reader that hits a partially written file
+  // cannot tell a torn write from a corrupt one. Both decrypt to nothing, both read as "no session",
+  // and the user is asked to log in for no reason. A temp file plus rename removes the window.
+  writeFileAtomic(sessionPath(), Buffer.concat([iv, cipher.getAuthTag(), data]));
 }
 
 export function loadWebSession(): WebSession | null {
@@ -124,7 +128,7 @@ export function loadWebSession(): WebSession | null {
 export function clearWebSession(): void {
   // Truncate rather than unlink, matching `TokenStore.clear` — an empty file and a missing one must
   // read the same way, and truncating cannot fail on a locked directory the way unlink can.
-  if (existsSync(sessionPath())) writeFileSync(sessionPath(), Buffer.alloc(0), { mode: 0o600 });
+  if (existsSync(sessionPath())) writeFileAtomic(sessionPath(), Buffer.alloc(0));
 }
 
 /** Local Storage read/write, kept as literal strings for the same reason the chartbit page scripts are. */

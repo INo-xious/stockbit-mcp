@@ -137,7 +137,12 @@ function filePath(slot: StoreSlot): string {
  * last rename winning; cross-process lock coordination is deferred to M3, when the daemon makes a
  * third writer actually exist.
  */
-function writeFileAtomic(target: string, contents: Buffer): void {
+/**
+ * Exported so `websession.ts` can hold its own credential to the same standard. A plain
+ * `writeFileSync` there would let a concurrent reader observe a half-written file, decrypt-fail, and
+ * report "no session" — which surfaces to the user as a login prompt they did not need.
+ */
+export function writeFileAtomic(target: string, contents: Buffer): void {
   const tmp = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   let fd: number | undefined;
   try {
