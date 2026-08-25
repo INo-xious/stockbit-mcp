@@ -31,13 +31,28 @@
  * can widen its own permissions has no permissions.
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { stockbitDir } from "./paths.js";
+
+/**
+ * Three states, not two.
+ *
+ * `enabled: boolean` could not express paper trading without a second flag beside it, and the
+ * combination "enabled but paper" is exactly the pair of fields that gets read wrong — one of them
+ * on its own says the opposite of the truth. One value, three names, and every reader has to look
+ * at all three.
+ */
+export type TradingMode = "off" | "paper" | "live";
+
+export interface PaperSettings {
+  /** What `paper-reset` starts a fresh ledger with. */
+  startingCashIdr: number;
+}
 
 export interface TradingSettings {
-  /** Master switch. Off unless the account owner turned it on at a terminal. */
-  enabled: boolean;
+  /** Master switch. `off` unless the account owner chose otherwise at a terminal. */
+  mode: TradingMode;
   /** Skip the per-order confirmation. Honoured ONLY when `maxOrderValueIdr` is set. */
   autoConfirm: boolean;
   /** Ceiling on one order's gross value, in IDR. `null` means no cap — and no autoConfirm. */
@@ -46,6 +61,7 @@ export interface TradingSettings {
   allowedSymbols: string[];
   /** Ceiling on lots in one order, whatever the value. */
   maxLotsPerOrder: number;
+  paper: PaperSettings;
 }
 
 export interface ChartbitSettings {
@@ -61,29 +77,33 @@ export interface Settings {
   chartbit: ChartbitSettings;
 }
 
-export const SETTINGS_VERSION = 1;
+/**
+ * 2 since paper trading. A v1 file is migrated on read: `enabled: true` becomes `live`, because
+ * that is what it meant, and anything else becomes `off`.
+ */
+export const SETTINGS_VERSION = 2;
+
+/** A paper ledger's opening balance when nobody says otherwise: Rp 100 million. */
+export const DEFAULT_PAPER_CASH_IDR = 100_000_000;
 
 /** The safe state: everything that can move money is off. Also what a corrupt file falls back to. */
 export function defaultSettings(): Settings {
   return {
     version: SETTINGS_VERSION,
     trading: {
-      enabled: false,
+      mode: "off",
       autoConfirm: false,
       maxOrderValueIdr: null,
       allowedSymbols: [],
       maxLotsPerOrder: 50_000,
+      paper: { startingCashIdr: DEFAULT_PAPER_CASH_IDR },
     },
     chartbit: { headless: false, keepBrowserOpen: true },
   };
 }
 
-function storeDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
-
 export function settingsPath(): string {
-  return join(storeDir(), "settings.json");
+  return join(stockbitDir(), "settings.json");
 }
 
 /** True when a file exists but could not be understood — surfaced rather than silently defaulted. */
@@ -91,6 +111,20 @@ let lastReadCorrupt = false;
 
 function coerceNumberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * Read the mode, migrating a v1 file on the way.
+ *
+ * v1 had `enabled: boolean`, and `true` there meant real orders with real money — so it becomes
+ * `live` and nothing else would be honest. Every unrecognised value is `off`: a file that says
+ * `mode: "papr"` is a file whose author's intent cannot be established, and the safe reading of an
+ * ambiguous permission is no permission.
+ */
+function readMode(trading: Partial<TradingSettings> & { enabled?: unknown }): TradingMode {
+  if (trading.mode === "live" || trading.mode === "paper" || trading.mode === "off") return trading.mode;
+  if (trading.mode === undefined && trading.enabled === true) return "live";
+  return "off";
 }
 
 /**
@@ -117,7 +151,7 @@ export function loadSettings(): Settings {
     return {
       version: typeof parsed.version === "number" ? parsed.version : SETTINGS_VERSION,
       trading: {
-        enabled: trading.enabled === true,
+        mode: readMode(trading),
         autoConfirm: trading.autoConfirm === true,
         maxOrderValueIdr: coerceNumberOrNull(trading.maxOrderValueIdr),
         allowedSymbols: Array.isArray(trading.allowedSymbols)
@@ -127,6 +161,11 @@ export function loadSettings(): Settings {
           typeof trading.maxLotsPerOrder === "number" && trading.maxLotsPerOrder > 0
             ? Math.floor(trading.maxLotsPerOrder)
             : base.trading.maxLotsPerOrder,
+        paper: {
+          startingCashIdr:
+            coerceNumberOrNull((trading.paper as Partial<PaperSettings> | undefined)?.startingCashIdr) ??
+            base.trading.paper.startingCashIdr,
+        },
       },
       chartbit: {
         headless: chartbit.headless === true,
@@ -152,7 +191,7 @@ export function settingsWereCorrupt(): boolean {
  * silently disable trading rather than merely losing an edit.
  */
 export function saveSettings(settings: Settings): void {
-  mkdirSync(storeDir(), { recursive: true, mode: 0o700 });
+  mkdirSync(stockbitDir(), { recursive: true, mode: 0o700 });
   const target = settingsPath();
   const tmp = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
@@ -167,15 +206,21 @@ export function saveSettings(settings: Settings): void {
 /* ----------------------------------- the policy ----------------------------------- */
 
 export interface TradingPolicy {
-  /** Whether an order may be placed at all. */
+  /** `off`, `paper` or `live`. The one field that answers "what happens if I call order_buy". */
+  mode: TradingMode;
+  /** True only in `live`. Named separately because "is this real money" is the question that matters. */
+  live: boolean;
+  /** `mode !== "off"`. Kept so every existing gate reads the same, whichever mode it is in. */
   enabled: boolean;
+  /** The paper ledger's opening balance. */
+  paper: PaperSettings;
   /** Whether a per-order `confirm` may be satisfied by configuration instead of by the caller. */
   autoConfirm: boolean;
   maxOrderValueIdr: number | null;
   allowedSymbols: string[];
   maxLotsPerOrder: number;
   /** Where the decision came from, so a refusal can be acted on. */
-  source: "env-off" | "settings" | "default-off";
+  source: "env-off" | "env-paper" | "settings" | "default-off";
   /** Plain-language reason, always present. Relayed verbatim by the tools. */
   reason: string;
   /** Set when the settings file existed but could not be read. */
@@ -188,9 +233,10 @@ export interface TradingPolicy {
 /**
  * The trading policy in force right now.
  *
- * Read at call time. Precedence is `STOCKBIT_TRADING=off` > file > default-off, and the environment
- * is one-directional: any value other than a recognised "off" is ignored entirely rather than
- * treated as an enable.
+ * Read at call time. Precedence is environment > file > default-off, and the environment can only
+ * move DOWN the ladder: `live` → `paper` → `off`. `STOCKBIT_TRADING=live` on a file that says
+ * `paper` is ignored entirely, because a variable is the easiest thing in a process tree to set by
+ * accident and the accident must never be the expensive direction.
  */
 export function tradingPolicy(env: NodeJS.ProcessEnv = process.env): TradingPolicy {
   const settings = loadSettings();
@@ -198,60 +244,91 @@ export function tradingPolicy(env: NodeJS.ProcessEnv = process.env): TradingPoli
   const path = settingsPath();
   const t = settings.trading;
 
-  const envValue = (env.STOCKBIT_TRADING ?? "").trim().toLowerCase();
-  const envOff = envValue === "off" || envValue === "0" || envValue === "false" || envValue === "no";
-
-  if (envOff) {
-    return {
-      enabled: false,
-      autoConfirm: false,
-      maxOrderValueIdr: t.maxOrderValueIdr,
-      allowedSymbols: t.allowedSymbols,
-      maxLotsPerOrder: t.maxLotsPerOrder,
-      source: "env-off",
-      reason:
-        "Trading is off because STOCKBIT_TRADING is set to off in this process's environment. " +
-        "The environment can only turn trading off; unset it and use `stockbit-auth trading-enable` to turn it on.",
-      ...(corrupt ? { corrupt: true as const } : {}),
-      settingsPath: path,
-    };
-  }
-
-  if (!t.enabled) {
-    return {
-      enabled: false,
-      autoConfirm: false,
-      maxOrderValueIdr: t.maxOrderValueIdr,
-      allowedSymbols: t.allowedSymbols,
-      maxLotsPerOrder: t.maxLotsPerOrder,
-      source: corrupt ? "default-off" : "settings",
-      reason: corrupt
-        ? `Trading is off: ${path} could not be read, and an unreadable policy file is treated as no permission. ` +
-          "Fix or delete the file, then run `stockbit-auth trading-enable`."
-        : `Trading is off. Turn it on with \`stockbit-auth trading-enable\` (writes ${path}).`,
-      ...(corrupt ? { corrupt: true as const } : {}),
-      settingsPath: path,
-    };
-  }
-
-  // autoConfirm is honoured only with a value cap. "I trust it for small orders" must not silently
-  // become "I trust it for any order" the day the cap is removed.
-  const capMissing = t.autoConfirm && t.maxOrderValueIdr === null;
-  return {
-    enabled: true,
-    autoConfirm: t.autoConfirm && !capMissing,
+  const shared = {
+    paper: t.paper,
     maxOrderValueIdr: t.maxOrderValueIdr,
     allowedSymbols: t.allowedSymbols,
     maxLotsPerOrder: t.maxLotsPerOrder,
+    settingsPath: path,
+    ...(corrupt ? { corrupt: true as const } : {}),
+  };
+
+  const envValue = (env.STOCKBIT_TRADING ?? "").trim().toLowerCase();
+  const envOff = envValue === "off" || envValue === "0" || envValue === "false" || envValue === "no";
+  const envPaper = envValue === "paper";
+
+  if (envOff) {
+    return {
+      ...shared,
+      mode: "off",
+      live: false,
+      enabled: false,
+      autoConfirm: false,
+      source: "env-off",
+      reason:
+        "Trading is off because STOCKBIT_TRADING is set to off in this process's environment. " +
+        "The environment can only lower the trading mode; unset it and use `stockbit-auth " +
+        "trading-enable --paper|--live` to raise it.",
+    };
+  }
+
+  // A corrupt file is no permission at all, whatever it half-said.
+  const fileMode: TradingMode = corrupt ? "off" : t.mode;
+  // Downgrade only. `paper` in the environment cannot raise `off`, and nothing raises `paper`.
+  const mode: TradingMode = envPaper && fileMode === "live" ? "paper" : fileMode;
+
+  if (mode === "off") {
+    return {
+      ...shared,
+      mode: "off",
+      live: false,
+      enabled: false,
+      autoConfirm: false,
+      source: corrupt ? "default-off" : "settings",
+      reason: corrupt
+        ? `Trading is off: ${path} could not be read, and an unreadable policy file is treated as no permission. ` +
+          "Fix or delete the file, then run `stockbit-auth trading-enable --paper` or `--live`."
+        : "Trading is off. Try it on paper first with `stockbit-auth trading-enable --paper`, or " +
+          `use \`--live\` for real orders (writes ${path}).`,
+    };
+  }
+
+  if (mode === "paper") {
+    return {
+      ...shared,
+      mode: "paper",
+      live: false,
+      enabled: true,
+      // Paper still asks. The whole point is that it is a rehearsal for the live protocol, and a
+      // rehearsal in which the confirmation step is skipped rehearses the wrong thing.
+      autoConfirm: false,
+      source: envPaper && fileMode === "live" ? "env-paper" : "settings",
+      reason:
+        envPaper && fileMode === "live"
+          ? "PAPER trading. The settings file says live, but STOCKBIT_TRADING=paper in this process's " +
+            "environment lowered it. No real order can be placed from this process."
+          : "PAPER trading — orders go to a local ledger, not to the exchange. No real money moves. " +
+            `Switch to real orders with \`stockbit-auth trading-enable --live\` (writes ${path}).`,
+    };
+  }
+
+  // autoConfirm is honoured only with a value cap, and only when it is real money — in paper it is
+  // pointless, and skipping the confirmation would rehearse the wrong habit.
+  const capMissing = t.autoConfirm && t.maxOrderValueIdr === null;
+  return {
+    ...shared,
+    mode: "live",
+    live: true,
+    enabled: true,
+    autoConfirm: t.autoConfirm && !capMissing,
     source: "settings",
-    reason: "Trading is enabled in " + path + ".",
+    reason: `LIVE trading is enabled in ${path}. Orders reach the exchange and move real money.`,
     ...(capMissing
       ? {
           autoConfirmIgnored:
             "autoConfirm is set but is NOT in effect: it is honoured only when maxOrderValueIdr is also set. " +
-            "Every order still needs confirm: true. Set a cap with `stockbit-auth trading-enable --max-order-value N`.",
+            "Every order still needs confirm: true. Set a cap with `stockbit-auth trading-enable --live --max-order-value N`.",
         }
       : {}),
-    settingsPath: path,
   };
 }

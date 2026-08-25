@@ -31,6 +31,8 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { StockbitError } from "../http/errors.js";
+import { tickSize, nearestTicks } from "../core/ticks.js";
+import { idr, pct } from "../core/format.js";
 import { normalizeSymbol } from "../symbol.js";
 import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { getQuote } from "../core/emitten.js";
@@ -57,23 +59,10 @@ import { TICKET_TTL_MS, issue, now } from "./tickets.js";
  * from the wire because it is exchange rule, not account configuration, and because a preview must
  * be able to say "that price is invalid" without a request.
  */
-export function tickSize(price: number): number {
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new StockbitError("invalid_param", `A price must be a positive number, got ${price}`);
-  }
-  if (price < 200) return 1;
-  if (price < 500) return 2;
-  if (price < 2000) return 5;
-  if (price < 5000) return 10;
-  return 25;
-}
-
-/** The nearest valid prices on either side of an off-grid one, for an error message worth reading. */
-export function nearestTicks(price: number): { below: number; above: number } {
-  const tick = tickSize(price);
-  const below = Math.floor(price / tick) * tick;
-  return { below, above: below + tick };
-}
+// The grid itself moved to `src/core/ticks.ts` so `position_size` — pure arithmetic, no account —
+// can use the same table. Re-exported here because this is where the order path and its tests
+// already look for it.
+export { tickSize, nearestTicks, onTickGrid, roundToTick } from "../core/ticks.js";
 
 /* ------------------------------------ shapes ------------------------------------ */
 
@@ -141,29 +130,35 @@ export interface OrderTicket {
   summary: string;
 }
 
+/**
+ * The four ACCOUNT-side reads a preview needs.
+ *
+ * Injectable so paper mode can answer them from its ledger. Only these four: the tick grid, today's
+ * auto-rejection band, the market session and whether the exchange will take the symbol are all
+ * read from the real market in every mode, because those are exactly what a rehearsal is for. A
+ * paper order that skipped the ARA check would teach the user nothing about why a real one bounces.
+ */
+export interface PreviewAccountReads {
+  listOrders: typeof listOrders;
+  getCashBalance: typeof getCashBalance;
+  getPosition: typeof getPosition;
+  getFees: typeof getFees;
+}
+
 export interface PreviewInput {
   action: OrderAction;
   symbol?: string;
   price?: number;
   lots?: number;
   orderId?: string;
+  /** Substitutes for the account-side reads. Omitted means the real brokerage. */
+  account?: Partial<PreviewAccountReads>;
 }
 
 /* ---------------------------------- formatting ---------------------------------- */
 
-/** Rupiah with thousand separators, locale-independent so a test asserts one spelling. */
-export function idr(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "unknown";
-  const rounded = Math.round(value);
-  const sign = rounded < 0 ? "-" : "";
-  const digits = Math.abs(rounded).toString();
-  const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${sign}Rp ${grouped}`;
-}
-
-function pct(value: number | null, places = 2): string {
-  return value === null || !Number.isFinite(value) ? "unknown" : `${value.toFixed(places)}%`;
-}
+// Also moved to `core/`, for the same reason and re-exported for the same callers.
+export { idr } from "../core/format.js";
 
 /* ------------------------------------ helpers ------------------------------------ */
 
@@ -250,6 +245,13 @@ async function attempt<T>(label: string, load: () => Promise<T>, notes: string[]
  */
 export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   const policy = tradingPolicy();
+  const reads: PreviewAccountReads = {
+    listOrders,
+    getCashBalance,
+    getPosition,
+    getFees,
+    ...input.account,
+  };
   const action = input.action;
   const warnings: string[] = [];
   const checks: OrderCheck[] = [];
@@ -266,7 +268,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   let target: Order | undefined;
   let targetLookupFailed = false;
   if (action === "amend" || action === "cancel") {
-    const open = await attempt("The open order list", () => listOrders(), warnings);
+    const open = await attempt("The open order list", () => reads.listOrders(), warnings);
     if (open) target = open.orders.find((o) => o.orderId === input.orderId);
     else targetLookupFailed = true;
   }
@@ -315,7 +317,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
   }
 
   const tradable = await attempt("Tradability", () => getStockTradable([symbol]), warnings);
-  const fees = await attempt("The commission schedule", () => getFees(), warnings);
+  const fees = await attempt("The commission schedule", () => reads.getFees(), warnings);
   if (fees?.source === "default") {
     warnings.push(
       "This account's own commission could not be read, so every fee figure below uses this project's " +
@@ -323,9 +325,9 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
     );
   }
 
-  const cash = action === "buy" ? await attempt("Cash and buying power", () => getCashBalance(), warnings) : null;
+  const cash = action === "buy" ? await attempt("Cash and buying power", () => reads.getCashBalance(), warnings) : null;
   const position =
-    action === "sell" ? await attempt("The position", () => getPosition(symbol), warnings) : null;
+    action === "sell" ? await attempt("The position", () => reads.getPosition(symbol), warnings) : null;
 
   /* --------------------------------- the arithmetic --------------------------------- */
 

@@ -50,7 +50,7 @@ Two things this amendment adds rather than moves:
 
 The instruction was "enable the write", meaning *let drawing save to my account*. The route named
 below was **my** choice of mechanism, and it turned out to be a server-side stub — it accepts every
-valid body and stores nothing (see `docs/chartbit-layout-format.md` for the twelve probes that
+valid body and stores nothing (see `docs/research/chartbit-layout-format.md` for the twelve probes that
 establish that).
 
 So the approved scope is read as **chart persistence**, and `POST /chartbit/template` — Stockbit's

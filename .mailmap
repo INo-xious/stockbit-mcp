@@ -1,0 +1,6 @@
+# One line per identity that should display under the maintainer's canonical name.
+#
+# The 2026-08-25 history rewrite removed the other two identities this file used to need
+# (a GitHub web-UI commit and an old local-hostname author), so only the name normalisation
+# is left. Garit32's identity is deliberately untouched — they are a separate contributor.
+Marvel Harisson <im.marvel.harisson@gmail.com> INo-xious <im.marvel.harisson@gmail.com>

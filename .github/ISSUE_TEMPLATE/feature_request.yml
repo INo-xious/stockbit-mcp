@@ -1,0 +1,33 @@
+name: Feature request
+description: A tool, a field, or a workflow this should support and does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The trading or research question, not the implementation. What would you ask the assistant?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think it should do
+    validations:
+      required: true
+
+  - type: input
+    id: where
+    attributes:
+      label: Where it lives in Stockbit
+      description: The screen or feature this corresponds to, if it is one. It helps to find the endpoint.
+      placeholder: "Trading → Order book → Broker activity"
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I understand this project does not do short selling, withdrawals, deposits, stream posting, or financial advice.
+          required: true

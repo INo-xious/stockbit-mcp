@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "stockbit": {
+      "command": "npx",
+      "args": ["-y", "stockbit-mcp@^1"]
+    }
+  }
+}

@@ -19,15 +19,10 @@
  * missing and add again.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { AlertRule } from "./rules.js";
-
-/** Overridable so tests never touch the real file. */
-function alertsDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
+import { stockbitDir as alertsDir } from "../paths.js";
 
 function alertsPath(): string {
   return join(alertsDir(), "alerts.json");

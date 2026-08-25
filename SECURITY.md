@@ -6,8 +6,8 @@ Security updates are currently provided for the following versions:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅        |
-| < 0.1   | ❌        |
+| 1.x     | ✅        |
+| < 1.0   | ❌        |
 
 Users should run the latest available release and install dependencies using
 the committed lockfile.
@@ -24,10 +24,21 @@ vulnerabilities, including:
 - Missing default DNS-rebinding protection for HTTP-based servers
 
 Project releases must resolve `@modelcontextprotocol/sdk` to version `1.26.0`
-or newer. Version `1.30.0` or newer is recommended.
+or newer. `package.json` requires `^1.30.0` and the committed lockfile resolves
+`1.30.0`.
 
 The current server uses the stdio transport. It does not expose an HTTP or SSE
 listener by default.
+
+## Where credentials are stored
+
+The refresh token for each of the three token domains lives in the macOS
+Keychain when one is available. **Everywhere else it is an AES-256-GCM file
+under `~/.stockbit` (or `$STOCKBIT_STORE_DIR`) whose key is derived from the
+machine's hostname and username.** That is obfuscation, not a vault: anything
+running as the same user on the same machine can derive the same key. Treat a
+Windows or Linux install as "the token is on disk" and protect the account
+accordingly. Access tokens are never written to disk on any platform.
 
 ## Reporting a Vulnerability
 
@@ -48,6 +59,9 @@ Include the following information when possible:
 - Steps required to reproduce the issue
 - A proof of concept, logs, or screenshots
 - Any suggested mitigation or fix
+- The **redacted** output of `stockbit-auth status --offline --json` and
+  `stockbit-auth doctor` — both are written to be safe to paste, but read them
+  before you do
 
 Do not include Stockbit credentials, session cookies, access tokens, or other
 secrets in the report. Replace sensitive values with redacted examples.
@@ -72,8 +86,10 @@ should be aimed at:
 
 - **Order entry** (`order_buy`, `order_sell`, `order_amend`, `order_cancel`) and
   **IPO subscription** (`eipo_order`) place real orders with real money. They
-  are **off by default**, require a per-order confirmation against a ticket the
-  user was shown, and cannot be reached from a saved workflow recipe. See
+  are **off by default**, require a preview ticket, and default to per-order
+  confirmation. The operator may deliberately enable live autoconfirm only
+  together with a maximum order value; a model cannot enable it or widen that
+  cap. Writes cannot be reached from a saved workflow recipe. See
   `docs/adr/0004-order-entry.md`.
 - **Chart drawing** drives the browser the user logged in with, over the Chrome
   DevTools Protocol. It enables only the `Page` and `Runtime` CDP domains — never
@@ -82,17 +98,18 @@ should be aimed at:
 - **Watchlist and screener edits** change what later answers are about. See
   `docs/adr/0006-account-writes.md`.
 
-Anything that lets one of those happen without the user's explicit,
-per-action agreement is a vulnerability in this project, whatever else it looks
-like. In particular:
+Anything that lets one of those happen without the user's explicit per-action
+agreement or the exact capped-autoconfirm policy they enabled is a vulnerability
+in this project, whatever else it looks like. In particular:
 
 - A path that turns trading on without the account owner running
-  `stockbit-auth trading-enable` themselves. The environment can only turn
-  trading **off**; there is deliberately no variable that turns it on, and no
-  module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
+  `stockbit-auth trading-enable` themselves. `STOCKBIT_TRADING` can only move
+  a session **down** the ladder — `off` disables trading, `paper` demotes a
+  configured `live` to paper — and there is deliberately no value that raises
+  it. No module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
   settings file.
-- A path that satisfies a confirmation the user did not give, or that redeems
-  an order ticket twice.
+- A path that satisfies a confirmation the user did not give, bypasses or widens
+  capped autoconfirm, or redeems an order ticket twice.
 - A trading PIN reaching disk, a log, a tool result, or a model. The PIN is
   typed at a terminal, used for one request, and never stored; no MCP tool
   accepts one.
@@ -108,7 +125,7 @@ like. In particular:
 Security issues may include:
 
 - Exposure of Stockbit credentials or session data
-- Any write performed without the confirmation described above
+- Any write performed without the confirmation or exact policy exception described above
 - Unauthorized access to MCP tools or returned financial data
 - Sensitive information appearing in logs or error messages
 - Dependency vulnerabilities reachable through this project

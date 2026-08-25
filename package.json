@@ -1,12 +1,49 @@
 {
   "name": "stockbit-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for Stockbit (Indonesian / IDX market) — bandarmology, quotes, orderbook, fundamentals, your portfolio, and drawing on your real chart. Order entry is off by default and confirm-gated. Unofficial; uses your own session.",
+  "version": "1.0.1",
+  "description": "MCP server for Stockbit (IDX, Indonesia): bandarmology/broker flow, quotes, orderbook, fundamentals, screener, watchlists, alerts, chart drawing and confirm-gated order entry through your own Stockbit account. Unofficial.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "stockbit",
+    "idx",
+    "indonesia",
+    "saham",
+    "bandarmology",
+    "broker-summary",
+    "trading",
+    "stock-market",
+    "claude",
+    "cursor"
+  ],
+  "author": "Marvel Harisson <im.marvel.harisson@gmail.com>",
+  "homepage": "https://github.com/INo-xious/stockbit-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/INo-xious/stockbit-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/INo-xious/stockbit-mcp/issues"
+  },
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
+  "mcpName": "io.github.INo-xious/stockbit-mcp",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "README.id.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "bin": {
     "stockbit-mcp": "dist/bin/stockbit-mcp.js",
     "stockbit-auth": "dist/bin/stockbit-auth.js",
@@ -14,28 +51,36 @@
   },
   "exports": {
     ".": "./dist/src/server.js",
-    "./core": "./dist/src/core/index.js"
+    "./core": "./dist/src/core/index.js",
+    "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "test": "node --test --import tsx test/*.test.ts",
+    "smoke": "node scripts/smoke.mjs",
+    "check:pack": "node scripts/check-pack.mjs",
+    "docs:tools": "node --import tsx scripts/gen-tools-doc.ts",
+    "docs:images": "node --import tsx scripts/render-samples.ts",
+    "docs:icon": "node scripts/gen-icon.mjs",
+    "build:mcpb": "node scripts/build-mcpb.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
     "start": "node dist/bin/stockbit-mcp.js",
     "auth": "node dist/bin/stockbit-auth.js",
-    "test": "node --test --import tsx test/*.test.ts",
+    "alerts": "node dist/bin/stockbit-alerts.js",
     "dev:mcp": "node --import tsx bin/stockbit-mcp.ts",
     "dev:auth": "node --import tsx bin/stockbit-auth.ts",
-    "progress": "node progress/build.mjs",
-    "progress:serve": "node progress/serve.mjs",
-    "alerts": "node dist/bin/stockbit-alerts.js",
     "dev:alerts": "node --import tsx bin/stockbit-alerts.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "zod": "^3.23.8"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@types/node": "^22.9.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
-    "@types/node": "^22.9.0"
+    "typescript": "^5.6.3"
   }
 }

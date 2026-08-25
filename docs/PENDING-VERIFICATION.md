@@ -1,7 +1,7 @@
 # Pending live verification
 
 **Most of this is now done.** Probed against a live account on 2026-08-09; results are recorded in
-`STOCKBIT-API.md` §11 and in the code that consumes them.
+`stockbit-api.md` §11 and in the code that consumes them.
 
 ## Settled
 
@@ -12,8 +12,9 @@
 | `broker_summary` market boards | **Confirmed.** `REGULER`, `ALL`, `NEGO`, `TUNAI` all work. `NEGOTIATED` / `CASH` 400. |
 | `period` contradiction | **Resolved, and the catalogue was the wrong one.** Six preset windows work, including `YEAR_TO_DATE` — which aggregates Jan→Aug in a single request. Now exposed on the tool. |
 | ARA/ARB field names | **Confirmed, and the shape was not what was assumed.** The bands arrive as `{"value":"3,910"}` while the foreign figures beside them are bare numbers. `price_bands` now reports `missing: []` on a live call. |
-| Watchlist | **Confirmed and wired.** 5 lists, 116 symbols in the default one. The index returns `data` as an array; the detail wraps rows in `data.result` — they are not interchangeable. |
-| `/charts/{SYMBOL}` | **Resolved: the spelling was the problem.** The web client calls `/charts/{SYM}/daily?timeframe=1w\|1m\|3m\|ytd\|1y\|3y\|5y` — LOWERCASE, with `is_include_previous_historical=true` on `ytd` and `1w`. Every earlier probe sent an uppercase spelling (`1D`, `DAILY`, `TIMEFRAME_DAILY`) and was rejected, which is why the route looked real-but-unusable for months. Wired and covered by tests; a whole series now costs one request instead of the 12-row paged walk. |\n| Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Five custom screens on the probed account. |
+| Watchlist | **Confirmed and wired.** Several lists; the default one held over a hundred symbols. The index returns `data` as an array; the detail wraps rows in `data.result` — they are not interchangeable. |
+| `/charts/{SYMBOL}` | **Resolved: the spelling was the problem.** The web client calls `/charts/{SYM}/daily?timeframe=1w\|1m\|3m\|ytd\|1y\|3y\|5y` — LOWERCASE, with `is_include_previous_historical=true` on `ytd` and `1w`. Every earlier probe sent an uppercase spelling (`1D`, `DAILY`, `TIMEFRAME_DAILY`) and was rejected, which is why the route looked real-but-unusable for months. Wired and covered by tests; a whole series now costs one request instead of the 12-row paged walk. |
+| Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Custom screens exist on the probed account and run. |
 
 ## Still open
 

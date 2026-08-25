@@ -3,10 +3,112 @@
 Notable changes to `stockbit-mcp`. Entries record *why* as well as *what*, because most of the
 hazards here are undocumented API behaviours that are expensive to rediscover.
 
-Everything marked **measured** was verified against the live API with a real account, not inferred
-from naming.
+The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
+follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Where an entry says a mapping
+was **Observed**, it was read off a live response with a real account rather than inferred from a
+name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
-## Unreleased
+## [Unreleased]
+
+## [1.0.0] – 2026-08-25
+
+The first public release. Everything below the tag was already working; this is what it took to be
+installable by someone who is not the author.
+
+### Added
+
+- **`status`, `login` and `logout` tools** (ADR-0007). `status` answers "is this working, and what
+  do I run" — version, which of the three sessions exist (never the tokens), the trading mode, the
+  IDX session clock in WIB, and one next command. It answers with no session at all, which is where
+  every new user starts. `login` opens a browser and returns before the person finishes, because no
+  MCP client's tool-call timeout is measured in minutes; `status` is the poll. The PIN and the
+  trading switch stay at a terminal, and no result from any of the three ever carries a token.
+- **Paper trading** (ADR-0008). `stockbit-auth trading-enable --paper` trades against a local
+  ledger: no exchange, no session, no PIN, and the identical ticket protocol so nothing about the
+  live path is a surprise later. Fills are approximate in three stated ways and every result says
+  `PAPER ACCOUNT — no real money.`
+- **MCP prompts** for the eight built-in workflows, each carrying guidance on how to present its own
+  result rather than a generic instruction to be helpful.
+- **`position_size`** — lots from a risk budget, floored, with commission, break-even, R targets and
+  both prices checked against the IDX tick grid and today's auto-rejection band.
+- **Telegram alert delivery.** The channel that reaches a phone, since a desktop toast fires at a
+  laptop that is shut.
+- **Tool profiles** — `STOCKBIT_TOOLS=all | core | families,tools`. `core` is 40 tools, which is
+  Cursor's cap. `system` is never filtered out.
+- **`docs/TOOLS.md`**, generated from the running server, with a test that fails when it is stale.
+- **`README.id.md`** in Bahasa Indonesia, and two sample images rendered from synthetic data.
+- **Distribution**: npm, the MCP Registry, a Claude Code plugin with six skills, and a Claude
+  Desktop Extension.
+- **CI on every push** — typecheck, test, build, smoke, `check:pack` and a `docs/TOOLS.md`
+  freshness check across Ubuntu, macOS and Windows on Node 22 and 24, plus a dependency audit and an
+  offline link check. Three operating systems because the token store, the file locks and the
+  browser probe are all different on each, and a suite that only ever runs on the author's Mac is a
+  suite that tests one of them.
+- **Community plumbing** — issue templates that ask for `stockbit-auth doctor` output and make you
+  tick a box saying you scrubbed it, a pull-request checklist naming the three invariants, and
+  Dependabot.
+- **`CONTEXT.md`** — a glossary, so "session" stops meaning two things.
+- **`docs/VERIFICATION.md`** — the evidence ladder, what each family is, and how to settle a
+  projection.
+
+### Changed
+
+- **Breaking: `stream_post` is now `stream_post_detail`.** It reads one post by id; it was named
+  like a verb, and nothing here can post to the stream.
+- **Breaking: Node 22 is the floor** (`src/auth/cdp.ts` needs a global `WebSocket`, so the ">=20" it
+  claimed would have failed at login).
+- **Breaking: `trading-enable` now requires `--paper` or `--live`.** A bare invocation is refused:
+  the two differ by everything, and a default is a decision made for someone who did not make it.
+- **Breaking: settings are v2.** `trading.enabled: boolean` becomes `trading.mode: off | paper |
+  live`, migrated on read — a v1 `enabled: true` becomes `live`, because that is what it meant.
+  `STOCKBIT_TRADING` can now lower `live` to `paper`, and still cannot raise anything.
+- Tool registration goes through one door. The thirty-three older tools no longer bypass it by
+  intercepting `server.tool`, which had made every one of them reachable from a saved workflow
+  recipe. Each tool now carries its family and an evidence word on `_meta`.
+- The MCP `instructions` enumerate the write tools from the surface itself. They said "the four
+  order tools and the chartbit_* writes" while twenty-two tools could change something.
+- `stockbit-auth status` renders the same report the `status` tool returns, and `--json` prints it
+  redacted — which is what `SECURITY.md` asks a reporter to paste.
+- The server reports the version from `package.json` rather than a literal that said `0.1.0` for as
+  long as nobody remembered to change it.
+
+### Fixed
+
+- **`STOCKBIT_STORE_DIR` is honoured everywhere.** `src/render/write.ts` hard-coded `~/.stockbit` at
+  three sites, so chart SVGs, generated Pine and Chartbit screenshots escaped the store — including
+  under a test that had carefully pointed it at a temp directory. The escape *succeeded*, which is
+  why nobody noticed.
+- The Telegram bot-token redaction pattern could not match the one place the token actually leaks —
+  inside the Bot API URL — because a `\b` anchor never matches after the letters `bot`.
+- `npm pack` shipped 247 files and 3 MB, including the source tree, the tests and a `dist/` left
+  over from an earlier refactor. It now ships 129, checked by an allow-list on every push.
+- **`STOCKBIT_NO_BROWSER` is read truthily**, not as `=== "1"`. The Desktop Extension exposes it as
+  a checkbox, and Claude Desktop substitutes a ticked box into the environment as the string
+  `"true"` — so a user could tick "never open a browser window" and watch one open. `0`, `false`,
+  `no`, `off` and empty mean not suppressed; anything else suppresses, which is the safe way round
+  for a flag whose only job is to refuse.
+
+### Security
+
+- `SECURITY.md` now states that off macOS the credential file's key is derived from hostname and
+  username — **obfuscation, not a vault** — and asks for the redacted `status --json` in reports.
+- Bot tokens are redacted by shape and dropped by key.
+
+### Docs
+
+- A public README with install instructions per client, a decision table, the verification status,
+  the safety model and a long disclaimer; `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CLAUDE.md`, a
+  documentation index, and an ADR index.
+- Private material removed from the tree and from every blob in the history: a collaborator's
+  brokerage balance, a real watchlist, Windows home paths in end-user instructions, and the
+  maintainer's own name as a test fixture.
+- `STOCKBIT-API.md` became `docs/stockbit-api.md` and carries the unofficial/ToS disclaimer the
+  README had carried alone.
+
+## [0.1.0] – 2026-08-24
+
+Everything below is the development history that led to 1.0.0, kept because most of it is about
+undocumented API behaviour that is expensive to rediscover.
 
 ### Full Stockbit coverage, confirm-gated trading, and drawing on the real chart (2026-08-24)
 
@@ -20,7 +122,7 @@ Sekuritas), `api-sekuritas` (e-IPO), each with its own store slot, its own refre
 placement rule: the main session refreshes with a header, carina with a `refresh_token` in the
 BODY, e-IPO with the token in a QUERY parameter. `AuthKind` distinguishes all three rather than
 assuming a bearer, because assuming one is how a credential gets sent somewhere it was never issued
-for. `STOCKBIT-API.md` claimed carina needed an `Authorization-Carina` header; the current bundle
+for. `docs/stockbit-api.md` claimed carina needed an `Authorization-Carina` header; the current bundle
 says a plain bearer, and it was wrong.
 
 **`/charts/{SYM}` was never locked — the spelling was wrong.** This project recorded it for months
@@ -28,7 +130,7 @@ as "real, and still unusable" after probing `timeframe` / `tf` / `interval` / `r
 `daily`, `1D`, `D`, `DAILY`, `TIMEFRAME_DAILY`. Every one of those was uppercase. The client sends
 lowercase *windows*: `?timeframe=1w|1m|3m|ytd|1y|3y|5y`. A whole series in one request, against the
 12-row paged walk it replaces — roughly 40x fewer requests for every scan, backtest and alignment.
-The lesson kept in `STOCKBIT-API.md` §11d: a 400 naming a parameter means the route is real, and
+The lesson kept in `docs/stockbit-api.md` §11d: a 400 naming a parameter means the route is real, and
 says nothing about whether the values tried were the right *shape* of value.
 
 **Chartbit saving was never retired; this project was reading the retired half.**
@@ -325,7 +427,7 @@ For that reason the two query shapes are built as separate return statements rat
 `period`, then delete it when dates exist". The delete form leaves one line between correct
 behaviour and a confident wrong answer, and its removal would look innocuous in review.
 
-Measured API behaviour (see `STOCKBIT-API.md` §4a):
+Measured API behaviour (see `docs/stockbit-api.md` §4a):
 
 | Input | Result |
 |---|---|
@@ -409,7 +511,7 @@ intercepts at `Fetch`'s Response stage, which *pauses* the request while the bod
 
 ### Changed — documentation
 
-- `STOCKBIT-API.md` §4a previously documented the `period` enum as having "likely date-range
+- `docs/stockbit-api.md` §4a previously documented the `period` enum as having "likely date-range
   variants". **It does not** — 16 candidates were swept and rejected, leaving only
   `BROKER_SUMMARY_PERIOD_LATEST` and `_UNSPECIFIED`. Replaced with the measured behaviour table.
 - **Refresh rotation confirmed.** The README listed it as unverified. Comparing SHA-256 digests of
@@ -436,3 +538,7 @@ intercepts at `Fetch`'s Response stage, which *pauses* the request while the bod
 > left the entire suite green — the test named "the invariant this whole feature depends on"
 > guarded a function nothing proved production called. If you add coverage here, assert the request
 > that actually goes out, and check that your test fails when the feature is deleted.
+
+[Unreleased]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/INo-xious/stockbit-mcp/releases/tag/v1.0.0
+[0.1.0]: https://github.com/INo-xious/stockbit-mcp/commits/v1.0.0

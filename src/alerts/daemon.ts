@@ -29,6 +29,7 @@ import type { Bar } from "../core/bars.js";
 import { evaluateRule, warmupBars, type AlertEvaluation, type AlertRule } from "./rules.js";
 import { loadRules, updateRule } from "./store.js";
 import { deliver, type DeliveryOptions, type DeliveryResult } from "./notify.js";
+import { isWithinPollingWindow } from "../core/sessionclock.js";
 
 export interface TickResult {
   at: string;
@@ -39,18 +40,16 @@ export interface TickResult {
   skipped?: "market-closed" | "no-rules";
 }
 
-/** IDX is UTC+7 with no daylight saving, so a fixed offset is correct rather than approximate. */
-const WIB_OFFSET_MINUTES = 7 * 60;
-
-/** Whether IDX is plausibly open at `now`. Deliberately generous at the edges. */
+/**
+ * Whether IDX is plausibly open at `now`. Deliberately generous at the edges.
+ *
+ * 08:45 to 16:15 WIB: wide enough to catch pre-open and the post-close print, and deliberately
+ * blind to the midday break — stopping at a session boundary would drop an alert that fires on the
+ * post-closing print. The WIB conversion itself lives in `src/core/sessionclock.ts`, so the daemon
+ * and `status` cannot disagree about what day it is in Jakarta.
+ */
 export function isMarketOpen(now: Date): boolean {
-  const wib = new Date(now.getTime() + WIB_OFFSET_MINUTES * 60_000);
-  const day = wib.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = wib.getUTCHours() * 60 + wib.getUTCMinutes();
-  // 08:45 to 16:15 WIB: wide enough to catch pre-open and the post-close print without pretending
-  // to model session breaks, which change and would silently drop alerts when they did.
-  return minutes >= 8 * 60 + 45 && minutes <= 16 * 60 + 15;
+  return isWithinPollingWindow(now);
 }
 
 export interface TickOptions extends DeliveryOptions {

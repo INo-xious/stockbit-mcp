@@ -1,0 +1,51 @@
+{
+  "manifest_version": "0.3",
+  "name": "stockbit-mcp",
+  "display_name": "Stockbit MCP",
+  "version": "1.0.1",
+  "description": "IDX market data, bandarmology and your Stockbit account inside Claude Desktop. Unofficial.",
+  "long_description": "The read-only half is one click: install, then say \"log me into Stockbit\" and sign in in the browser window that opens. Portfolio and order entry additionally need `stockbit-auth trading-login` (which asks for the PIN) and `stockbit-auth trading-enable --paper|--live` in a terminal — by design, so that nothing reachable from an assistant can turn trading on or handle a PIN.",
+  "author": { "name": "Marvel Harisson", "url": "https://github.com/INo-xious" },
+  "repository": { "type": "git", "url": "https://github.com/INo-xious/stockbit-mcp" },
+  "homepage": "https://github.com/INo-xious/stockbit-mcp",
+  "documentation": "https://github.com/INo-xious/stockbit-mcp#readme",
+  "support": "https://github.com/INo-xious/stockbit-mcp/issues",
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": ["stockbit", "idx", "indonesia", "saham", "bandarmology", "trading"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/bin/stockbit-mcp.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/bin/stockbit-mcp.js"],
+      "env": {
+        "STOCKBIT_TOOLS": "${user_config.tool_profile}",
+        "STOCKBIT_NO_BROWSER": "${user_config.no_browser}"
+      }
+    }
+  },
+  "user_config": {
+    "tool_profile": {
+      "type": "string",
+      "title": "Tool profile",
+      "description": "all (138 tools), core (40), or a comma-separated list of families",
+      "default": "all",
+      "required": false
+    },
+    "no_browser": {
+      "type": "boolean",
+      "title": "Never open a browser window",
+      "description": "Refuse the login tool outright and name the terminal command instead.",
+      "default": false,
+      "required": false
+    }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=22" }
+  }
+}

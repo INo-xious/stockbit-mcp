@@ -190,7 +190,7 @@ beforeEach(() => {
   wire.challengeOnBuy = false;
   wire.hideOrder = false;
   delete process.env.STOCKBIT_TRADING;
-  setPolicy({ enabled: true, maxOrderValueIdr: 100_000_000 });
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000 });
 });
 
 /** A ticket for 5 lots of BBRI at 4100 — inside the band, on the tick grid, affordable. */
@@ -294,7 +294,7 @@ test("a cancel whose order list is unreadable and whose symbol is unknown is ref
 });
 
 test("an order value over the configured cap fails the check", async () => {
-  setPolicy({ enabled: true, maxOrderValueIdr: 1_000_000 });
+  setPolicy({ mode: "live", maxOrderValueIdr: 1_000_000 });
   const ticket = await buyTicket();
   const check = ticket.checks.find((c) => c.name === "value_within_cap")!;
   assert.equal(check.ok, false);
@@ -302,7 +302,7 @@ test("an order value over the configured cap fails the check", async () => {
 });
 
 test("a symbol off the allow-list fails, and the message says how to change it", async () => {
-  setPolicy({ enabled: true, allowedSymbols: ["TLKM"] });
+  setPolicy({ mode: "live", allowedSymbols: ["TLKM"] });
   const ticket = await buyTicket();
   const check = ticket.checks.find((c) => c.name === "symbol_allowed")!;
   assert.equal(check.ok, false);
@@ -310,7 +310,7 @@ test("a symbol off the allow-list fails, and the message says how to change it",
 });
 
 test("a ticket is still issued when checks fail — the user asked what would happen", async () => {
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   const ticket = await buyTicket();
   assert.ok(peek(ticket.id), "the ticket exists");
   assert.equal(ticket.checks.find((c) => c.name === "trading_enabled")!.ok, false);
@@ -332,7 +332,7 @@ test("a ticket can only be spent once", async () => {
 });
 
 test("a ticket whose checks failed is refused by take, not merely discouraged", async () => {
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   const ticket = await buyTicket();
   assert.throws(() => take(ticket.id), /trading_enabled/);
 });
@@ -352,7 +352,7 @@ async function refuses(fn: () => Promise<unknown>, pattern: RegExp): Promise<voi
 
 test("trading off by default: the tool exists, refuses, and names the settings file", async () => {
   const ticket = await buyTicket();
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   await refuses(() => placeBuy({ ticketId: ticket.id, confirm: true }), /Trading is off/);
   const policy = tradingPolicy();
   assert.match(policy.reason, /trading-enable/);
@@ -366,7 +366,7 @@ test("STOCKBIT_TRADING=off overrides an enabled settings file", async () => {
 });
 
 test("the environment can turn trading OFF and can never turn it on", () => {
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   for (const value of ["on", "1", "true", "yes", "ON"]) {
     process.env.STOCKBIT_TRADING = value;
     assert.equal(tradingPolicy().enabled, false, `STOCKBIT_TRADING=${value} must not enable trading`);
@@ -383,19 +383,19 @@ test("no confirmation, no order — and the refusal tells the model not to set i
 test("autoConfirm without a value cap is refused, not honoured", async () => {
   // The rule the whole switch rests on: "I trust it for small orders" must not silently become
   // "I trust it for any order" the day the cap is removed.
-  setPolicy({ enabled: true, autoConfirm: true, maxOrderValueIdr: null });
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: null });
   const ticket = await buyTicket();
   await refuses(() => placeBuy({ ticketId: ticket.id }), /honoured only when maxOrderValueIdr is also set/);
   assert.match(tradingPolicy().autoConfirmIgnored ?? "", /maxOrderValueIdr/);
 });
 
 test("autoConfirm covers an order under the cap and refuses one over it", async () => {
-  setPolicy({ enabled: true, autoConfirm: true, maxOrderValueIdr: 3_000_000 });
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
   const small = await buyTicket();
   const result = await placeBuy({ ticketId: small.id });
   assert.equal(result.outcome, "ok");
 
-  setPolicy({ enabled: true, autoConfirm: true, maxOrderValueIdr: 1_000_000 });
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 1_000_000 });
   const big = await buyTicket();
   await refuses(() => placeBuy({ ticketId: big.id }), /autoConfirm covers orders up to Rp 1,000,000/);
 });
@@ -685,7 +685,7 @@ test("trading_status answers with no session and no requests", async () => {
 });
 
 test("a StockbitError from a refusal is a refusal, not an upstream failure", async () => {
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   const ticket = await buyTicket();
   await assert.rejects(
     () => placeBuy({ ticketId: ticket.id, confirm: true }),

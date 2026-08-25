@@ -363,6 +363,22 @@ export function installedBrowsers(): string[] {
 }
 
 /**
+ * Whether this process has been told never to open a browser window.
+ *
+ * Read truthily rather than as `=== "1"`, because the value does not only come from a person
+ * exporting a shell variable. Claude Desktop substitutes an extension's boolean user setting into
+ * the environment, and a ticked checkbox arrives as the string `"true"` — an exact match against
+ * `"1"` would have let someone tick "never open a browser window" and then watch one open. `0`,
+ * `false`, `no`, `off` and empty all mean "not suppressed"; anything else means suppressed, which
+ * is the safe way round for a flag whose whole purpose is to refuse.
+ */
+export function browserSuppressed(): boolean {
+  const raw = process.env.STOCKBIT_NO_BROWSER?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return false;
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+/**
  * Open a URL, in a named browser when one is chosen and the OS default handler otherwise. The
  * default handler launches a browser when none is running and adds a tab when one is, which is why
  * "force open the browser" needs no separate branch.
@@ -373,7 +389,7 @@ export function installedBrowsers(): string[] {
  * error.
  */
 export function openUrl(url: string, preferred?: string): { opened: boolean; via: string } {
-  if (process.env.STOCKBIT_NO_BROWSER === "1") return { opened: false, via: "suppressed" };
+  if (browserSuppressed()) return { opened: false, via: "suppressed" };
 
   const chosen = resolveBrowser(preferred);
   const { command, args } = chosen ? { command: chosen.path, args: [url] } : opener(url);
@@ -394,7 +410,7 @@ export type BrowserAction =
   | "already-open" // a Stockbit page was found; nothing was touched
   | "opened-tab" // a browser was running, so this added a tab to it
   | "launched-browser" // no browser was running; the default one was started
-  | "suppressed"; // STOCKBIT_NO_BROWSER=1
+  | "suppressed"; // STOCKBIT_NO_BROWSER
 
 export interface EnsureResult extends BrowserPresence {
   action: BrowserAction;

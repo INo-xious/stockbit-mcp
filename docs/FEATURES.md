@@ -1,11 +1,13 @@
-# Features and how to use them
+# User guide
 
-134 tools over Stockbit's private APIs, plus a standalone alert daemon.
+Tools over Stockbit's private APIs, plus a standalone alert daemon. The complete, generated list —
+every tool, its evidence and its arguments — is [`TOOLS.md`](TOOLS.md); this page is the tour.
 
-Most of them read. Twelve write: the four order tools, the e-IPO subscription, the Chartbit drawing
-and layout tools, and the watchlist and screener edits. Every one requires an explicit
-per-action confirmation, and trading is **off** until you turn it on yourself at a terminal. If you
-never do, nothing here can reach your money.
+Most of them read. Twenty-four write: the four order tools, the e-IPO subscription, the eight
+Chartbit drawing and layout tools, the nine watchlist and screener edits, and `login`/`logout`. They
+are confirmation-gated; order entry defaults to per-action confirmation, with a deliberately enabled,
+value-capped live autoconfirm exception. Trading is **off** until you turn it on yourself at a
+terminal. If you never do, nothing here can reach your money.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
 argument names below matter when you want to be specific ("broker summary for BBRI from 2026-07-01
@@ -76,7 +78,7 @@ the real cause instead, which for an expired token is "run `stockbit-auth login`
 auto-rejection floor, every broker on both sides fills at one price and accumulation-versus-
 distribution carries no information. Read that as unreliable, not as bearish.
 
-Cost is about 22 upstream requests at the default 260 bars, issued **sequentially** — a fan-out of
+Cost is about 27 upstream requests at the default 260 bars — 22 bar pages plus five single-shot reads, issued **sequentially** — a fan-out of
 concurrent first-calls is what invalidated the stored session token on 2026-08-05. Use `technicals`
 or `timeframe_alignment` if you only want the numbers.
 
@@ -124,10 +126,11 @@ probability and says nothing about what followed.
 
 `timeframe_alignment` folds daily bars into weekly and monthly and reports whether they agree.
 Stockbit serves daily bars only, so those are resampled, and there is **no** 4H/1H/15m OHLC — the
-intraday feed is a minutely close-only series for the current session. About 500 sessions are
-reachable, which is ~104 weekly and ~24 monthly bars, so a monthly RSI(14) is reported `null`
-rather than computed from a window that has not converged. The `limits` field says so in the
-payload.
+intraday feed is a minutely close-only series for the current session. The paged bar path caps at
+about 500 sessions (~2 years), which is ~104 weekly and ~24 monthly bars, so a monthly RSI(14) is
+reported `null` rather than computed from a window that has not converged. The `limits` field says
+so in the payload. `chart_series` reaches further — `timeframe=5y` in a single request — but its
+field mapping is **Projected**, so check `unmapped` before trusting a candle from it.
 
 ## Screening (added 2026-08-09)
 
@@ -254,7 +257,7 @@ Alerts only fire on their own if this is running. An MCP server exists only whil
 open; a rule that triggers at 14:20 on a Tuesday needs a separate process.
 
 ```bash
-node "C:\Users\<you>\stockbit-mcp\dist\bin\stockbit-alerts.js" watch
+npx -y -p stockbit-mcp stockbit-alerts watch
 ```
 
 | command | what it does |
@@ -291,6 +294,9 @@ one.
 | `bandar_watch` | `symbol`*, `from`, `to` | broker summary → broker distribution |
 | `alert_sweep` | `symbol` | evaluate alerts → chart whatever fired |
 | `pine_handoff` | `symbol`*, `bars` | read levels from Stockbit → Pine that plots those exact levels |
+| `strategy_check` | `symbol`*, `bars` | technicals → every built-in strategy over the same history → Pine for the winner |
+| `screen_and_dive` | `max_symbols` | sweep today's movers for a condition → technicals and patterns for each hit |
+| `portfolio_review` | — | what the account actually holds → bandarmology and a weighted reading per holding |
 
 > "run a deep dive on BBRI"
 > "do the morning scan"
@@ -333,8 +339,8 @@ Checks whether Stockbit is already open in your browser and opens it if not.
 > "open BBRI on Stockbit"
 
 It opens **your own** browser, because that is the one holding your session — Chartbit renders a
-blank white page when signed out, which looks like a broken feature. `STOCKBIT_WEB_BROWSER` is set to
-`Microsoft Edge` in your config for that reason.
+blank white page when signed out, which looks like a broken feature. Pin the browser that holds the
+session with `STOCKBIT_WEB_BROWSER`, e.g. `STOCKBIT_WEB_BROWSER="Microsoft Edge"`.
 
 Detection is honest about its limits: on macOS every tab of every running browser is checked; on
 Windows and Linux only each window's **active** tab is visible, so a Stockbit tab sitting in the
@@ -370,12 +376,15 @@ one. The writes are confirm-gated, snapshot before touching anything, and verify
 An earlier version of this project targeted `/chartbit/{symbol}/layout` and concluded that saving
 was a server-side no-op. That was true of **those two routes**, which really are stubs, and wrong
 about Chartbit — the chart page's own save adapter writes to `/chartbit/charts` and
-`/chartbit/chart-drawings`. [chartbit-layout-format.md](chartbit-layout-format.md) keeps the
+`/chartbit/chart-drawings`. [research/chartbit-layout-format.md](research/chartbit-layout-format.md) keeps the
 original investigation with a correction on top.
 
 ---
 
 ## Files it writes
+
+All of it lives in one directory — `~/.stockbit` by default, or wherever
+`STOCKBIT_STORE_DIR` points. Nothing is written outside it.
 
 | path | what |
 |---|---|
@@ -395,11 +404,18 @@ original investigation with a correction on top.
 
 | variable | effect |
 |---|---|
-| `STOCKBIT_WEB_BROWSER` | which browser to open Stockbit in (set to `Microsoft Edge`) |
+| `STOCKBIT_STORE_DIR` | where everything on disk lives (credentials, settings, alerts, logs, charts, Pine). Default `~/.stockbit` |
+| `STOCKBIT_TRADING` | `off` (or `0`/`false`/`no`) forces trading off, whatever the settings file says. It can only lower the trading mode — no value of it turns trading on |
+| `STOCKBIT_BROWSER` | absolute path to the Chromium binary used for the one-time login capture |
+| `STOCKBIT_WEB_BROWSER` | which browser to open Stockbit in, e.g. `"Microsoft Edge"` — pin the one holding your session |
+| `STOCKBIT_NO_BROWSER=1` | never open a browser window; login refuses and names the terminal command instead |
+| `STOCKBIT_LOGIN_TIMEOUT_MS` | how long the login capture waits for you to sign in (default 5 minutes) |
+| `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only, never written to disk |
+| `STOCKBIT_FORCE_FILE_STORE=1` | skip the macOS Keychain and use the encrypted file store (what the tests run under) |
 | `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts; off unless set |
-| `STOCKBIT_NO_BROWSER=1` | never open a browser |
+| `STOCKBIT_TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather. Environment only — a token on the command line is visible to every user on the machine through `ps` |
+| `STOCKBIT_TELEGRAM_CHAT_ID` | Numeric chat id (a group's is negative). Message your bot once, then read it from `https://api.telegram.org/bot<token>/getUpdates` |
 | `STOCKBIT_DEBUG=1` | log response shapes on parse failures |
-| `STOCKBIT_TRADING=off` | force trading off, whatever the settings file says. It can only turn trading **off** — no value of it turns trading on |
 
 ## When the session expires
 
@@ -407,7 +423,7 @@ The refresh token rotates on a sliding 7-day window. Use it at least weekly and 
 leave it idle longer and you will see `HTTP 401`. Fix:
 
 ```bash
-node "C:\Users\<you>\stockbit-mcp\dist\bin\stockbit-auth.js" login
+npx -y -p stockbit-mcp stockbit-auth login
 ```
 
 Run it in your own terminal. Google sign-in is broken on Stockbit's own site (deprecated `gapi.auth2`,
@@ -430,10 +446,12 @@ than the happy path.
 
 ## What this cannot do
 
-- **It cannot turn trading on.** That is `stockbit-auth trading-enable`, run by you. The environment
-  can only turn it **off**, and no module the assistant can reach may write the settings file.
-- **It cannot place an order you did not agree to.** The write tools take a ticket id and a
-  confirmation, and no price and no quantity, so what reaches the exchange is what you were shown.
+- **It cannot turn trading on.** That is `stockbit-auth trading-enable`, run by you.
+  `STOCKBIT_TRADING` only moves a session **down** the ladder — never up — and no module the
+  assistant can reach may write the settings file.
+- **It cannot place an order outside the policy you chose.** The write tools take a ticket id, an
+  optional confirmation, and no price or quantity. The default requires per-order agreement; capped
+  live autoconfirm is an operator-enabled exception that a model cannot switch on or widen.
 - **A saved workflow recipe cannot reach anything that writes.** Recipes are data — a name and a
   list of steps — and `define.write` deliberately never registers a tool in the map the workflow
   engine looks names up in.

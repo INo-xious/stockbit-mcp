@@ -1,6 +1,6 @@
 /**
  * One-time bootstrap: take a refresh token captured from a real login (Network tab), validate it
- * by performing one refresh, and persist it to the store. See STOCKBIT-API.md §3 / plan Step 0.
+ * by performing one refresh, and persist it to the store. See docs/stockbit-api.md §3.
  */
 import { getStore } from "./store.js";
 import { forceRefresh, decodeJwt, resetSession } from "./session.js";

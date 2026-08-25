@@ -48,6 +48,24 @@ import { READINESS } from "./page-scripts.js";
 /** How long to wait for the widget to come up before giving up on a tab. */
 export const CHART_READY_TIMEOUT_MS = 45_000;
 
+/**
+ * Chrome flags that stop it throttling rendering for a window that is not the OS's frontmost app.
+ * Login capture does not need these — it only reads an intercepted request, never a painted pixel —
+ * so they are passed as `extraArgs` for the chart driver specifically rather than folded into
+ * `launchDebuggableBrowser`'s own defaults.
+ */
+const CHARTBIT_ANTI_THROTTLE_ARGS = [
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling",
+  // macOS's native window-occlusion tracking is the one that actually bit here: it stops
+  // compositing a window it judges to be covered on screen, independent of the Page Visibility API
+  // (`document.hidden` can read false while this still holds every paint). Confirmed against a live
+  // chart: the series had 1,530 bars loaded (isLoading:false, no error) with nothing painted, and
+  // the canvas started rendering the moment this feature was off.
+  "--disable-features=CalculateNativeWinOcclusion",
+];
+
 interface DriverRecord {
   port: number;
   pid: number;
@@ -203,6 +221,12 @@ export class ChartbitSession {
         bin: browser.path,
         profileDir: defaultProfileDir(),
         headless,
+        // Chromium pauses a backgrounded page's render loop by default, which is invisible from
+        // here: the widget still reports `hasChart: true` and the datafeed still returns real bars,
+        // but the canvas never paints, so a screenshot or a drawing lands on a chart that LOOKS
+        // empty while the window is not the user's frontmost app. These flags keep it rendering
+        // regardless of OS focus; `Target.activateTarget` below is the belt to this suspenders.
+        extraArgs: CHARTBIT_ANTI_THROTTLE_ARGS,
       });
       child = launched.child;
       wsUrl = launched.wsUrl;
@@ -246,16 +270,21 @@ export class ChartbitSession {
       throw new StockbitError("upstream", "Could not attach to the chart tab.");
     }
 
+    // Belt to the launch flags' suspenders: raise the tab even if something else (the user's own
+    // work) is the frontmost window. Without this, `hasChart`/`symbol` below can both be true while
+    // the canvas never painted a single bar — a chart that reads as ready but screenshots as empty.
+    await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+
     // Page and Runtime only. Never Network or Fetch — see the module note; the driver must not be
     // able to observe the session token it is drawing under.
     await this.cdp.send("Page.enable", {}, sessionId, 5_000).catch(() => {});
     await this.cdp.send("Runtime.enable", {}, sessionId, 5_000).catch(() => {});
 
-    if (existing) {
-      // An already-open tab may be showing a different symbol; navigating is cheaper and less
-      // surprising than opening another window.
-      await this.cdp.send("Page.navigate", { url }, sessionId, 10_000).catch(() => {});
-    }
+    // No re-navigate for `existing`: it was found by an exact match on this symbol's own chartbit
+    // URL, so it is already the right page. Reloading it anyway was the bug behind "the chart looks
+    // ready but screenshots empty" — `waitForChart` below only waits for the widget object and the
+    // right symbol to appear, which happens well before a freshly reloaded page's canvas has
+    // actually painted a bar, so every call against an open tab raced a reload it didn't need.
 
     const widgetKey = await this.waitForChart(sessionId, symbol, readyTimeoutMs);
     return { cdp: this.cdp, sessionId, targetId, symbol, widgetKey };
@@ -282,7 +311,7 @@ export class ChartbitSession {
             "Run `stockbit-auth login` and complete the login in the window it opens.",
         );
       }
-      if (last?.hasChart && (last.symbol ?? "").toUpperCase().endsWith(symbol)) {
+      if (last?.hasChart && last.hasBars && (last.symbol ?? "").toUpperCase().endsWith(symbol)) {
         return last.widgetKey;
       }
       if (Date.now() >= deadline) break;
@@ -300,7 +329,8 @@ export class ChartbitSession {
     throw new StockbitError(
       "upstream",
       `The chart for ${symbol} did not finish loading within ${Math.round(timeoutMs / 1000)}s ` +
-        `(widget ${last?.widgetKey ? "found" : "not found"}, showing ${last?.symbol ?? "nothing"}).`,
+        `(widget ${last?.widgetKey ? "found" : "not found"}, showing ${last?.symbol ?? "nothing"}` +
+        `${last?.hasChart ? `, bars ${last.hasBars ? "loaded" : "not loaded yet"}` : ""}).`,
     );
   }
 
@@ -324,6 +354,7 @@ interface Readiness {
   blank: boolean;
   widgetKey: string | null;
   hasChart: boolean;
+  hasBars: boolean;
   symbol: string | null;
   readyState: string;
 }

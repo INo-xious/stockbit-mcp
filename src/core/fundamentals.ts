@@ -11,7 +11,7 @@
  * ## None of these has been observed live except the last one
  *
  * Only the paywall check has a response this project has actually seen (recorded in
- * `docs/chartbit-layout-format.md`). Everything else here is wired from route names and Stockbit's
+ * `docs/research/chartbit-layout-format.md`). Everything else here is wired from route names and Stockbit's
  * own client parameters, which means the schemas below validate the *envelope* and almost nothing
  * else: every inner field is optional, every inner object passes through, and where a shape is
  * unmapped the payload is returned whole rather than projected into invented key names.
@@ -178,7 +178,7 @@ export interface Seasonality {
  * Month-by-month seasonal returns for one symbol.
  *
  * `year` is required by the endpoint — it answers 400 without one — so it is defaulted to the
- * current calendar year rather than omitted. `docs/CAPABILITY-RESEARCH.md` records it as the END of
+ * current calendar year rather than omitted. `docs/research/2026-08-05-capability-research.md` records it as the END of
  * a fixed ten-year lookback rather than a lookback length, which is why nothing here tries to derive
  * a range from it.
  *

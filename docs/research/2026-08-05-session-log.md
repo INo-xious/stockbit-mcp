@@ -1,5 +1,7 @@
 # Session log — 2026-08-05
 
+> **Historical (2026-08-05).** Kept as a record; conclusions superseded where noted. Most items below have since shipped.
+
 What was built, what was found, and what was got wrong. `c72ddfe` → `308cc01` on `main`, 23 commits.
 Tests **112 → 362**. Tools **15 → 26**.
 
@@ -137,8 +139,9 @@ one symbol take a lock.
 ## What I got wrong
 
 **I claimed chart saving was behind a Pro paywall. It is not.** I read `PAYWALL_FEATURE_CHARTBIT` and
-`isPro` gating in the page bundle and concluded a subscription was required. A collaborator pushed back — broker distribution, gated behind exactly that balance, already works
-for him. Stockbit answers the question directly:
+`isPro` gating in the page bundle and concluded a subscription was required. A collaborator
+pushed back — broker distribution, gated behind Stockbit's Rp 10,000,000 balance requirement,
+already worked for them. Stockbit answers the question directly:
 
 ```
 GET /paywall/eligibility/check?features=PAYWALL_FEATURE_CHARTBIT&company=BBRI
@@ -176,8 +179,8 @@ nothing. Each variable was ruled out separately:
 
 And the decisive one: **Stockbit's own page chunk has no save wiring at all** — no
 `save_load_adapter`, `auto_save_delay`, `onAutoSaveNeeded`, or `saveLayout` call site. The API
-function is defined in their client and never called. a collaborator drew a trendline in their UI and saved
-it; it did not persist there either.
+function is defined in their client and never called. A collaborator drew a trendline in the
+Stockbit UI and saved it; it did not persist there either.
 
 Along the way the format was fully recovered from their bundle, and `Fj` — the save encoder that
 could have made this unimplementable — turned out to be a three-line string replace

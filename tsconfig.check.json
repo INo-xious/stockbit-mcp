@@ -1,0 +1,6 @@
+{
+  "//": "Type-check everything the build compiles PLUS the scripts CI runs, which tsconfig.json deliberately keeps out of dist/. Emits nothing.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src/**/*.ts", "bin/**/*.ts", "scripts/**/*.ts"]
+}

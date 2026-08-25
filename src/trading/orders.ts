@@ -32,7 +32,6 @@
  * | `aborted-no-snapshot` | Thrown before the request: the before-state could not be read, so no comparison would have been possible. |
  */
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
@@ -41,8 +40,21 @@ import { acquireDirLock } from "../util/dirlock.js";
 import { invalidateCache } from "../core/_util.js";
 import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { listOrdersRaw, readOrderList, type Order } from "./account.js";
-import { fingerprintOf, idr, type OrderTicket } from "./preview.js";
+import { bestPrices, fingerprintOf, idr, type OrderTicket } from "./preview.js";
+import { getQuote } from "../core/emitten.js";
+import { getOrderbook } from "../core/pricefeed.js";
+import {
+  amendPaperOrder,
+  cancelPaperOrder,
+  loadLedger,
+  placePaperOrder,
+  saveLedger,
+  PAPER_BANNER,
+  type PaperMarket,
+  type PaperPlacementResult,
+} from "./paper.js";
 import { peek, take, type TicketBase } from "./tickets.js";
+import { stockbitDir } from "../paths.js";
 
 /**
  * The ticket store holds both kinds. This narrows to an exchange order, and refuses rather than
@@ -54,10 +66,6 @@ function asOrderTicket(ticket: TicketBase): OrderTicket {
     refuse(`Ticket ${ticket.id} is an e-IPO subscription, not an exchange order. Use the e-IPO tools.`);
   }
   return ticket as OrderTicket;
-}
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
 }
 
 /** Where every order attempt is recorded, whatever its outcome. */
@@ -99,6 +107,12 @@ export interface OrderResult {
   logged: boolean;
   logPath: string;
   at: string;
+  /** Set on every paper result. Its absence means the order went to the exchange. */
+  paper?: true;
+  /** What the ledger did with it, and how approximate that is. Paper only. */
+  fill?: { status: "filled" | "open"; price?: number; model: "paper-approximate"; note: string };
+  /** One sentence of paper-specific explanation, always opening with the PAPER banner. */
+  paperNote?: string;
 }
 
 /**
@@ -299,7 +313,7 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
  * Throws only before the request. After it, returns a description — see the outcome table above.
  */
 export async function submitOrder(options: SubmitOptions): Promise<OrderResult> {
-  const { ticket, via } = await passGates(options);
+  const { ticket, via, policy } = await passGates(options);
   const at = new Date().toISOString();
   const base = {
     ticketId: ticket.id,
@@ -329,10 +343,148 @@ export async function submitOrder(options: SubmitOptions): Promise<OrderResult> 
   }
 
   try {
-    return await performOrder(ticket, via, at, base);
+    // Paper mode diverges HERE and nowhere earlier, which is the whole design. Everything above —
+    // the policy gate, the ticket, the confirmation, the elicitation, the fingerprint check, the
+    // per-symbol lock — has already run identically. What changes is where the order goes.
+    return policy.mode === "paper"
+      ? await performPaperOrder(ticket, via, at, base)
+      : await performOrder(ticket, via, at, base);
   } finally {
     release();
   }
+}
+
+/**
+ * The paper path: the same result shape, filled from a local ledger.
+ *
+ * It returns the same `outcome` vocabulary as the real path because a user rehearsing here should
+ * be reading the same words they will read live. `ok` still means "the ledger shows it", which is
+ * the paper equivalent of "the exchange showed it on the read-back" — and, unlike the real path, it
+ * cannot be uncertain: the ledger is a local file this process just wrote.
+ */
+async function performPaperOrder(
+  ticket: OrderTicket,
+  via: ConfirmationSource,
+  at: string,
+  base: ResultBase,
+): Promise<OrderResult> {
+  const now = new Date(at);
+  const ledger = loadLedger();
+  const before = ledger.orders.filter((o) => o.status === "open").length;
+
+  const finish = (
+    outcome: OrderOutcomeKind,
+    verified: boolean,
+    extra: { orderId?: string; error?: string; fill?: Record<string, unknown>; reason?: string } = {},
+  ): OrderResult => {
+    const logged = logOrder({ ...base, via, mode: "paper", outcome, verified, ordersBefore: before, ...extra });
+    return {
+      ...base,
+      ...(extra.orderId ? { orderId: extra.orderId } : {}),
+      outcome,
+      verified,
+      ordersBefore: before,
+      ...(extra.error ? { error: extra.error } : {}),
+      logged,
+      paper: true,
+      ...(extra.fill ? { fill: extra.fill } : {}),
+      ...(extra.reason ? { paperNote: extra.reason } : {}),
+    } as OrderResult;
+  };
+
+  try {
+    if (ticket.action === "cancel") {
+      const orderId = ticket.orderId as string;
+      const result = cancelPaperOrder(ledger, orderId);
+      saveLedger(result.ledger);
+      return finish("ok", true, {
+        orderId: result.order.id,
+        reason: `${PAPER_BANNER} Paper order ${result.order.id} is cancelled in the ledger.`,
+      });
+    }
+
+    const market = await paperMarket(ticket.symbol);
+
+    if (ticket.action === "amend") {
+      const result = amendPaperOrder(
+        ledger,
+        ticket.orderId as string,
+        { price: ticket.price as number, lots: (ticket.shares as number) / 100 },
+        market,
+        now,
+      );
+      saveLedger(result.ledger);
+      return finish("ok", true, {
+        orderId: result.order.id,
+        reason: `${PAPER_BANNER} ${result.reason}`,
+        fill: paperFill(result),
+      });
+    }
+
+    const result = placePaperOrder(
+      ledger,
+      {
+        symbol: ticket.symbol,
+        action: ticket.action,
+        price: ticket.price as number,
+        lots: (ticket.shares as number) / 100,
+      },
+      market,
+      now,
+    );
+    saveLedger(result.ledger);
+    return finish("ok", true, {
+      orderId: result.order.id,
+      reason: `${PAPER_BANNER} ${result.reason}`,
+      fill: paperFill(result),
+    });
+  } catch (err) {
+    // A refusal from the ledger (no cash, no position, no such order) is a rejection, which is
+    // exactly the class the real path would use for the same refusal from the exchange.
+    const message = err instanceof Error ? err.message : String(err);
+    return finish("rejected", true, { error: message });
+  }
+}
+
+function paperFill(result: PaperPlacementResult): Record<string, unknown> {
+  return {
+    status: result.filled ? "filled" : "open",
+    ...(result.filled ? { price: result.order.fillPrice } : {}),
+    model: "paper-approximate",
+    note:
+      "Close-only minutely data, no queue position, no partial fills. A real order at this price " +
+      "might not have filled, or might have filled in part.",
+  };
+}
+
+/**
+ * Marks for the paper fill rule, read the same way the preview reads them.
+ *
+ * `bestPrices` is the reader `order_preview` already uses over the depth payload — reused rather
+ * than reimplemented, so a paper fill and the preview that priced it cannot disagree about what the
+ * market was.
+ *
+ * A failure is not fatal: with no bid or offer the order is left open, which is the conservative
+ * reading. It fills on the next settlement pass if the session prints through the limit.
+ */
+async function paperMarket(symbol: string): Promise<PaperMarket> {
+  let bid: number | null = null;
+  let offer: number | null = null;
+  let last: number | null = null;
+  try {
+    const book = await getOrderbook(symbol);
+    ({ bid, offer } = bestPrices(book));
+  } catch {
+    /* no depth; the order stays open */
+  }
+  try {
+    const quote = await getQuote(symbol);
+    const parsed = Number(String(quote.price).replace(/,/g, ""));
+    last = Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    /* no mark */
+  }
+  return { bid, offer, last };
 }
 
 type ResultBase = Omit<OrderResult, "outcome" | "verified" | "ordersBefore" | "logged">;

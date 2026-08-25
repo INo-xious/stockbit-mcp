@@ -154,7 +154,7 @@ beforeEach(() => {
   wire.failDetailFrom = null;
   wire.verifyBody = { data: { valid: true } };
   wire.hideOrder = false;
-  setPolicy({ enabled: true, maxOrderValueIdr: 100_000_000 });
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000 });
 });
 
 /* ------------------------------------ the grant ------------------------------------ */
@@ -290,7 +290,7 @@ async function refuses(fn: () => Promise<unknown>, pattern: RegExp): Promise<voi
 
 test("trading off refuses the subscription and names the settings file", async () => {
   const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  setPolicy({ enabled: false });
+  setPolicy({ mode: "off" });
   await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /Trading is off/);
 });
 

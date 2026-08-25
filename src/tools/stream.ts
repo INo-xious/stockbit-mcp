@@ -159,8 +159,9 @@ export function registerStreamTools(define: Definer): void {
   );
 
   define.read(
-    "stream_post",
-    "One post by its id, with the whole payload the detail endpoint returns.\n" +
+    "stream_post_detail",
+    "Read ONE post by id, with the whole payload the detail endpoint returns. This is a READ — it " +
+      "does not post anything, and nothing in this server can post to the stream.\n" +
       "Use it to read a post a stream page truncated, or to see the replies and counters a list row " +
       "does not carry. The id is the `id` of a row from any stream tool (or `nextCursor`), and it is " +
       "numeric — a profile slug or a URL fragment is rejected before any request is made.\n" +

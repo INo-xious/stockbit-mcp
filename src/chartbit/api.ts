@@ -20,7 +20,6 @@
  * nothing. This is where the chart page's own save adapter points.
  */
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { deleteJson, getJson, postJson, putJson } from "../http/client.js";
@@ -37,10 +36,7 @@ import {
   type Drawing,
   type StoredSource,
 } from "./codec.js";
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
+import { stockbitDir } from "../paths.js";
 
 function backupDir(): string {
   return join(stockbitDir(), "layout-backups");

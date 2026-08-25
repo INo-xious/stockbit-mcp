@@ -14,11 +14,17 @@
  *   stockbit-alerts check --dry-run       evaluate without firing or delivering
  *   stockbit-alerts test                  send a sample notification through every channel
  *
- * Flags: --symbol BBRI, --no-desktop, --webhook <url> (or STOCKBIT_ALERT_WEBHOOK).
+ * Flags: --symbol BBRI, --no-desktop, --no-telegram, --webhook <url> (or STOCKBIT_ALERT_WEBHOOK).
+ *
+ * Telegram is configured by environment only — `STOCKBIT_TELEGRAM_BOT_TOKEN` and
+ * `STOCKBIT_TELEGRAM_CHAT_ID`. Deliberately not a flag: a bot token on the command line is visible
+ * to every other user on the machine through `ps`, and this process is meant to run for weeks.
+ * Get the token from @BotFather, then message your bot once and read the chat id from
+ * `https://api.telegram.org/bot<token>/getUpdates`.
  */
 import { getBars } from "../src/core/bars.js";
 import { tick, watch, isMarketOpen, type TickResult } from "../src/alerts/daemon.js";
-import { alertLogPath, deliver } from "../src/alerts/notify.js";
+import { alertLogPath, deliver, telegramTargetFromEnv } from "../src/alerts/notify.js";
 import { loadRules } from "../src/alerts/store.js";
 
 function flag(name: string): boolean {
@@ -65,6 +71,9 @@ async function main(): Promise<void> {
     dryRun: flag("dry-run"),
     desktop: !flag("no-desktop"),
     webhookUrl: value("webhook"),
+    // `false` means "skip even if the environment configures it"; `undefined` means "use whatever
+    // the environment says", which is what `deliver` resolves.
+    telegram: flag("no-telegram") ? (false as const) : undefined,
   };
 
   if (command === "test") {
@@ -78,6 +87,7 @@ async function main(): Promise<void> {
       options,
     );
     console.log(JSON.stringify(result, null, 2));
+    console.log(`channels: ${describeChannels(options)}`);
     console.log(`log: ${alertLogPath()}`);
     process.exitCode = result.errors.length ? 1 : 0;
     return;
@@ -100,6 +110,7 @@ async function main(): Promise<void> {
     `stockbit-alerts watching ${rules.length} rule(s), every ${interval / 1000}s` +
       `${options.always ? "" : ", IDX hours only"}${isMarketOpen(new Date()) ? "" : " — market is currently closed"}`,
   );
+  console.log(`channels: ${describeChannels(options)}`);
   console.log(`log: ${alertLogPath()}`);
 
   const controller = new AbortController();
@@ -110,6 +121,30 @@ async function main(): Promise<void> {
     });
   }
   await watch(fetchBars, { ...options, intervalMs: interval, onTick: report, signal: controller.signal });
+}
+
+/**
+ * Which channels are live, so a user who configured one and sees nothing knows which end is wrong.
+ *
+ * Names the channels, never the credentials: the bot token is not printed, and neither is the chat
+ * id, which identifies the account.
+ */
+function describeChannels(options: { desktop: boolean; webhookUrl?: string; telegram?: false }): string {
+  const channels = ["log"];
+  if (options.desktop) channels.push("desktop");
+  if (options.webhookUrl ?? process.env.STOCKBIT_ALERT_WEBHOOK?.trim()) channels.push("webhook");
+  if (options.telegram === false) {
+    channels.push("telegram (off: --no-telegram)");
+  } else if (telegramTargetFromEnv()) {
+    channels.push("telegram");
+  } else if (process.env.STOCKBIT_TELEGRAM_BOT_TOKEN || process.env.STOCKBIT_TELEGRAM_CHAT_ID) {
+    // Half-configured is the case worth naming: the user believes it is on.
+    channels.push(
+      "telegram (NOT configured: needs both STOCKBIT_TELEGRAM_BOT_TOKEN and a numeric " +
+        "STOCKBIT_TELEGRAM_CHAT_ID)",
+    );
+  }
+  return channels.join(", ");
 }
 
 main().catch((err) => {

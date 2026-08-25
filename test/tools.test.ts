@@ -20,8 +20,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { makeDefiner, type ToolHandler } from "../src/tools/_define.ts";
+import { makeDefiner, FAMILIES, FAMILY_META_KEY, EVIDENCE_META_KEY, type ToolHandler } from "../src/tools/_define.ts";
 import { registerTools } from "../src/tools/register.ts";
+import { describeSurface } from "../src/tools/surface.ts";
+import { buildInstructions } from "../src/instructions.ts";
 
 /**
  * Every tool that can change something. Spelled out rather than derived, because deriving it from
@@ -38,6 +40,8 @@ const WRITES = [
   "chartbit_save",
   "chartbit_study",
   "eipo_order",
+  "login",
+  "logout",
   "order_amend",
   "order_buy",
   "order_cancel",
@@ -54,14 +58,28 @@ const WRITES = [
 ];
 
 /** A server stub that records registrations without needing a transport. */
-function stubServer(): { server: McpServer; registered: Map<string, { annotations?: Record<string, unknown> }> } {
-  const registered = new Map<string, { annotations?: Record<string, unknown> }>();
+interface Registered {
+  description?: string;
+  annotations?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+}
+
+function stubServer(): { server: McpServer; registered: Map<string, Registered> } {
+  const registered = new Map<string, Registered>();
   const server = {
-    registerTool: (name: string, config: { annotations?: Record<string, unknown> }) => {
+    registerTool: (name: string, config: Registered) => {
       registered.set(name, config);
     },
   } as unknown as McpServer;
   return { server, registered };
+}
+
+/** Read the `_meta` a real server stored for each tool. */
+function metaOf(server: McpServer): Record<string, Record<string, unknown> | undefined> {
+  const tools = (server as unknown as {
+    _registeredTools: Record<string, { _meta?: Record<string, unknown> }>;
+  })._registeredTools;
+  return Object.fromEntries(Object.entries(tools).map(([name, config]) => [name, config._meta]));
 }
 
 test("define.read joins the workflow handler map and define.write never does", () => {
@@ -148,4 +166,113 @@ test("destructiveHint is graded rather than uniform", () => {
   for (const name of ["watchlist_add", "watchlist_create", "watchlist_rename", "screener_save"]) {
     assert.equal(tools[name].annotations?.destructiveHint, false, `${name} is reversible in two taps`);
   }
+});
+
+
+/* ------------------------------ families and evidence ------------------------------ */
+
+test("every tool says which family it belongs to", () => {
+  const server = new McpServer({ name: "stockbit-mcp", version: "test" });
+  registerTools(server);
+  const meta = metaOf(server);
+  const families = new Set<string>(FAMILIES);
+
+  const missing: string[] = [];
+  for (const [name, m] of Object.entries(meta)) {
+    const family = m?.[FAMILY_META_KEY];
+    if (typeof family !== "string" || !families.has(family)) missing.push(`${name} -> ${String(family)}`);
+  }
+  assert.deepEqual(missing, [], "a tool with no family cannot be filtered, documented or found");
+});
+
+test("every tool carries an evidence word, and it is one of the three", () => {
+  const server = new McpServer({ name: "stockbit-mcp", version: "test" });
+  registerTools(server);
+  const allowed = new Set(["observed", "read-back", "projected"]);
+
+  const wrong: string[] = [];
+  for (const [name, m] of Object.entries(metaOf(server))) {
+    const evidence = m?.[EVIDENCE_META_KEY];
+    if (typeof evidence !== "string" || !allowed.has(evidence)) wrong.push(`${name} -> ${String(evidence)}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("a tool whose description says it has never been observed is tagged projected", () => {
+  // The description is where this fact already lives; the tag is derived from it so the two cannot
+  // disagree. This asserts the derivation actually reaches the whole surface — including the four
+  // spellings the phrase has across the family modules.
+  const surface = describeSurface();
+  const contradictions = surface.tools
+    .filter((t) => /PENDING VERIFICATION|not been observed/i.test(t.description) && t.evidence !== "projected")
+    .map((t) => `${t.name} is ${t.evidence}`);
+  assert.deepEqual(contradictions, []);
+
+  const projected = surface.tools.filter((t) => t.evidence === "projected");
+  assert.ok(projected.length > 50, `expected the unobserved half to be large, got ${projected.length}`);
+});
+
+test("claiming a tool is observed while its description denies it is a registration error", () => {
+  const { server } = stubServer();
+  const define = makeDefiner(server, new Map());
+  assert.throws(
+    () =>
+      define.read(
+        "liar",
+        "PENDING VERIFICATION: this route has not been observed live.",
+        {},
+        async () => ({}),
+        { evidence: "observed" },
+      ),
+    /has not been observed live/,
+  );
+});
+
+test("the legacy tools are annotated read-only now that they go through the same door", () => {
+  // They used to be registered by intercepting `server.tool`, which set no annotations at all — so
+  // a client had no way to know `quote` was safe and `order_buy` was not.
+  const server = new McpServer({ name: "stockbit-mcp", version: "test" });
+  registerTools(server);
+  const tools = (server as unknown as {
+    _registeredTools: Record<string, { annotations?: { readOnlyHint?: boolean } }>;
+  })._registeredTools;
+
+  for (const name of ["quote", "broker_summary", "technicals", "analyze", "workflow_run", "scan"]) {
+    assert.equal(tools[name].annotations?.readOnlyHint, true, `${name} is a read and should say so`);
+  }
+});
+
+/* ---------------------------------- instructions ---------------------------------- */
+
+test("the instructions name every write tool, and count them", () => {
+  // This sentence used to read "the four order tools and the chartbit_* writes" while twenty-two
+  // tools could change something. A hand-written enumeration of a growing set has an expiry date.
+  const surface = describeSurface();
+  const instructions = buildInstructions(surface);
+
+  for (const name of WRITES) {
+    assert.ok(instructions.includes(name), `instructions never mention ${name}`);
+  }
+  assert.ok(
+    instructions.includes(`${WRITES.length} of ${surface.tools.length}`),
+    "instructions should say how many of how many can change something",
+  );
+  assert.ok(instructions.includes("CALL status FIRST"), "the instructions should point a confused client at status");
+});
+
+test("describeSurface agrees with a real server, without starting one", () => {
+  const server = new McpServer({ name: "stockbit-mcp", version: "test" });
+  registerTools(server);
+  const live = Object.keys(
+    (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
+  ).sort();
+
+  const surface = describeSurface();
+  assert.deepEqual(
+    surface.tools.map((t) => t.name).sort(),
+    live,
+    "the recorder and the server must see the same surface, or the instructions describe a fiction",
+  );
+  assert.deepEqual(surface.writes, WRITES);
+  assert.deepEqual(surface.skipped, []);
 });

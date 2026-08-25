@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/INo-xious/stockbit-mcp/security/advisories/new
+    about: Never in a public issue. Report privately here — see SECURITY.md.
+  - name: Questions and ideas
+    url: https://github.com/INo-xious/stockbit-mcp/discussions
+    about: How do I ask for X, is this the right tool, what does this number mean.
+  - name: Login will not work
+    url: https://github.com/INo-xious/stockbit-mcp/blob/main/docs/TESTING-LOGIN.md
+    about: Read this first — most login problems are one of four known ones.

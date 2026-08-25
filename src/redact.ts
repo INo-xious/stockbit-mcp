@@ -28,6 +28,22 @@ const PIN_FIELD_RE = /("?pin"?\s*[:=]\s*"?)\d{4,8}/gi;
 const LOGIN_TOKEN_RE = /("?login_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 const SECURITIES_TOKEN_RE = /("?securities_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 
+/**
+ * A Telegram bot token — `123456789:AAH...`, a numeric bot id, a colon, then 35 URL-safe characters.
+ *
+ * It has a shape of its own and is redacted by shape rather than only under a key, because the place
+ * it actually leaks is inside a URL: the Bot API puts the token in the *path*
+ * (`api.telegram.org/bot<token>/sendMessage`), so any error message that quotes the request URL
+ * carries the credential in full. Whoever holds it can send as that bot, forever, until it is
+ * revoked.
+ *
+ * Deliberately NOT anchored with `\b` on the left. In the URL the digits are immediately preceded by
+ * the letters `bot`, so there is no word boundary there at all — a `\b` would have made this pattern
+ * miss the single case it exists for. The colon plus thirty-odd URL-safe characters is specific
+ * enough on its own: a timestamp has two digits after the colon, and a JWT uses dots.
+ */
+export const TELEGRAM_BOT_TOKEN_RE = /\d{6,12}:[A-Za-z0-9_-]{30,}/g;
+
 const MASK = "[REDACTED]";
 
 /** Redact secrets from an arbitrary string. */
@@ -39,6 +55,7 @@ export function redact(input: string): string {
     .replace(LOGIN_TOKEN_RE, `$1${MASK}`)
     .replace(SECURITIES_TOKEN_RE, `$1${MASK}`)
     .replace(PIN_FIELD_RE, `$1${MASK}`)
+    .replace(TELEGRAM_BOT_TOKEN_RE, MASK)
     .replace(JWT_RE, MASK);
 }
 
@@ -54,7 +71,7 @@ export function redactValue(value: unknown, seen = new WeakSet<object>()): unkno
     // Drop known-sensitive keys entirely rather than masking their value.
     // The trading credentials join the list rather than getting their own pass: a PIN under a `pin`
     // key is dropped whole, because masking half of six digits still narrows the search space.
-    if (/^(authorization|refresh_token|access_token|token|pin|login_token|securities_token)$/i.test(k)) {
+    if (/^(authorization|refresh_token|access_token|token|pin|login_token|securities_token|bot_token)$/i.test(k)) {
       out[k] = MASK;
     } else {
       out[k] = redactValue(v, seen);

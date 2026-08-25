@@ -11,15 +11,11 @@
  * rollback, and deliberately so — see `verifiedWrite`.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { redactValue } from "../redact.js";
 import { acquireDirLock } from "../util/dirlock.js";
 import { StockbitError } from "../http/errors.js";
-
-function stockbitDir(): string {
-  return process.env.STOCKBIT_STORE_DIR || join(homedir(), ".stockbit");
-}
+import { stockbitDir } from "../paths.js";
 
 /** Where every account edit is recorded, whatever its outcome. */
 export function accountLogPath(): string {
