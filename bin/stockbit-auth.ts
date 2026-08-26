@@ -31,6 +31,7 @@ import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { clearWebSession } from "../src/auth/websession.js";
+import { clearAccessCache } from "../src/auth/accesscache.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
@@ -239,7 +240,8 @@ async function cmdLogout(argv: string[]): Promise<void> {
   // its browser from. It is a working Stockbit session on its own, so a logout that left it on disk
   // would not be a logout — the same reasoning that already removes the browser profile below.
   clearWebSession();
-  logStderr("Cleared the stored browser web session.");
+  clearAccessCache();
+  logStderr("Cleared the stored browser web session and the shared access-token cache.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
   // Chartbit driver at a browser with no session and no explanation.

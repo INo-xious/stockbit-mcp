@@ -30,6 +30,7 @@ import { acquireRefreshLock, REFRESH_LOCK_TIMEOUT_MS } from "./reflock.js";
 import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
 import { logStderr, redact } from "../redact.js";
+import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscache.js";
 
 export type { TokenDomain } from "../http/transport.js";
 
@@ -237,6 +238,26 @@ export function parseRefresh(body: unknown): { access: string; newRefresh?: stri
   return { access, newRefresh: typeof newRefresh === "string" ? newRefresh : undefined, expiresAt };
 }
 
+/**
+ * A cached access token for a domain, if there is one fresh enough to use.
+ *
+ * The skew is applied HERE rather than baked into what was stored, so changing
+ * `AUTH.expirySkewSeconds` takes effect immediately instead of only for tokens minted afterwards —
+ * and so this decision reads identically to the in-memory one in `ensureFresh`.
+ *
+ * Bound to the refresh token currently in the store: an access token minted from a different
+ * credential is a miss, not a hit. That is what stops a second account's login from leaving the
+ * first account's token on disk and making every request as the wrong person for a day.
+ */
+function fromAccessCache(domain: TokenDomain, nowSeconds: number): AccessToken | null {
+  const refreshToken = currentRefreshToken(domain);
+  if (!refreshToken) return null;
+  const entry = readAccessCache(domain, refreshToken);
+  if (!entry) return null;
+  if (entry.expiresAt - nowSeconds <= AUTH.expirySkewSeconds) return null;
+  return { token: entry.token, expiresAt: entry.expiresAt };
+}
+
 async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   // Serialised across processes, per domain: the refresh token rotates, so two processes refreshing
   // the SAME domain at once invalidate each other and the loser's token is what ends up on disk.
@@ -249,6 +270,18 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   // the lock is for.
   const release = await acquireRefreshLock(REFRESH_LOCK_TIMEOUT_MS, domain);
   try {
+    // Double-checked, and this `if` is the whole feature rather than an optimisation on top of it.
+    //
+    // Without it: two processes both miss the cache, both queue on this lock, the first refreshes
+    // and writes a perfectly good token to disk, and the second — already past its own check —
+    // refreshes anyway. That second refresh is a wasted rotation, which is precisely what the cache
+    // exists to prevent. Re-reading here, after the wait and before the request, is what turns the
+    // loser of the race into a cache hit instead of a second rotation.
+    const shared = fromAccessCache(domain, Math.floor(Date.now() / 1000));
+    if (shared) {
+      state[domain].current = shared;
+      return shared;
+    }
     return await refreshOnce(domain);
   } finally {
     release?.();
@@ -448,6 +481,10 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
     persistRotated(domain, store, newRefresh, refreshToken);
   }
 
+  // Share it, keyed to whichever refresh token is now current — the rotated one when there is one,
+  // because that is what the next process reads out of the store and checks against.
+  writeAccessCache(domain, access, expiresAt, newRefresh ?? refreshToken);
+
   return token;
 }
 
@@ -461,6 +498,10 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
 function adoptEnvAccessToken(): string | null {
   const raw = process.env.STOCKBIT_ACCESS_TOKEN?.trim();
   if (!raw) return null;
+  // Deliberately NOT written to the access cache. This token belongs to whoever set the variable in
+  // THIS process's environment; caching it would hand it to every other process on the machine,
+  // including ones the user never pointed at it. It is the CI and headless escape hatch, where a
+  // token pasted for one run must not outlive that run.
   state.main.current = { token: raw, expiresAt: expFromJwt(raw) };
   return raw;
 }
@@ -485,6 +526,15 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
       return env;
     }
   }
+  // Level two: the shared on-disk cache. An access token is good for 24 hours whoever asked for it,
+  // and minting one SPENDS a rotation of a credential only one process can hold at a time — so N
+  // clients each minting their own is N rotations for a token all of them could have used.
+  const cached = fromAccessCache(domain, now);
+  if (cached) {
+    slotState.current = cached;
+    return cached.token;
+  }
+
   // Coalesce concurrent refreshes of the same domain into one in-flight request.
   if (!slotState.inFlight) {
     slotState.inFlight = doRefresh(domain).finally(() => {
@@ -497,6 +547,11 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
 /** Force a refresh of one domain (used by the HTTP client on a 401). */
 export async function forceRefresh(domain: TokenDomain = "main"): Promise<string> {
   state[domain].current = null;
+  // The single most important line in the access cache. `forceRefresh` runs because the token in
+  // hand was rejected — and that same token is on disk, shared with every other process. Without
+  // this, the very next `ensureFresh` re-hydrates the dead token from the cache and the session
+  // 401s forever, having "refreshed" each time.
+  clearAccessCache(domain);
   return ensureFresh(domain);
 }
 

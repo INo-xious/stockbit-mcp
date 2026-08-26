@@ -21,7 +21,9 @@ import {
   type WebSession,
 } from "../src/auth/websession.ts";
 import { getStore } from "../src/auth/store.ts";
-import { forceRefresh, resetSession } from "../src/auth/session.ts";
+import { ensureFresh, forceRefresh, resetSession } from "../src/auth/session.ts";
+import { clearAccessCache, readAccessCache, writeAccessCache } from "../src/auth/accesscache.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 import { StockbitError } from "../src/http/errors.ts";
 
 const LOCK = join(process.env.STOCKBIT_STORE_DIR!, "refresh.lock");
@@ -479,6 +481,102 @@ test("a 401 with nothing newer in the web session still fails, and says how to r
     assert.equal(presented.length, 1, "the same token in both places is not a reason to retry");
   } finally {
     clearWebSession();
+    store.clear();
+    resetSession();
+  }
+});
+
+/* ------------------------ the shared access-token cache ------------------------ */
+
+/** What the fake server rotates TO on every successful refresh. */
+const ROTATED = jwt(2000000000, "rotated");
+
+test("a second process uses the shared access token instead of spending another rotation", async () => {
+  // The cost being avoided is not a request. Minting an access token SPENDS a rotation of a
+  // credential only one process can hold at a time, and there are normally several processes:
+  // Claude Code, Claude Desktop, a daemon, a CLI. Each one minting its own retires the others'.
+  const first = jwt(2000000000, "first");
+  const store = getStore();
+  store.set(first);
+  serverToken = first;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  try {
+    await ensureFresh();
+    assert.equal(presented.length, 1, "the first process refreshes");
+    assert.equal(store.get(), ROTATED, "and the rotation lands on disk");
+    assert.ok(readAccessCache("main", ROTATED), "the access token is shared, keyed to the ROTATED token");
+
+    // A second process: same disk, no in-memory state of its own.
+    resetSession();
+    const token = await ensureFresh();
+    assert.ok(token, "the second process gets a token");
+    assert.equal(presented.length, 1, "and did NOT spend a second rotation");
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("forceRefresh does not re-hydrate the token that just failed", async () => {
+  // The single most important line in the feature. forceRefresh runs BECAUSE the token in hand was
+  // rejected — and that same token is on disk, shared with every other process. Without the clear,
+  // the next ensureFresh reads the dead token straight back and the session 401s forever, having
+  // "refreshed" every time.
+  const first = jwt(2000000000, "before-force");
+  const store = getStore();
+  store.set(first);
+  serverToken = first;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  try {
+    await ensureFresh();
+    assert.equal(presented.length, 1);
+    assert.ok(readAccessCache("main", ROTATED), "there is now a cached token to re-hydrate from");
+
+    serverToken = ROTATED;
+    await forceRefresh();
+    assert.equal(presented.length, 2, "forceRefresh must go to the wire, never to the cache");
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("the loser of a lock race gets the winner's token rather than a second rotation", async () => {
+  // This is the double-checked read, and it is the whole feature rather than an optimisation on it.
+  // Without the re-read after acquiring the lock, both processes miss the cache, both queue, and the
+  // second refreshes anyway — a wasted rotation, which is exactly what the cache exists to prevent.
+  const stored = jwt(2000000000, "race");
+  const sharedAccess = jwt(2000000000, "minted-by-the-other-process");
+  const store = getStore();
+  store.set(stored);
+  serverToken = stored;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  const held = await acquireRefreshLock(2_000, "main");
+  assert.ok(held, "stand in for the process that is already refreshing");
+  try {
+    const queued = ensureFresh();
+    await sleep(60); // let it miss the cache and block on the lock
+
+    // The other process finishes and shares its token, exactly as `refreshOnce` does.
+    writeAccessCache("main", sharedAccess, Math.floor(Date.now() / 1000) + 86_400, stored);
+    held!();
+
+    assert.equal(await queued, sharedAccess, "the queued caller must adopt the shared token");
+    assert.equal(presented.length, 0, "and must not have issued a request at all");
+  } finally {
+    held!();
+    clearAccessCache();
     store.clear();
     resetSession();
   }

@@ -410,7 +410,8 @@ All of it lives in one directory — `~/.stockbit` by default, or wherever
 | `STOCKBIT_WEB_BROWSER` | which browser to open Stockbit in, e.g. `"Microsoft Edge"` — pin the one holding your session |
 | `STOCKBIT_NO_BROWSER=1` | never open a browser window; login refuses and names the terminal command instead |
 | `STOCKBIT_LOGIN_TIMEOUT_MS` | how long the login capture waits for you to sign in (default 15 minutes) |
-| `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only, never written to disk |
+| `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only — it is never written to the access cache, because it belongs to whoever set it in *this* process |
+| `STOCKBIT_NO_ACCESS_CACHE=1` | do not share the 24-hour access token between processes via `~/.stockbit/access.enc`. Costs one refresh per process, and each refresh rotates the refresh token — see SECURITY.md |
 | `STOCKBIT_FORCE_FILE_STORE=1` | skip the macOS Keychain and use the encrypted file store (what the tests run under) |
 | `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts; off unless set |
 | `STOCKBIT_TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather. Environment only — a token on the command line is visible to every user on the machine through `ps` |

@@ -46,6 +46,8 @@ import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
 import { getStore, type StoreSlot } from "../auth/store.js";
 import { withCredentialLock } from "../auth/reflock.js";
+import { clearWebSession } from "../auth/websession.js";
+import { clearAccessCache } from "../auth/accesscache.js";
 import { hasStoredSession, resetSession } from "../auth/session.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
@@ -159,6 +161,9 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "a terminal).\n" +
       "`scope` picks what to clear — `main` (market data), `trading` (the securities session, which " +
       "is also ended at Stockbit's end), `eipo`, or `all` (the default).\n" +
+      "Any scope covering `main` also clears the stored WEBSITE session (the browser cookies the " +
+      "chart tools run on) and the shared access-token cache. Both are usable Stockbit credentials " +
+      "on their own, so a logout that left them would not be one.\n" +
       "`remove_browser_profile: true` also deletes the saved browser profile. That profile is a " +
       "SECOND copy of the session — it holds Stockbit cookies — so on a shared or lost machine, " +
       "clearing the token without it is not really logging out.",
@@ -366,6 +371,27 @@ async function doLogout(request: LogoutRequest) {
     resetSession(slot === "securities" ? "securities" : slot);
   }
 
+  // The WEBSITE session, and the shared access-token cache.
+  //
+  // `doLogout` cleared neither. The CLI's `logout` has cleared the web session since it was added,
+  // so a logout through the MCP tool left a working, decryptable Stockbit session on disk — while
+  // this very tool's description called the browser profile "a SECOND copy of the session". A
+  // logout that leaves a usable credential is not one. The access cache is the same argument with a
+  // shorter fuse: it is a bearer token good for up to a day, and it is shared with every process on
+  // the machine.
+  //
+  // Both are cleared on any scope that includes `main`, because both belong to the main session.
+  let webSession = "not part of this scope";
+  if (scopes.includes("main")) {
+    try {
+      clearWebSession();
+      clearAccessCache();
+      webSession = "cleared, along with the shared access-token cache";
+    } catch (err) {
+      webSession = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
+    }
+  }
+
   let browserProfile = "kept — it still holds a logged-in Stockbit session";
   if (request.removeProfile) {
     try {
@@ -384,6 +410,7 @@ async function doLogout(request: LogoutRequest) {
   const report = await collectStatus();
   return jsonResult({
     cleared,
+    webSession,
     browserProfile,
     auth: report.auth,
     nextStep: report.nextStep,

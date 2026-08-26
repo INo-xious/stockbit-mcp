@@ -19,6 +19,7 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-session-te
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
+import { clearAccessCache } from "../src/auth/accesscache.ts";
 import { ensureFresh, forceRefresh, hasStoredSession, resetSession } from "../src/auth/session.ts";
 import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.ts";
 import { getJson } from "../src/http/client.ts";
@@ -69,6 +70,12 @@ function tokenResponse(access: string, refresh: string): Response {
 
 beforeEach(() => {
   resetSession();
+  // The access cache is SHARED ACROSS PROCESSES, so it is shared across tests in this file too —
+  // and `resetSession` deliberately does not clear it, because a fresh process is exactly what it
+  // models and a fresh process should find the cache. Every test here is about in-memory domain
+  // isolation, so each one starts from an empty cache; `test/accesscache.test.ts` and
+  // `test/reflock.test.ts` are where the sharing itself is asserted.
+  clearAccessCache();
   for (const slot of ["main", "securities", "eipo"] as const) getStore(slot).clear();
   globalThis.fetch = realFetch;
 });
@@ -149,10 +156,17 @@ test("resetSession(domain) drops only that domain", async () => {
   await ensureFresh("main");
   resetSession("securities");
   await ensureFresh("main");
-  assert.equal(mainRefreshes, 1);
+  assert.equal(mainRefreshes, 1, "resetting another domain must not cost the market-data session a refresh");
+
   resetSession("main");
+  // `resetSession` drops the IN-MEMORY token and deliberately stops there. The shared on-disk copy
+  // is still unexpired and still bound to this refresh token, so the next call rightly uses it
+  // rather than spending another rotation — that is the access cache doing its job, and a fresh
+  // process would do the same. Clearing it here is what makes the next call actually go to the
+  // wire, which is what this test is about.
+  clearAccessCache("main");
   await ensureFresh("main");
-  assert.equal(mainRefreshes, 2);
+  assert.equal(mainRefreshes, 2, "resetting this domain must drop its own token");
 });
 
 test("a missing trading session names the command that creates one", async () => {

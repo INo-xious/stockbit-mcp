@@ -56,8 +56,11 @@ you did not start.
 - **Three token domains, three separate stores.** `exodus` (market data), `carina` (Stockbit
   Sekuritas), `api-sekuritas` (e-IPO). Logging out of one leaves the others alone, and the route
   table decides which credential each request may carry.
-- **Access tokens are never written to disk.** Only the refresh token is stored, and it is rotated
-  on every use.
+- **The 24-hour access token is cached on disk, encrypted, and shared between processes.** Because
+  the refresh token rotates on every use, N clients each minting their own access token retire each
+  other's credential. Same AES-256-GCM and mode `0600` as the file-backend refresh token — which on
+  macOS is a genuine reduction, since there the refresh token is in the Keychain and this is not.
+  `STOCKBIT_NO_ACCESS_CACHE=1` turns it off. See [SECURITY.md](SECURITY.md).
 - **A closed route table.** 153 permitted request shapes across three hosts, enumerated in
   `src/http/routes/`. Anything not in that table cannot be requested — `test/transport.test.ts`
   asserts it, and every one of the 32 non-GET routes is admitted by a named decision record.

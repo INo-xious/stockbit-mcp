@@ -38,7 +38,27 @@ under `~/.stockbit` (or `$STOCKBIT_STORE_DIR`) whose key is derived from the
 machine's hostname and username.** That is obfuscation, not a vault: anything
 running as the same user on the same machine can derive the same key. Treat a
 Windows or Linux install as "the token is on disk" and protect the account
-accordingly. Access tokens are never written to disk on any platform.
+accordingly.
+
+**Access tokens are cached on disk too, and that is a change worth reading.**
+This project used to promise that they never were. Stockbit rotates the refresh
+token on every use, so several processes — Claude Code, Claude Desktop, a watch
+daemon, a CLI — each minting their own access token retire each other's
+credential and the account ends up logged out for reasons nobody can see. They
+share one instead: `~/.stockbit/access.enc`, keyed by token domain, AES-256-GCM
+at mode `0600`, with its own salt.
+
+What that costs is not the same on every platform, and the difference is the
+part that matters. On Windows and Linux it is exactly the protection the refresh
+token already has — the same encryption, the same mode, the same derived key —
+so nothing changes. **On macOS this is a genuine reduction:** there the refresh
+token is in the Keychain, and this file is not. A 24-hour bearer token for your
+Stockbit account now sits in an encrypted file rather than behind the Keychain,
+and anything running as you on that machine can derive the key.
+
+Set `STOCKBIT_NO_ACCESS_CACHE=1` to turn it off in both directions — nothing is
+read and nothing is written — and pay one refresh per process instead.
+`stockbit-auth logout` clears it, as it clears everything else.
 
 ## Reporting a Vulnerability
 
