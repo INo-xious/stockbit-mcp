@@ -95,7 +95,7 @@ test("the extension's user settings are substituted into those variables", () =>
 
 /* ---------------------------------------- skills ---------------------------------------- */
 
-test("the plugin ships the six skills, each named after its directory", () => {
+test("the plugin ships the eight skills, each named after its directory", () => {
   const dirs = readdirSync(join(ROOT, "skills"), { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
@@ -106,6 +106,8 @@ test("the plugin ships the six skills, each named after its directory", () => {
     "chart-markup",
     "morning-scan",
     "stock-deep-dive",
+    "stockbit-auth",
+    "stockbit-status",
     "strategy-backtest",
     "trade-with-guardrails",
   ]);
