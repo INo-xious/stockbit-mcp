@@ -38,7 +38,9 @@ Exit code is non-zero if any check fails, so it works in CI.
 npm test
 ```
 
-68 tests, all offline. Relevant to login:
+Every test is offline and there are no skips; `npm test` prints the count (a little over 1,100
+today). A number written down here goes stale the next time anyone adds a file, so it is not.
+Relevant to login:
 
 | File | Covers |
 |---|---|

@@ -41,9 +41,17 @@ export const HOSTS = {
  * every authenticated host/method/path, and a second copy of the path would be a second thing to
  * keep in sync with the policy (ADR-0002).
  *
- * Still unverified until a real refresh with a valid token is observed: the exact success-response
- * field names (where the new access token lives) and whether the refresh token rotates.
- * parseRefresh() handles those defensively.
+ * **The refresh token rotates. That is OBSERVED, not assumed.** Every successful call to this route
+ * mints a new refresh token and retires the one presented: a stored token issued three minutes
+ * earlier, with seven days left on its expiry, was rejected outright. The same observation is
+ * written down twice more — `src/auth/reflock.ts` (why a cross-process lock exists at all) and
+ * `cmdLogin` in `bin/stockbit-auth.ts` (why a successful login no longer verifies itself by
+ * refreshing). It used to say "unverified" here, and a contributor reading that will re-introduce
+ * the bug those two comments describe, which is why the hedge is gone.
+ *
+ * Still unverified: the exact success-response field names — where the new access token lives.
+ * `parseRefresh()` searches the envelope structurally rather than following a fixed path, so it
+ * survives a rename it has not seen.
  */
 export const AUTH = {
   /** Refresh the access token when it has this many seconds (or fewer) left. */
