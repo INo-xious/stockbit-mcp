@@ -142,6 +142,15 @@ export interface CollectStatusOptions {
   /** Whether that profile is the default rather than something the user asked for. */
   profileIsDefault?: boolean;
   /**
+   * Why `STOCKBIT_TOOLS` could not be parsed, when it could not be.
+   *
+   * This is the state `status` exists for. An unparsable value makes `stockbit-mcp` refuse to start,
+   * so the user is looking at a client that says "server failed" and running this command to find
+   * out why — and reporting a `toolProfile` as though a server were running would be answering a
+   * question nobody asked with a fact that is not true.
+   */
+  profileError?: string;
+  /**
    * Tool NAMES this profile kept out, so `status` can explain a missing tool.
    *
    * Names, not families. A family with one skipped tool is not a family that is absent, and
@@ -301,13 +310,21 @@ function formatTime(iso: string): string {
 function nextStepFor(
   auth: Record<StoreSlot, SlotStatus>,
   trading: StatusReport["trading"],
-  surface: { tradingToolsMissing: boolean; profileLabel: string } = {
+  surface: { tradingToolsMissing: boolean; profileLabel: string; profileError?: string } = {
     tradingToolsMissing: false,
     profileLabel: DEFAULT_TOOL_PROFILE,
   },
 ): string {
   // Before anything else: if the store would not answer, every branch below is reasoning from a
   // fact nobody established. "Log in again" is the one piece of advice that must not be given here.
+  // Before anything about credentials: if the server cannot start, no advice about sessions is
+  // actionable, because there is nothing to use them.
+  if (surface.profileError) {
+    return (
+      `Fix STOCKBIT_TOOLS in the client's config — the server refuses to start with it: ` +
+      `${surface.profileError} Removing it entirely is also valid and gives the default profile.`
+    );
+  }
   if (auth.main.unreadable) return auth.main.hint!;
   // The branch that was missing. Present, unexpired, and rejected — which every expiry-based check
   // reports as healthy, and which is what a revoked or superseded session actually looks like.
@@ -442,6 +459,16 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       : "Not stored. Nothing can be read until you log in.",
   });
 
+  if (options.profileError) {
+    checks.push({
+      name: "tool profile",
+      status: "fail",
+      detail:
+        `STOCKBIT_TOOLS cannot be parsed, so the server will not start: ${options.profileError} ` +
+        "Nothing else in this report describes a running server.",
+    });
+  }
+
   // The trap the default profile creates, and the reason it is worth a check of its own.
   //
   // `core` deliberately contains no order-entry tools. So a user who went to the trouble of running
@@ -516,7 +543,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       // know better say so: the `status` tool passes the server's real label, and the CLI passes what
       // its own environment would produce. Defaulting to `core` here made `createServer()` with no
       // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
-      toolProfile: options.profileLabel ?? "all",
+      toolProfile: options.profileError ? "unparsable" : (options.profileLabel ?? "all"),
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
     },
     auth,
@@ -529,6 +556,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     nextStep: nextStepFor(auth, trading, {
       tradingToolsMissing,
       profileLabel: options.profileLabel ?? DEFAULT_TOOL_PROFILE,
+      ...(options.profileError === undefined ? {} : { profileError: options.profileError }),
     }),
   };
 }

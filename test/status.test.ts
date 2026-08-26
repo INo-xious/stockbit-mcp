@@ -358,6 +358,33 @@ test("live: true actually makes a request, even when the access cache is warm", 
   }
 });
 
+test("an unparsable STOCKBIT_TOOLS is diagnosed, not papered over", async () => {
+  // This is the state `status` exists for. An unparsable value makes `stockbit-mcp` refuse to start,
+  // so the user is looking at a client that says the server failed and running this to find out
+  // why. Reporting a toolProfile as though a server were running answers the wrong question with a
+  // fact that is not true — and every other line about sessions is advice they cannot act on until
+  // the server starts.
+  clearAllSlots();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
+  try {
+    const report = await collectStatus({ profileError: 'unknown family or tool "nonsense"' });
+    assert.equal(report.server.toolProfile, "unparsable", "it must not name a profile it does not have");
+    assert.ok(
+      report.checks.some((c) => c.name === "tool profile" && c.status === "fail"),
+      "and it is a failure, not a warning — nothing works at all",
+    );
+    assert.match(report.nextStep, /STOCKBIT_TOOLS/, "nextStep must point at the variable");
+    assert.match(report.nextStep, /nonsense/, "and quote what was wrong with it");
+    assert.doesNotMatch(
+      report.nextStep,
+      /trading-login/,
+      "advice about sessions is unreachable until the server starts",
+    );
+  } finally {
+    clearAllSlots();
+  }
+});
+
 test("a login in progress is reported, and forgotten when it finishes", async () => {
   clearAllSlots();
   loginStarted(new Date("2026-08-25T02:00:00Z"));

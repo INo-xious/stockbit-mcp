@@ -236,21 +236,25 @@ async function cmdStatus(argv: string[]): Promise<void> {
   let profileLabel: string | undefined;
   let profileIsDefault = false;
   let missingTools: string[] | undefined;
+  let profileError: string | undefined;
   try {
     const known = new Set(describeSurface().tools.map((t) => t.name));
     const resolved = resolveToolProfile(process.env.STOCKBIT_TOOLS, known);
     profileLabel = resolved.profile.label;
     profileIsDefault = resolved.isDefault;
     missingTools = describeSurface(resolved.profile, resolved.isDefault).skipped;
-  } catch {
-    // An unparsable STOCKBIT_TOOLS stops `stockbit-mcp` from starting, with its own message. It
-    // must not stop `status`, which is the command someone runs to find out why.
+  } catch (err) {
+    // An unparsable STOCKBIT_TOOLS stops `stockbit-mcp` from starting. It must not stop `status` —
+    // that is the command someone runs to find out why — but staying silent about it and reporting
+    // a profile as though a server were running would answer the wrong question with a wrong fact.
+    profileError = err instanceof Error ? err.message : String(err);
   }
 
   const report = await collectStatus({
     live,
     ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
     ...(missingTools === undefined ? {} : { missingTools }),
+    ...(profileError === undefined ? {} : { profileError }),
   });
 
   if (argv.includes("--json")) {
