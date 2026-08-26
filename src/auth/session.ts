@@ -55,6 +55,8 @@ interface AccessToken {
    * than a stored refresh token; an absent fingerprint is never treated as a mismatch.
    */
   from?: string;
+  /** When the binding was last confirmed, so it is not re-checked on every single request. */
+  checkedAt?: number;
 }
 
 interface DomainState {
@@ -276,18 +278,49 @@ export function parseRefresh(body: unknown): { access: string; newRefresh?: stri
 }
 
 /**
+ * How often the in-memory access token is re-checked against the credential in the store.
+ *
+ * Not every request. `ensureFresh` is on the path of every authenticated call, and on the Keychain
+ * backend reading the store is a `spawnSync` — about 9 ms of BLOCKED EVENT LOOP each time, and up
+ * to the full Keychain timeout if it raises a prompt nobody answers. A scan over a universe would
+ * become hundreds of serialised subprocess spawns. Measured before this bound was added: ten warm
+ * `ensureFresh` calls made ten `security` invocations, where the warm path used to touch the store
+ * not at all.
+ *
+ * What the window costs is the only thing it costs: after a `stockbit-auth login --switch-account`
+ * in a terminal, a server that is already running can answer as the previous account for up to this
+ * long. Half a minute against a subprocess per request is the trade, and it is bounded either way —
+ * without the check at all it was the token's full 24 hours.
+ */
+const CREDENTIAL_RECHECK_MS = 30_000;
+
+/**
  * Whether an in-memory access token was minted from the refresh token that is in the store NOW.
  *
- * A token with no recorded origin passes: `adoptAccessToken` (used by `trading-login`, which is
- * handed the pair together) and `STOCKBIT_ACCESS_TOKEN` both seed one deliberately, and neither has
- * a stored refresh token to be bound to. Treating "unknown" as a mismatch would make `trading-login`
- * throw away the access token it was just given and immediately spend a rotation to replace it.
+ * A token with no recorded origin passes. `STOCKBIT_ACCESS_TOKEN` is seeded from nothing this
+ * process stored, so there is nothing to bind it to; treating "unknown" as a mismatch would also
+ * make `adoptAccessToken`'s callers throw away a token they were just handed and spend a rotation
+ * replacing it.
+ *
+ * **An unreadable store is not a mismatch.** `currentRefreshToken` returns null both for "there is
+ * nothing there" and for "the Keychain would not answer", and collapsing those here undoes the very
+ * distinction `readState()` exists for: a locked Keychain would make this reject a valid, unexpired
+ * access token this process is holding, and the user would be told "No Stockbit session stored. Run
+ * login" for a session that was working a second earlier.
  */
 function mintedFromCurrentCredential(domain: TokenDomain, token: AccessToken): boolean {
   if (!token.from) return true;
+  const now = Date.now();
+  if (token.checkedAt !== undefined && now - token.checkedAt < CREDENTIAL_RECHECK_MS) return true;
+
   const refreshToken = currentRefreshToken(domain);
-  if (!refreshToken) return false;
-  return token.from === tokenFingerprint(refreshToken);
+  if (!refreshToken) {
+    // Nothing there is a mismatch; could not look is not. See the note above.
+    return getStore(DOMAINS[domain].slot).readState() === "unavailable";
+  }
+  if (token.from !== tokenFingerprint(refreshToken)) return false;
+  token.checkedAt = now;
+  return true;
 }
 
 /**
@@ -669,8 +702,21 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
  * Used by `trading-login`, which receives the access token and the refresh token together and would
  * otherwise throw the access token away and immediately refresh to get another one.
  */
-export function adoptAccessToken(domain: TokenDomain, token: string, expiresAt?: number): void {
-  state[domain].current = { token, expiresAt: expiresAt ?? expFromJwt(token) };
+export function adoptAccessToken(
+  domain: TokenDomain,
+  token: string,
+  expiresAt?: number,
+  mintedFrom?: string,
+): void {
+  // `mintedFrom` is the refresh token this access token came with. Both callers HAVE it — they were
+  // handed the pair together and store the refresh token a line or two earlier — so leaving it out
+  // exempted the securities and e-IPO sessions from the account binding for their whole 24-hour
+  // life, while a comment claimed neither had a stored credential to bind to.
+  state[domain].current = {
+    token,
+    expiresAt: expiresAt ?? expFromJwt(token),
+    ...(mintedFrom === undefined ? {} : { from: tokenFingerprint(mintedFrom), checkedAt: Date.now() }),
+  };
 }
 
 /**
@@ -683,8 +729,14 @@ export function adoptAccessToken(domain: TokenDomain, token: string, expiresAt?:
  * `rotated` is deliberately NOT cleared. It holds a refresh token that could not be written to the
  * store, which makes it a credential rather than a cache — the only live copy on this machine.
  * Dropping it here would turn "the Keychain was locked for a minute" into a forced re-login, which
- * is the opposite of what this function is for. It stops being used on its own the moment the store
- * stops holding what it superseded, which covers `logout` — see `currentRefreshToken`.
+ * is the opposite of what this function is for.
+ *
+ * It used to say that this "covers `logout`, see `currentRefreshToken`" — that the comparison there
+ * would drop it once the store stopped holding what it superseded. That is not true on the Keychain
+ * backend: a locked Keychain makes `clear()` fail silently AND makes the read unreadable, so the
+ * comparison is short-circuited and the rescued token is still offered. A logout that leaves a
+ * usable credential is not one, least of all on the securities slot. `logout` calls `forgetRotated`
+ * explicitly now, because a deliberate act deserves a deliberate drop rather than an inference.
  */
 export function resetSession(domain?: TokenDomain): void {
   const domains: TokenDomain[] = domain ? [domain] : ["main", "securities", "eipo"];
@@ -696,6 +748,16 @@ export function resetSession(domain?: TokenDomain): void {
     // would drive it negative when that `finally` then decrements, which reads as "not forcing"
     // for the NEXT forced refresh. The decrement clamps at zero for the same reason.
   }
+}
+
+/**
+ * Drop a rescued, unwritten refresh token for a domain.
+ *
+ * Only `logout` calls this, and it must: see the note on `resetSession` for why the comparison in
+ * `currentRefreshToken` cannot be relied on to do it.
+ */
+export function forgetRotated(domain: TokenDomain): void {
+  state[domain].rotated = null;
 }
 
 /** Whether a domain has a stored refresh token at all — a question `status` asks without a round trip. */

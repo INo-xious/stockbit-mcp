@@ -31,7 +31,7 @@ import { getStore } from "./store.js";
 import { withCredentialLock } from "./reflock.js";
 import { clearAccessCache } from "./accesscache.js";
 import { clearSessionHealth } from "./health.js";
-import { adoptAccessToken, parseRefresh, resetSession } from "./session.js";
+import { adoptAccessToken, forgetRotated, parseRefresh, resetSession } from "./session.js";
 
 /** The `login_token` grant, wherever the envelope puts it. */
 function findLoginToken(body: unknown): string | undefined {
@@ -105,7 +105,7 @@ export async function loginSecurities({ pin }: { pin: string }): Promise<Trading
   await withCredentialLock("securities", () => store.set(parsed.newRefresh!));
   // Seed the access token rather than throwing it away: the alternative is an immediate refresh
   // that spends the token we were just handed.
-  adoptAccessToken("securities", parsed.access, parsed.expiresAt);
+  adoptAccessToken("securities", parsed.access, parsed.expiresAt, parsed.newRefresh);
 
   return { backend: store.backend, accessSeeded: true };
 }
@@ -139,6 +139,10 @@ export async function logoutSecurities(): Promise<{ remote: "ok" | "skipped" | s
   // remote logout failing, leaving the session open at Stockbit's end as well.
   clearAccessCache("securities");
   clearSessionHealth("securities");
+  // And any rotated token this process rescued but could not persist — see `forgetRotated`. Without
+  // this, a trading-logout on a locked Keychain reports success and the session is live again on
+  // the next call.
+  forgetRotated("securities");
   resetSession("securities");
   return { remote, cleared: true };
 }

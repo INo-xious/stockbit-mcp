@@ -49,6 +49,7 @@ import { withCredentialLock } from "../auth/reflock.js";
 import { clearWebSession } from "../auth/websession.js";
 import { clearAccessCache } from "../auth/accesscache.js";
 import { clearSessionHealth } from "../auth/health.js";
+import { forgetRotated } from "../auth/session.js";
 import { hasStoredSession, resetSession } from "../auth/session.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
@@ -399,6 +400,10 @@ async function doLogout(request: LogoutRequest) {
   // domains an unnecessary rotation and drops their recorded health for no reason.
   for (const scope of scopes) {
     const slot = SCOPE_SLOTS[scope];
+    // A rescued refresh token this process holds but could not write is a credential too, and the
+    // one place it cannot be inferred away is here: on a locked Keychain `clear()` fails silently
+    // AND the read is unreadable, so nothing downstream would ever notice the logout happened.
+    forgetRotated(slot);
     try {
       clearAccessCache(slot);
       clearSessionHealth(slot);

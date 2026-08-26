@@ -23,7 +23,13 @@ import {
   type WebSession,
 } from "../src/auth/websession.ts";
 import { getStore } from "../src/auth/store.ts";
-import { ensureFresh, forceRefresh, hasStoredSession, resetSession } from "../src/auth/session.ts";
+import {
+  ensureFresh,
+  forceRefresh,
+  forgetRotated,
+  hasStoredSession,
+  resetSession,
+} from "../src/auth/session.ts";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "../src/auth/accesscache.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { StockbitError } from "../src/http/errors.ts";
@@ -762,6 +768,114 @@ test("a forced refresh re-enables the shared cache when it finishes", async () =
     await ensureFresh();
     assert.equal(presented.length, 0, "a cache hit must be possible again after a failed forceRefresh");
   } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("an unreadable store does not invalidate the access token this process is holding", async () => {
+  // The distinction `readState()` exists for, applied on the hot path. `currentRefreshToken` returns
+  // null both for "there is nothing there" and for "the Keychain would not answer" — and the
+  // account binding treated both as a mismatch, so a locked Keychain rejected a valid, unexpired
+  // 24-hour access token and the user was told "No Stockbit session stored. Run login" for a
+  // session that had been working a second earlier.
+  const token = jwt(2000000000, "still-good");
+  const store = getStore();
+  store.set(token);
+  serverToken = token;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  await ensureFresh();
+  const realGet = store.get.bind(store);
+  const realReadState = store.readState.bind(store);
+  (store as unknown as { get: () => string | null }).get = () => null;
+  (store as unknown as { readState: () => string }).readState = () => "unavailable";
+  try {
+    // Past the re-check window, so the binding is genuinely consulted rather than trusted.
+    presented.length = 0;
+    const held = await ensureFresh();
+    assert.ok(held, "the in-memory token must still be usable");
+    assert.equal(presented.length, 0, "and no refresh should have been attempted");
+  } finally {
+    (store as unknown as { get: unknown }).get = realGet;
+    (store as unknown as { readState: unknown }).readState = realReadState;
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a logout drops a rescued token that could not be written", async () => {
+  // On the Keychain backend a logout can fail silently AND leave the store unreadable, which
+  // short-circuits the comparison that was supposed to retire the rescued copy. The securities slot
+  // is the one with money behind it, and "a logout that leaves a usable credential is not one".
+  const spent = jwt(2000000000, "spent-before-logout");
+  const store = getStore();
+  store.set(spent);
+  serverToken = spent;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  const realSet = store.set.bind(store);
+  (store as unknown as { set: (t: string) => void }).set = () => {
+    throw new Error("Keychain write failed");
+  };
+  try {
+    await forceRefresh();
+  } finally {
+    (store as unknown as { set: unknown }).set = realSet;
+  }
+
+  const realGet = store.get.bind(store);
+  const realReadState = store.readState.bind(store);
+  (store as unknown as { get: () => string | null }).get = () => null;
+  (store as unknown as { readState: () => string }).readState = () => "unavailable";
+  try {
+    assert.equal(hasStoredSession("main"), true, "precondition: the rescued token is being offered");
+    forgetRotated("main");
+    assert.equal(
+      hasStoredSession("main"),
+      false,
+      "after a logout the rescued token must be gone, even when the store cannot be read",
+    );
+  } finally {
+    (store as unknown as { get: unknown }).get = realGet;
+    (store as unknown as { readState: unknown }).readState = realReadState;
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("the warm path does not read the credential store on every request", async () => {
+  // `ensureFresh` runs on every authenticated call. On the Keychain backend reading the store is a
+  // spawnSync — about 9 ms of BLOCKED event loop each time, and the full Keychain timeout if it
+  // raises a prompt nobody answers. Binding the in-memory token to its credential is right; paying
+  // a subprocess per request for it is not.
+  const token = jwt(2000000000, "hot-path");
+  const store = getStore();
+  store.set(token);
+  serverToken = token;
+  resetSession();
+  clearAccessCache();
+
+  await ensureFresh();
+
+  let reads = 0;
+  const realGet = store.get.bind(store);
+  (store as unknown as { get: () => string | null }).get = () => {
+    reads++;
+    return realGet();
+  };
+  try {
+    for (let i = 0; i < 20; i++) await ensureFresh();
+    assert.ok(reads <= 1, `twenty warm calls must not mean twenty store reads (saw ${reads})`);
+  } finally {
+    (store as unknown as { get: unknown }).get = realGet;
     clearAccessCache();
     store.clear();
     resetSession();

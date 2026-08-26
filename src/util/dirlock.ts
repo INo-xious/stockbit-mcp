@@ -20,7 +20,7 @@
  * That decision belongs to the caller and is deliberately not encoded here: this module reports
  * whether it got the lock and says nothing about what that should mean.
  */
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -93,15 +93,23 @@ export async function acquireDirLock(
         if (released) return;
         released = true;
         try {
-          // If the file is unreadable we cannot prove ownership either way. Removing is the older
-          // behaviour and the one that cannot wedge the lock forever, so that is what happens —
-          // but a token we CAN read and that is not ours is proof we were broken as stale, and
-          // deleting then would take someone else's lock with it.
-          let mine = true;
+          // Three cases, and the middle one is the reason this is not a one-liner.
+          //
+          //   - the token reads back as ours          -> remove; this is the ordinary path
+          //   - it reads back as someone else's       -> leave it; we were broken as stale and that
+          //                                              directory belongs to whoever replaced us
+          //   - there is no token but the directory   -> ALSO leave it. That is the window between
+          //     is there                                 another holder's `mkdir` and its write,
+          //                                              and removing then takes a lock that was
+          //                                              just legitimately acquired.
+          //
+          // Only a directory that is gone entirely, or one we cannot stat at all, falls through to
+          // the unconditional remove — and removing something that is not there costs nothing.
+          let mine: boolean;
           try {
             mine = readFileSync(ownerFile, "utf8") === owner;
           } catch {
-            mine = true;
+            mine = !existsSync(path);
           }
           if (mine) rmSync(path, { recursive: true, force: true });
         } catch {

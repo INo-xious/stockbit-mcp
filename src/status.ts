@@ -475,11 +475,19 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   // `trading-enable --live` at their own terminal — a deliberate, two-step, opt-in act — finds no
   // order tool in the server and NOTHING anywhere saying why. Trading reports "on", the tools are
   // simply absent, and the natural conclusion is that order entry is broken.
-  // By NAME. These four are what "place an order" means; everything else in the trading family is a
-  // read, and a profile that filtered one of those has not taken order entry away.
+  // By NAME, and with two different lists on purpose.
+  //
+  // `ORDER_ENTRY_CORE` is what "place an order" means, and is what TRIGGERS the warning — amend
+  // without preview and buy is not a coherent thing to warn about separately, and a profile that
+  // registers all four correctly produces no warning. But the sentence "it has no order-entry tools
+  // AT ALL" has to be measured against every order-entry tool including `order_amend`, or the
+  // report asserts something false about a registered, destructive write that changes a live order
+  // on the exchange.
   const missing = new Set(options.missingTools ?? []);
-  const ORDER_TOOLS = ["order_preview", "order_buy", "order_sell", "order_cancel"];
-  const absentOrderTools = ORDER_TOOLS.filter((name) => missing.has(name));
+  const ORDER_ENTRY_CORE = ["order_preview", "order_buy", "order_sell", "order_cancel"];
+  const ORDER_ENTRY_ALL = [...ORDER_ENTRY_CORE, "order_amend"];
+  const absentOrderTools = ORDER_ENTRY_CORE.filter((name) => missing.has(name));
+  const noOrderToolsAtAll = ORDER_ENTRY_ALL.every((name) => missing.has(name));
   const tradingToolsMissing = trading.enabled && absentOrderTools.length > 0;
   if (tradingToolsMissing) {
     const label = options.profileLabel ?? DEFAULT_TOOL_PROFILE;
@@ -488,7 +496,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       status: "warn",
       detail:
         `Trading is ${trading.mode}, but this server did not register ${absentOrderTools.join(", ")}` +
-        `${absentOrderTools.length === ORDER_TOOLS.length ? " — it has no order-entry tools at all" : ""}. ` +
+        `${noOrderToolsAtAll ? " — it has no order-entry tools at all" : ""}. ` +
         `The \`${label}\` profile does not include them` +
         `${options.profileIsDefault ? ", and it is the default" : ""}. Set ` +
         `STOCKBIT_TOOLS=${label},trading and restart the client.`,

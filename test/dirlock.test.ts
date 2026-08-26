@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireDirLock } from "../src/util/dirlock.ts";
@@ -98,4 +98,26 @@ test("a holder broken as stale cannot delete the lock that replaced it", async (
 
   b!();
   assert.equal(existsSync(path), false, "B's own release still works");
+});
+
+test("a late release does not remove a lock whose owner file has not been written yet", async () => {
+  // The window between another holder's `mkdir` and its `writeFileSync(owner)`. Reading the owner
+  // file throws ENOENT there, and treating that as "must be mine" deletes a lock that was just
+  // legitimately acquired — narrower than the unconditional delete it replaced, but the same bug.
+  const path = join(DIR, "owner-gap.lock");
+  const a = await acquireDirLock(path, opts);
+  assert.ok(a, "A takes the lock");
+
+  const old = new Date(Date.now() - opts.staleMs - 5_000);
+  utimesSync(path, old, old);
+  const b = await acquireDirLock(path, opts);
+  assert.ok(b, "B breaks the stale lock and takes its own");
+
+  // B is mid-acquisition: the directory exists, the owner file does not yet.
+  rmSync(join(path, "owner"), { force: true });
+
+  a!(); // A's late release lands in that window.
+  assert.equal(existsSync(path), true, "A must not delete a lock it cannot prove is not B's");
+
+  b!();
 });

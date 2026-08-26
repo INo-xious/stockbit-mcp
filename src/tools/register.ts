@@ -1626,9 +1626,15 @@ export function registerTools(
       runTool(async () => {
         const workflow = findWorkflow(a.name);
         if (!workflow) {
+          // Only the ones this server can actually run. Listing all eight here re-opened the loop
+          // `workflow_list` was just fixed to close: the model takes the menu, calls the one that
+          // needs a filtered-out tool, and gets a refusal from forty lines below.
+          const offered = BUILTIN_WORKFLOWS.filter(
+            (w) => !w.steps.some((step) => define.skippedNames().includes(step.tool)),
+          );
           throw new StockbitError(
             "invalid_param",
-            `No workflow named ${JSON.stringify(a.name)}. Available: ${BUILTIN_WORKFLOWS.map((w) => w.name).join(", ")}`,
+            `No workflow named ${JSON.stringify(a.name)}. Available: ${offered.map((w) => w.name).join(", ")}`,
           );
         }
         // Fails before running half the recipe if a step names a tool that is not registered.

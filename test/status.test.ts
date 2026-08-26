@@ -266,6 +266,38 @@ test("trading on with no trading tools registered is called out, and nextStep na
   }
 });
 
+test("the 'no order tools at all' claim is measured against every order tool, amend included", async () => {
+  // `order_amend` is a destructiveHint write that changes a live order on the exchange. It is
+  // deliberately not part of the TRIGGER — amend without preview and buy is not a coherent state to
+  // warn about on its own — but saying "no order-entry tools at all" while one is registered is the
+  // report asserting something false.
+  clearAllSlots();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
+  writeFileSync(settingsPath(), JSON.stringify({ version: 2, trading: { mode: "paper" } }), "utf8");
+  try {
+    const withAmend = await collectStatus({
+      profileLabel: "core,order_amend",
+      missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel"],
+    });
+    const row = withAmend.checks.find((c) => c.name === "trading tools");
+    assert.ok(row, "the warning still fires — you cannot place an order");
+    assert.doesNotMatch(row!.detail, /at all/, "but order_amend IS registered, so not 'at all'");
+
+    const none = await collectStatus({
+      profileLabel: "core",
+      missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel", "order_amend"],
+    });
+    assert.match(
+      none.checks.find((c) => c.name === "trading tools")!.detail,
+      /at all/,
+      "with every one of them missing, 'at all' is exactly right",
+    );
+  } finally {
+    rmSync(settingsPath(), { force: true });
+    clearAllSlots();
+  }
+});
+
 test("trading off with no trading tools registered is not worth mentioning", async () => {
   // Nothing is wrong: order entry is off, and the tools for it are absent. Warning here would train
   // people to ignore the warning that matters.

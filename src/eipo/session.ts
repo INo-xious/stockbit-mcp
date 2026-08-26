@@ -122,6 +122,6 @@ export async function ensureEipoSession(): Promise<{ minted: boolean }> {
     const rotated = parsed.newRefresh;
     await withCredentialLock("eipo", () => getStore("eipo").set(rotated));
   }
-  adoptAccessToken("eipo", parsed.access, parsed.expiresAt);
+  adoptAccessToken("eipo", parsed.access, parsed.expiresAt, parsed.newRefresh);
   return { minted: true };
 }

@@ -12,6 +12,39 @@
  * the same list `test/tools.test.ts` asserts and `define.write` produces.
  */
 import type { Surface } from "./tools/surface.js";
+import { FAMILIES, type Family } from "./tools/_define.js";
+
+/**
+ * What to call each family in one phrase, and — for the two that need it — why it is here.
+ *
+ * Exhaustive over `Family`, so adding a family is a compile error rather than a line that quietly
+ * never appears.
+ */
+const FAMILY_LABEL: Record<Family, string> = {
+  system: "Is this working",
+  market: "Market data",
+  bandarmology: "Bandarmology",
+  analysis: "Analysis",
+  company: "Company",
+  fundamentals: "Fundamentals",
+  insider: "Insider activity",
+  corpaction: "Corporate actions",
+  stream: "Stream and research",
+  screener: "Screener",
+  account: "The user's own lists",
+  chartbit: "Chartbit — the user's real chart, in their own browser",
+  alerts: "Alerts, which fire while no client is open",
+  pine: "TradingView Pine Script",
+  workflows: "Saved recipes",
+  trading: "The trading account",
+  eipo: "IPOs",
+};
+
+const FAMILY_NOTE: Partial<Record<Family, string>> = {
+  bandarmology:
+    "Who accumulated and who distributed — the data no other market API has, and why this server exists.",
+  trading: "Reads are free; the order tools are two-step and confirm-gated. See below.",
+};
 
 export function buildInstructions(surface: Surface): string {
   const writes = surface.writes;
@@ -74,37 +107,31 @@ recognised — which is not the same as zero. Say that, rather than reporting a 
   // ("Order entry: order_preview, then order_buy / …") — which is FALSE under the default profile,
   // where none of those four exist. A model reading it would offer to place an order and then fail
   // to find the tool, which reads as a broken server rather than as a profile.
-  // Every line names ONLY tools that are registered.
+  // Every line names ONLY tools that are registered, and names ALL of them.
   //
-  // Gating a line on one tool and then listing six was the original bug wearing a different hat:
-  // under the default profile the block still promised `running_trade`, `order_history`,
-  // `trading_info`, `account`, the whole insider and corporate-action families and the IPO
-  // pipeline. A model told those exist calls one and gets "no such tool", which reads as a broken
-  // server. `named()` keeps only what is really there, so a line can never over-promise; a line
-  // whose every tool was filtered disappears entirely.
-  const named = (...names: string[]): string => names.filter(has).join(", ");
-  const line = (label: string, listed: string, tail = ""): string | null =>
-    listed ? `- ${label}: ${listed}.${tail}` : null;
+  // This block has now been wrong in both directions, which is why it is generated rather than
+  // written. It began as a static list that promised order entry a `core` server does not have. It
+  // was then rewritten as per-line `named(...)` calls — which fixed the over-promising and
+  // introduced two quieter faults: three of the names in it (`bars`, `ownership`, `reports`) were
+  // not tools at all and were silently dropped by the filter, and eighty of the hundred and
+  // thirty-eight registered tools appeared in no line at all. A hand-written enumeration of a
+  // growing set is a claim with an expiry date; that is this module's own argument about the write
+  // list, and it applies here too.
+  //
+  // So the names come from the surface, grouped by family. A new tool appears here the day it is
+  // registered, a renamed one cannot go stale, and a typo is impossible because nothing is typed.
+  const byFamilyName = new Map<Family, string[]>();
+  for (const tool of surface.tools) {
+    const list = byFamilyName.get(tool.family);
+    if (list) list.push(tool.name);
+    else byFamilyName.set(tool.family, [tool.name]);
+  }
 
-  const whatIsHere = [
-    line(
-      "Market data",
-      named("quote", "orderbook", "price_bands", "top_movers", "bars", "intraday_prices", "running_trade", "market_session"),
-    ),
-    line(
-      "Bandarmology",
-      named("broker_summary", "broker_distribution", "broker_activity", "bandar_detector"),
-      " Who accumulated and who distributed — the data no other market API has, and why this server exists.",
-    ),
-    line("Analysis", named("technicals", "patterns", "analyze", "scan", "backtest", "strategy_compare", "timeframe_alignment", "position_size", "price_chart")),
-    line("Company and fundamentals", named("company_profile", "keystats", "ratios", "financials", "seasonality", "ownership", "insider_transactions", "corporate_actions", "analyst_ratings", "peer_comparison")),
-    line("Stream and research", named("stream", "news", "reports", "ipo_pipeline")),
-    line("Lists and recipes", named("watchlist", "screener", "workflow_list", "workflow_run")),
-    line("Chartbit — the user's real chart, in their own browser", named("chartbit_open", "chartbit_draw", "chartbit_screenshot", "chartbit_clear", "chartbit_save")),
-    line("Alerts", named("alert_create", "alert_list", "alert_delete", "alert_check")),
-    line("The trading account", named("portfolio", "position", "cash_balance", "orders", "order_history", "trading_info", "account", "trading_status")),
-    line("Order entry", named("order_preview", "order_buy", "order_sell", "order_amend", "order_cancel")),
-  ].filter((l): l is string => l !== null);
+  const whatIsHere = FAMILIES.filter((family) => byFamilyName.has(family)).map((family) => {
+    const names = byFamilyName.get(family)!;
+    const gloss = FAMILY_NOTE[family];
+    return `- ${FAMILY_LABEL[family]}: ${names.join(", ")}.${gloss ? ` ${gloss}` : ""}`;
+  });
 
   return `Stockbit MCP — the Indonesian exchange (IDX), through the user's own Stockbit account.
 Unofficial. Every request is made as them.
@@ -132,8 +159,9 @@ Two arguments, and they are not interchangeable:
   accounts.
 
 TRADING IS OFF UNTIL THE USER TURNS IT ON
-Call trading_status to see whether it is on, and what to say if it is not. The user enables it
-themselves at a terminal with "stockbit-auth trading-enable"; nothing you can do turns it on. The
+${has("trading_status") ? "Call trading_status to see whether it is on, and what to say if it is not." : "status reports the trading mode — this server did not register trading_status."}
+The user enables it themselves at a terminal with "stockbit-auth trading-enable"; nothing you can
+do turns it on. The
 trading session needs their 6-digit PIN, entered at their own terminal via "stockbit-auth
 trading-login". NEVER ask the user for that PIN — no tool here accepts one and this server never
 stores one.

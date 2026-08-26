@@ -20,6 +20,7 @@ import { withCredentialLock } from "../src/auth/reflock.js";
 import {
   decodeJwt,
   forceRefresh,
+  forgetRotated,
   hasStoredSession,
   missingSessionMessage,
   resetSession,
@@ -297,6 +298,7 @@ async function cmdLogout(argv: string[]): Promise<void> {
   // for, and drop health this command never touched.
   clearAccessCache("main");
   clearSessionHealth("main");
+  forgetRotated("main");
   logStderr("Cleared the stored browser web session and the main access token.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
