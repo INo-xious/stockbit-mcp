@@ -17,6 +17,7 @@ unassigned rather than back-filled.
 | [0006](0006-account-writes.md) | Watchlist and screener edits — nine tools, read back after every write | ACCEPTED and implemented |
 | [0007](0007-auth-tools-in-the-server.md) | `status`, `login` and `logout` as tools; the PIN and the trading switch stay terminal-only | ACCEPTED 2026-08-24 |
 | [0008](0008-paper-trading.md) | Paper trading: three modes, not two; the same order protocol against a local ledger | ACCEPTED 2026-08-24 |
+| [0009](0009-browser-is-the-source-of-truth.md) | The browser is the source of truth for the rotating token family; the store follows it | ACCEPTED 2026-08-26 |
 
 ## Writing a new one
 
