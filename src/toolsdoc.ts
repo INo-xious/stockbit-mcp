@@ -151,7 +151,18 @@ export async function renderToolsDoc(): Promise<string> {
       `Unset, this server registers the **\`${DEFAULT_TOOL_PROFILE}\`** profile: ` +
         `**${defaultSurface.tools.length} default tools** and ` +
         `**${promptsForSurface(defaultSurface).length} default prompts**. ` +
-        "Everything listed below needs `STOCKBIT_TOOLS=all`.",
+        "Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.",
+    );
+    out.push("");
+    // Which forty, by name. This file is the only place someone would look to find out what they
+    // actually have, and a count alone does not answer that — the previous sentence claimed
+    // everything below needed `all`, which is false for the forty listed here.
+    out.push(
+      `<details><summary>The <code>${DEFAULT_TOOL_PROFILE}</code> profile, by name</summary>\n\n` +
+        defaultSurface.tools
+          .map((t) => `\`${t.name}\``)
+          .join(", ") +
+        "\n\n</details>",
     );
     out.push("");
     out.push(
