@@ -643,10 +643,11 @@ test("forceRefresh reaches the wire even with a warm cache", async () => {
   // caller that refreshes to PROVE something proves nothing. (`status`'s `live: true` is that
   // caller, and `test/status.test.ts` covers it end to end.)
   //
-  // Note what this does NOT cover: `DomainState.skipCacheOnce`. In one process `clearAccessCache`
-  // already empties the file, so this passes with or without that guard — it exists for the
-  // cross-process case where another process restores the snapshot it read before the clear, which
-  // a single-process test cannot construct. Asserting otherwise here would be coverage theatre.
+  // Note what this does NOT cover: `DomainState.forcedRefreshes`. In one process
+  // `clearAccessCache` already empties the file, so this passes with or without that guard — it
+  // exists for the cross-process case where another process restores the snapshot it read before
+  // the clear, which a single-process test cannot construct. Asserting otherwise would be
+  // coverage theatre. What IS asserted below is that the counter does not leak.
   const token = jwt(2000000000, "warm-cache");
   const store = getStore();
   store.set(token);
@@ -705,6 +706,37 @@ test("an access token minted from another account is not reused after the store 
       "the in-memory token was minted from another credential, so it must not be reused",
     );
     assert.deepEqual([...presented], [accountB], "and the new account's credential is what goes out");
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a forced refresh re-enables the shared cache when it finishes", async () => {
+  // The counter that keeps `forceRefresh` off the cache has to come back down, including when the
+  // refresh THROWS. A leaked counter would disable the shared token for the life of the process —
+  // silently, and only for whoever happened to hit the failing path, which is the hardest kind of
+  // performance bug to find.
+  const token = jwt(2000000000, "counter-leak");
+  const store = getStore();
+  store.set(token);
+  serverToken = jwt(2000000000, "never-matches");
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  try {
+    await assert.rejects(() => forceRefresh(), StockbitError, "precondition: this refresh fails");
+
+    // The cache must work again immediately afterwards.
+    serverToken = token;
+    resetSession();
+    await ensureFresh();
+    presented.length = 0;
+    resetSession();
+    await ensureFresh();
+    assert.equal(presented.length, 0, "a cache hit must be possible again after a failed forceRefresh");
   } finally {
     clearAccessCache();
     store.clear();

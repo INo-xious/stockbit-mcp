@@ -87,8 +87,13 @@ interface DomainState {
    *
    * It is also what makes `live: true` honest: a forced refresh must reach the wire, or the check
    * that claims to have proved the token is proving nothing.
+   *
+   * A COUNTER, not a boolean. `forceRefresh` can nest — the HTTP client calls it on a 401, and that
+   * can happen inside a refresh another `forceRefresh` is already driving — and with a boolean the
+   * inner call's `finally` would re-enable the cache while the outer one was still running, which
+   * is the one moment it must not be enabled.
    */
-  skipCacheOnce: boolean;
+  forcedRefreshes: number;
 }
 
 /**
@@ -132,9 +137,9 @@ const DOMAINS: Record<TokenDomain, DomainSpec> = {
 };
 
 const state: Record<TokenDomain, DomainState> = {
-  main: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
-  securities: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
-  eipo: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
+  main: { current: null, inFlight: null, rotated: null, forcedRefreshes: 0 },
+  securities: { current: null, inFlight: null, rotated: null, forcedRefreshes: 0 },
+  eipo: { current: null, inFlight: null, rotated: null, forcedRefreshes: 0 },
 };
 
 /** Decode a JWT payload without verifying (we only read exp). Returns {} on failure. */
@@ -297,7 +302,7 @@ function mintedFromCurrentCredential(domain: TokenDomain, token: AccessToken): b
  * first account's token on disk and making every request as the wrong person for a day.
  */
 function fromAccessCache(domain: TokenDomain, nowSeconds: number): AccessToken | null {
-  if (state[domain].skipCacheOnce) return null;
+  if (state[domain].forcedRefreshes > 0) return null;
   const refreshToken = currentRefreshToken(domain);
   if (!refreshToken) return null;
   const entry = readAccessCache(domain, refreshToken);
@@ -648,13 +653,13 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
   // this, the very next `ensureFresh` re-hydrates the dead token from the cache and the session
   // 401s forever, having "refreshed" each time.
   clearAccessCache(domain);
-  // And refuse the next cache hit outright. See `DomainState.skipCacheOnce`: clearing the file is
-  // not enough, because another process can restore the snapshot it read a moment ago.
-  state[domain].skipCacheOnce = true;
+  // And refuse the cache outright while this runs. See `DomainState.forcedRefreshes`: clearing the
+  // file is not enough, because another process can restore the snapshot it read a moment ago.
+  state[domain].forcedRefreshes++;
   try {
     return await ensureFresh(domain);
   } finally {
-    state[domain].skipCacheOnce = false;
+    state[domain].forcedRefreshes = Math.max(0, state[domain].forcedRefreshes - 1);
   }
 }
 
@@ -686,6 +691,10 @@ export function resetSession(domain?: TokenDomain): void {
   for (const d of domains) {
     state[d].current = null;
     state[d].inFlight = null;
+    // `forcedRefreshes` is deliberately NOT reset here. It is owned by the `finally` in
+    // `forceRefresh`, which runs on every path including a throw — and zeroing it from outside
+    // would drive it negative when that `finally` then decrements, which reads as "not forcing"
+    // for the NEXT forced refresh. The decrement clamps at zero for the same reason.
   }
 }
 
