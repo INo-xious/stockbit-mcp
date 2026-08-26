@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { removeDirWithRetry } from "./tempdir.js";
 import { browserVersion, findBrowsers, type BrowserInfo } from "./browsers.js";
 import { captureViaBrowserLogin } from "./login.js";
-import { getStore } from "./store.js";
+import { getStore, probeKeychainWrite } from "./store.js";
 import { hasStoredSession } from "./session.js";
 import { pinnedBrowserExists, readBrowserProfile } from "./browserprofile.js";
 import { tradingPolicy } from "../settings.js";
@@ -198,6 +198,31 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
       status: "fail",
       detail: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  /* --------------------------- how the Keychain is written --------------------------- */
+  //
+  // Machine-checked rather than asserted in a comment. `man security` recommends putting `-w` last
+  // so the value is prompted for instead of passed in `argv`, but whether `security` will take that
+  // value from a pipe depends on `readpassphrase` finding a controlling terminal — which differs
+  // between an MCP server spawned by a client and the same command typed at a shell. The probe
+  // writes a throwaway value under its own account name, reads it back, and deletes it, so the
+  // answer comes from this machine and the real credential is never touched.
+  if (store?.backend === "keychain") {
+    try {
+      const probe = probeKeychainWrite();
+      checks.push({
+        name: "Keychain write",
+        status: probe.method === "stdin" ? "pass" : probe.method === "argv" ? "warn" : "fail",
+        detail: probe.detail,
+      });
+    } catch (err) {
+      checks.push({
+        name: "Keychain write",
+        status: "warn",
+        detail: `could not be probed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   /* ---------------------------------- token ---------------------------------- */

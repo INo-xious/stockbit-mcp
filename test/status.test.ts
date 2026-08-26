@@ -89,6 +89,39 @@ test("a store that cannot be read is a failed check, not a crash", async () => {
   }
 });
 
+test("a store that will not say whether it holds a credential must not advise logging in", async () => {
+  // The bug this prevents, end to end: a locked login Keychain answers every read with a non-zero
+  // exit, `get()` returns null, `status` reports "not set", and `nextStep` tells the user to log in
+  // again — which on macOS means overwriting a credential that was never in doubt. "I could not
+  // find out" and "there is nothing here" are different answers and must produce different advice.
+  clearAllSlots();
+  const store = getStore("main");
+  const realReadState = store.readState.bind(store);
+  (store as unknown as { readState: () => string }).readState = () => "unavailable";
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.unreadable, true, "the report must say the answer is unknown");
+    assert.equal(report.auth.main.stored, false, "and must not claim a credential is present either");
+    assert.match(
+      report.nextStep,
+      /Keychain/i,
+      "nextStep must point at the Keychain, not at logging in",
+    );
+    assert.doesNotMatch(
+      report.nextStep,
+      /stockbit-auth login/,
+      "advising a re-login here destroys a credential that may be perfectly good",
+    );
+    assert.match(formatStatus(report), /UNREADABLE/, "the terminal rendering must not read as 'not set'");
+    assert.ok(
+      report.checks.some((c) => c.name === "credential store (main)" && c.status === "warn"),
+      "and it is a warning, because something really is wrong",
+    );
+  } finally {
+    (store as unknown as { readState: unknown }).readState = realReadState;
+  }
+});
+
 test("a stored token yields an expiry and never the token", async () => {
   clearAllSlots();
   mkdirSync(STORE, { recursive: true });

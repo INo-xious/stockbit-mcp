@@ -7,7 +7,7 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-test-"));
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getStore, keychainWriteArgs } from "../src/auth/store.ts";
+import { getStore, keychainWriteArgs, keychainWriteArgsWithToken } from "../src/auth/store.ts";
 import { parseRefresh, ensureFresh, resetSession, decodeJwt } from "../src/auth/session.ts";
 import { buildUrl } from "../src/http/transport.ts";
 
@@ -78,17 +78,66 @@ test("the credential file is replaced atomically and never left world-readable",
   );
 });
 
-test("Keychain writes preserve the default trusted creator without granting broad access", () => {
-  const args = keychainWriteArgs("test-token");
+test("the Keychain write command does not carry the token in argv", () => {
+  // A process argument is visible in `ps` to every process running as the same user — and reading
+  // it there BYPASSES the Keychain ACL that would otherwise make access prompt. This project
+  // already warns about exactly that for the Telegram bot token (docs/FEATURES.md); the credential
+  // it exists to guard should not be the exception.
+  //
+  // `-w` last with no value is what `man security` calls the recommended form: "Put at end of
+  // command to be prompted."
+  const args = keychainWriteArgs();
   assert.deepEqual(args, [
+    "add-generic-password",
+    "-s", "stockbit-mcp",
+    "-a", "refresh-token",
+    "-U",
+    "-w",
+  ]);
+  assert.equal(args.at(-1), "-w", "`-w` must be last, so the value is prompted for and not an argument");
+
+  const token = "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.sig";
+  assert.equal(
+    keychainWriteArgs().some((a) => a.includes(token)),
+    false,
+    "no argument may contain the token",
+  );
+});
+
+test("Keychain writes preserve the default trusted creator without granting broad access", () => {
+  for (const args of [keychainWriteArgs(), keychainWriteArgsWithToken("test-token")]) {
+    assert.equal(args.includes("-T"), false, "must not reset the Keychain ACL");
+    assert.equal(args.includes("-A"), false, "must not grant unrestricted application access");
+    assert.equal(args.includes("-U"), true, "must update in place rather than replacing the item");
+  }
+});
+
+test("the argv fallback is still exactly the old command, so it can be trusted when it is needed", () => {
+  // Kept deliberately: whether `security` reads a prompted value from a pipe depends on
+  // `readpassphrase` finding a controlling terminal, which differs between an MCP server spawned by
+  // a client and the same command typed at a shell. `keychainWrite` tries the safe form, reads the
+  // value back to confirm it landed, and only falls back here when it did not.
+  assert.deepEqual(keychainWriteArgsWithToken("test-token"), [
     "add-generic-password",
     "-s", "stockbit-mcp",
     "-a", "refresh-token",
     "-U",
     "-w", "test-token",
   ]);
-  assert.equal(args.includes("-T"), false, "must not reset the Keychain ACL");
-  assert.equal(args.includes("-A"), false, "must not grant unrestricted application access");
+});
+
+test("readState tells 'nothing stored' apart from 'could not find out'", () => {
+  // On the file backend there is no locked-Keychain equivalent, so this asserts the refinement that
+  // does exist: readState agrees with get(), including for a file that is present but unreadable.
+  // The Keychain branch's exit-code mapping is not reachable under STOCKBIT_FORCE_FILE_STORE=1 and
+  // is asserted by inspection in the comment there.
+  const store = getStore();
+  store.clear();
+  assert.equal(store.readState(), "absent", "a cleared store is absent, not unavailable");
+  store.set("eyJhbGciOiJub25lIn0.eyJleHAiOjJ9.sig");
+  assert.equal(store.readState(), "present");
+  store.clear();
+  assert.equal(store.readState(), "absent");
 });
 
 test("parseRefresh extracts access, expiry, and detects rotation", () => {

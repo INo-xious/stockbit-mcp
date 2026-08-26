@@ -27,7 +27,7 @@
  * the payload changes. `live: true` settles it by actually refreshing once — one request — and is
  * off by default because `status` is the thing you call when you suspect the network.
  */
-import { getStore, type StoreSlot } from "./auth/store.js";
+import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
 import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
 import { decodeJwt, ensureFresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
@@ -39,6 +39,13 @@ import { VERSION } from "./version.js";
 export interface SlotStatus {
   stored: boolean;
   backend: "keychain" | "file" | "unknown";
+  /**
+   * True when the store could not say whether a credential is there — a locked Keychain, or a
+   * declined access prompt. Distinct from `stored: false`, which means it looked and found nothing.
+   * Advice built on the two must differ: one says "log in", the other says "unlock your Keychain",
+   * and giving the first answer to the second situation destroys a credential that was fine.
+   */
+  unreadable?: boolean;
   /** Days until the stored token's `exp`. Absent when there is no token or no `exp`. */
   expiresInDays?: number;
   /** True when `exp` is already in the past. */
@@ -160,10 +167,12 @@ const SLOT_HINTS: Record<StoreSlot, string> = {
 function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
   let token: string | null = null;
   let backend: SlotStatus["backend"] = "unknown";
+  let state: StoreState = "absent";
   try {
     const store = getStore(slot);
     backend = store.backend;
-    token = store.get();
+    state = store.readState();
+    token = state === "present" ? store.get() : null;
   } catch (err) {
     checks.push({
       name: `credential store (${slot})`,
@@ -171,6 +180,27 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
       detail: `Could not be read: ${err instanceof Error ? err.message : String(err)}`,
     });
     return { stored: false, backend, hint: SLOT_HINTS[slot] };
+  }
+
+  // "I could not find out" is not "there is nothing here". Saying the second when the first is true
+  // is how a user with a locked Keychain gets told to log in again — which means throwing away a
+  // credential that was never in doubt.
+  if (state === "unavailable") {
+    checks.push({
+      name: `credential store (${slot})`,
+      status: "warn",
+      detail:
+        "The Keychain would not answer — it is locked, or an access prompt was declined. Whether " +
+        "a session is stored is unknown; this is NOT the same as having none.",
+    });
+    return {
+      stored: false,
+      unreadable: true,
+      backend,
+      hint:
+        "Unlock your login Keychain (open Keychain Access, or run any command that prompts) and " +
+        "ask again. Do not log in again yet — the stored credential may be perfectly good.",
+    };
   }
 
   if (!token) return { stored: false, backend, hint: SLOT_HINTS[slot] };
@@ -198,6 +228,9 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
 
 /** The one thing to do next, chosen from the state rather than listed as options. */
 function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport["trading"]): string {
+  // Before anything else: if the store would not answer, every branch below is reasoning from a
+  // fact nobody established. "Log in again" is the one piece of advice that must not be given here.
+  if (auth.main.unreadable) return auth.main.hint!;
   if (!auth.main.stored || auth.main.expired) {
     return (
       'Say "log me into Stockbit" (a browser window opens — sign in there), or run ' +
@@ -361,6 +394,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
 /** A few lines for a terminal, from the same report the tool returns. */
 export function formatStatus(report: StatusReport): string {
   const slot = (name: string, s: SlotStatus): string => {
+    if (s.unreadable) return `${name.padEnd(16)} UNREADABLE${s.hint ? ` — ${s.hint}` : ""}`;
     if (!s.stored) return `${name.padEnd(16)} not set${s.hint ? ` — ${s.hint}` : ""}`;
     const expiry =
       s.expiresInDays === undefined
