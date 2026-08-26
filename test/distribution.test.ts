@@ -210,3 +210,33 @@ test("every tool-shaped name in a skill is a real tool or a real argument", asyn
     "a skill names something that is neither a tool nor an argument — a model told to call it will fail",
   );
 });
+
+/* ------------------------- limits the MCP registry enforces ------------------------- */
+
+/**
+ * The MCP registry rejects a description longer than 100 characters, and it does so at PUBLISH
+ * time — after npm has already accepted the package and the tag and GitHub Release exist.
+ *
+ * That is exactly what happened on the first real publish of 1.1.0: npm went out fine, the tag and
+ * Release were created, and only then did `mcp-publisher` answer
+ *
+ *   422 {"errors":[{"message":"expected length <= 100","location":"body.description"}]}
+ *
+ * leaving the registry entry missing with no way to retry without cutting a new version. The limit
+ * belongs in a test, where it costs seconds, rather than in a release, where it costs a version
+ * number.
+ */
+test("server.json's description fits the MCP registry's 100-character limit", () => {
+  const server = read("server.json") as { description: string };
+  assert.ok(
+    server.description.length <= 100,
+    `server.json description is ${server.description.length} characters; the registry rejects anything over 100`,
+  );
+});
+
+test("server.json still HAS a description worth reading", () => {
+  // The cheap way to satisfy the test above is to gut the field. It is the only prose a user sees
+  // when browsing the registry, so a floor matters as much as the ceiling.
+  const server = read("server.json") as { description: string };
+  assert.ok(server.description.trim().length >= 40, "too short to tell anyone what this server does");
+});

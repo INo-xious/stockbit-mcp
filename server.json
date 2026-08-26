@@ -2,20 +2,22 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.INo-xious/stockbit-mcp",
   "title": "Stockbit MCP",
-  "description": "Stockbit (IDX, Indonesia) for AI assistants: bandarmology, quotes, fundamentals, watchlists, portfolio, alerts, chart drawing and confirm-gated order entry through your own account. Unofficial.",
+  "description": "Indonesian exchange (IDX) via your own Stockbit account: quotes, bandarmology, charts. Unofficial.",
   "websiteUrl": "https://github.com/INo-xious/stockbit-mcp#readme",
   "repository": {
     "url": "https://github.com/INo-xious/stockbit-mcp",
     "source": "github"
   },
-  "version": "1.1.0",
+  "version": "1.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "stockbit-mcp",
-      "version": "1.1.0",
-      "transport": { "type": "stdio" },
+      "version": "1.1.1",
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
         {
           "name": "STOCKBIT_TOOLS",
