@@ -473,7 +473,10 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     checks.push({
       name: "live check",
       status: "warn",
-      detail: "Not run. Pass live: true to prove the stored token still works (one request).",
+      detail:
+        "Not run, and it is not free: proving the token means refreshing it, which ROTATES the " +
+        "token family and ends the website session the chart tools run on. The `health` on each " +
+        "session above answers the same question from what actually happened last time, for nothing.",
     });
   }
 
@@ -517,12 +520,16 @@ export function formatStatus(report: StatusReport): string {
         : s.expired
           ? `EXPIRED ${Math.abs(s.expiresInDays)} day(s) ago`
           : `expires in ~${s.expiresInDays} day(s)`;
-    // `health` is shown only when it says something an expiry cannot. "ok" and "unknown" would just
-    // be noise beside a line that already reports what is stored and for how long.
+    // `health` is rendered whenever it says something an expiry cannot, and stays silent when it
+    // says nothing. `unknown` is the ordinary state before this credential has ever been used, and
+    // printing "unknown" beside a healthy-looking line reads as a fault rather than as an absence.
+    const when = s.lastRefresh ? ` at ${formatTime(s.lastRefresh.at)}` : "";
     const health =
       s.health === "failing"
-        ? `, REJECTED by Stockbit${s.lastRefresh ? ` at ${formatTime(s.lastRefresh.at)}` : ""}`
-        : "";
+        ? `, REJECTED by Stockbit${when}`
+        : s.health === "ok"
+          ? `, last refresh OK${when}`
+          : "";
     return `${name.padEnd(16)} stored (${s.backend}), ${expiry}${health}`;
   };
 

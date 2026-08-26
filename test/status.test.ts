@@ -182,6 +182,24 @@ test("a token Stockbit rejected is reported as failing, and nextStep says so", a
   }
 });
 
+test("a credential nothing has been recorded about says nothing rather than guessing", async () => {
+  // `unknown` is the ordinary state before a credential has ever been used. Printing "unknown"
+  // beside an otherwise healthy line reads as a fault; the closing sentence in the CLI would also
+  // point at a value that is not there.
+  clearAllSlots();
+  clearSessionHealth();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.health, "unknown");
+    const rendered = formatStatus(report);
+    assert.doesNotMatch(rendered, /unknown/i);
+    assert.doesNotMatch(rendered, /REJECTED|last refresh/);
+  } finally {
+    clearAllSlots();
+  }
+});
+
 test("a rejection recorded against a token that has since been replaced is not reported", async () => {
   // Otherwise `status` tells a user to log in again over a credential they replaced ten minutes ago.
   clearAllSlots();
@@ -209,7 +227,9 @@ test("a token that last refreshed successfully reports ok, and stays quiet about
   try {
     const report = await collectStatus();
     assert.equal(report.auth.main.health, "ok");
-    assert.doesNotMatch(formatStatus(report), /REJECTED/, "ok is not worth a line of its own");
+    const rendered = formatStatus(report);
+    assert.doesNotMatch(rendered, /REJECTED/);
+    assert.match(rendered, /last refresh OK/, "a recorded success is worth saying, and it is free");
   } finally {
     clearSessionHealth();
     clearAllSlots();

@@ -234,10 +234,11 @@ async function cmdStatus(argv: string[]): Promise<void> {
     logStderr(formatStatus(report));
     if (!live) {
       logStderr(
-        "Validity: not proved by a request. An expiry in the payload does not mean the token still " +
-          "works — but `health` above is derived from what actually happened the last time it was " +
-          "used, which is free. Pass --verify to spend one refresh proving it, which ROTATES the " +
-          "token and ends your website session.",
+        "Validity: not proved by a request, and deliberately. An expiry in the payload does not mean " +
+          "a token still works — but proving it means refreshing, which ROTATES the token family and " +
+          "ends your website session. What is shown instead comes from what actually happened the " +
+          "last time each credential was used: a session that Stockbit rejected says so, and one that " +
+          "has never been used says nothing rather than guessing. Pass --verify to spend the refresh.",
       );
     }
   }
