@@ -14,6 +14,12 @@ import {
   withCredentialLock,
 } from "../src/auth/reflock.ts";
 import { RATE } from "../src/config.ts";
+import {
+  CREDENTIAL_COOKIE,
+  clearWebSession,
+  saveWebSession,
+  type WebSession,
+} from "../src/auth/websession.ts";
 import { getStore } from "../src/auth/store.ts";
 import { forceRefresh, resetSession } from "../src/auth/session.ts";
 import { StockbitError } from "../src/http/errors.ts";
@@ -390,4 +396,90 @@ test("the 401 retry is bounded at one, even when the store keeps changing", asyn
       assert.equal(presented.length, 2, "one request plus exactly one retry, never more");
     },
   );
+});
+
+/* --------------------- the 401 self-heal from the web session --------------------- */
+
+/** A stored web session whose credentialStorage cookie carries `refresh`. */
+function browserSessionHolding(refresh: string): WebSession {
+  return {
+    capturedAt: new Date().toISOString(),
+    cookies: [
+      {
+        name: CREDENTIAL_COOKIE,
+        value: encodeURIComponent(JSON.stringify({ state: { refresh }, version: 0 })),
+        domain: ".stockbit.com",
+        path: "/",
+      },
+    ],
+    origins: [],
+  };
+}
+
+test("a 401 recovers from the stored web session instead of declaring the session dead", async () => {
+  // THE bug, end to end. Loading a Stockbit page boots the SPA, the SPA refreshes, and the family
+  // rotates — so the browser holds token N+1 while the store still holds N. The very next
+  // market-data call presents N and gets a 401, and the user is told to log in again.
+  //
+  // The rotated token was never out of reach: the chart path already captures the browser session
+  // on the way out, and that blob carries the new token in the credentialStorage cookie. This is a
+  // file read — no browser, no network, nothing interactive — and it turns the fatal error into a
+  // hiccup nobody sees.
+  const spent = jwt(2000000000, "spent-by-the-browser");
+  const fromBrowser = jwt(2100000000, "what-the-browser-rotated-to");
+  serverToken = fromBrowser;
+  presented.length = 0;
+  resetSession();
+
+  const store = getStore();
+  store.set(spent);
+  saveWebSession(browserSessionHolding(fromBrowser));
+
+  try {
+    const access = await forceRefresh();
+    assert.ok(access, "the refresh must succeed rather than reporting a dead session");
+    assert.deepEqual(
+      [...presented],
+      [spent, fromBrowser],
+      "the retry must present the token the browser rotated to",
+    );
+    // Not `fromBrowser`: the retry SUCCEEDED, and a successful refresh rotates again — so the store
+    // ends up holding what the server issued on the retry. What matters is that it moved off the
+    // spent token, which is the thing that was 401ing.
+    assert.notEqual(store.get(), spent, "the store must no longer hold the token the browser spent");
+  } finally {
+    clearWebSession();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a 401 with nothing newer in the web session still fails, and says how to recover", async () => {
+  // The self-heal must not turn a genuinely dead credential into a retry loop, or a revoked session
+  // becomes a hang instead of a message.
+  const dead = jwt(2000000000, "genuinely-revoked");
+  serverToken = jwt(2000000000, "something-else-entirely");
+  presented.length = 0;
+  resetSession();
+
+  const store = getStore();
+  store.set(dead);
+  saveWebSession(browserSessionHolding(dead));
+
+  try {
+    await assert.rejects(
+      () => forceRefresh(),
+      (err: unknown) => {
+        assert.ok(err instanceof StockbitError);
+        assert.equal(err.status, 401);
+        assert.match(err.message, /stockbit-auth login/);
+        return true;
+      },
+    );
+    assert.equal(presented.length, 1, "the same token in both places is not a reason to retry");
+  } finally {
+    clearWebSession();
+    store.clear();
+    resetSession();
+  }
 });

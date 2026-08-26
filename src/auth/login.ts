@@ -34,6 +34,7 @@ import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
 import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
 import { captureWebSession, saveWebSession } from "./websession.js";
+import { syncStoreFromBrowser } from "./resync.js";
 import { findBrowser, findBrowsers } from "./browsers.js";
 
 // Re-exported so existing importers (and tests) keep their entry point while the rules themselves
@@ -249,6 +250,21 @@ export async function captureViaBrowserLogin(
             if (web) {
               saveWebSession(web);
               dbg("web session captured:", web.cookies.length, "cookies,", web.origins.length, "origin(s)");
+              // And take the API credential out of the same capture.
+              //
+              // This is what fixes the login race. `flushAndCloseBrowser` deliberately keeps the
+              // page alive for 12 s + 2 s after the token was stored, so the profile flushes — and
+              // that window is exactly SPA boot, which calls the refresh route and rotates away the
+              // token just written. `done = true` blocks re-capture, so the successor was never
+              // picked up and the credential could be dead before the command returned. Reading it
+              // out of the cookie here catches the successor, because this runs AFTER the app has
+              // landed signed in.
+              //
+              // Inside the existing `wantsWebSession` guard on purpose: that guard is already
+              // exactly `persist && slot === "main"`, which keeps the trading-login capture and
+              // `doctor`'s non-persisting self-test from ever writing the main slot.
+              const resync = await syncStoreFromBrowser(web);
+              dbg("store resync from browser:", resync.reason);
             } else {
               dbg("web session capture found nothing to store");
             }

@@ -38,6 +38,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileDir, writeFileAtomic } from "./store.js";
+import { extractRefresh, looksLikeJwt } from "./capture.js";
 import type { CDP } from "./cdp.js";
 
 /** One cookie, in the shape `Storage.setCookies` will take straight back. */
@@ -360,7 +361,74 @@ export async function seedWebSession(
  * What actually works is already here: capture the browser's OWN session (login, and after every
  * chart use in `chartbit/driver.ts`) and seed it back. The website session can be preserved within
  * its ~24h life. It cannot be renewed from this side. See `webSessionHealth` below.
+ *
+ * The OPPOSITE direction — reading the browser's token out of this cookie and into the CLI's store —
+ * is not what the paragraphs above forbid, and is now done: see `readCredentialStorage` immediately
+ * below and `resync.ts`. Nothing about the device binding stands in the way of *reading*; it is
+ * precisely what makes the browser's copy the authoritative one. See ADR-0009.
  */
+
+/** The cookie name the Stockbit web app keeps its token pair in. */
+export const CREDENTIAL_COOKIE = "credentialStorage";
+
+/**
+ * Read the browser's CURRENT refresh token out of a captured session.
+ *
+ * This is the whole reason the chart's re-capture was not enough on its own. `saveWebSession` writes
+ * the blob and stops; nothing ever read `state.refresh` as a token, so the rotated credential sat on
+ * disk, encrypted, once per chart call, unread — while the next REST call presented the spent one
+ * and 401'd.
+ *
+ * Three parsing facts, each of which produced a wrong answer when assumed away:
+ *
+ *  1. **The value is URL-encoded, and `decodeURIComponent` throws** on a malformed `%` escape. A
+ *     cookie that cannot be decoded is "no token", never an exception — this runs inside a `finally`
+ *     block on the chart path, and a drawing that succeeded must not become an error.
+ *  2. **It is sometimes DOUBLE-encoded.** Decode up to twice, stopping as soon as `JSON.parse`
+ *     succeeds, rather than decoding a fixed number of times: a JSON body legitimately contains `%`
+ *     inside string values, and decoding once more than necessary corrupts it.
+ *  3. **The host must be checked first.** `isStockbitCookieHost` parses the host rather than
+ *     substring-matching it, for the reason `capture.ts` gives: `evil.test/stockbit.com` contains
+ *     the name and is not the host. A capture is filtered on that already, but this function is
+ *     public and must not depend on its caller having done so.
+ *
+ * The explicit `state.refresh` path is tried first and `extractRefresh` is the fallback. Order
+ * matters: the cookie also carries `state.user`, and a structural search over the whole blob could
+ * in principle find a `refresh`-keyed value somewhere else in it. The explicit path says which field
+ * this project means; the fallback survives the envelope moving, which it has done before.
+ */
+export function readCredentialStorage(session: WebSession): string | null {
+  const cookie = session.cookies.find(
+    (c) => c.name === CREDENTIAL_COOKIE && isStockbitCookieHost(c.domain),
+  );
+  if (!cookie?.value) return null;
+
+  let text = cookie.value;
+  for (let decodes = 0; decodes < 3; decodes++) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Not JSON yet. Peel one layer of URL encoding and try again — but only if peeling actually
+      // changes something, or a value that is simply not JSON spins for the full three passes.
+      let next: string;
+      try {
+        next = decodeURIComponent(text);
+      } catch {
+        return null; // malformed % escape
+      }
+      if (next === text) return null;
+      text = next;
+      continue;
+    }
+
+    const state = (parsed as { state?: unknown } | null)?.state;
+    const direct = (state as { refresh?: unknown } | undefined)?.refresh;
+    if (looksLikeJwt(direct)) return direct;
+    return extractRefresh(parsed);
+  }
+  return null;
+}
 
 /** How old a restored session is, for reporting. */
 export function sessionAgeHours(session: WebSession): number | null {

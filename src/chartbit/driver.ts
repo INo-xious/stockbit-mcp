@@ -27,6 +27,7 @@ import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { ChartbitSession, type ChartTab } from "./session.js";
 import { captureWebSession, saveWebSession, webSessionHealth } from "../auth/websession.js";
+import { syncStoreFromBrowser } from "../auth/resync.js";
 import { evaluateInPage } from "./evaluate.js";
 import {
   CREATE_SHAPE,
@@ -134,7 +135,19 @@ async function withChart<T>(
     // Best-effort and silent: a capture that fails must not turn a drawing that succeeded into an error.
     try {
       const refreshed = await captureWebSession(tab.cdp);
-      if (refreshed) saveWebSession(refreshed);
+      if (refreshed) {
+        // The web session first: cheap, lockless, and the thing the next chart launch seeds from.
+        saveWebSession(refreshed);
+        // Then the API credential OUT of the same capture — this is the line that closes the loop
+        // the comment above describes. The blob already contains the rotated refresh token, in the
+        // `credentialStorage` cookie; until now nothing read it, so the store stayed one rotation
+        // behind and the very next market-data call 401'd.
+        //
+        // A short lock timeout because this is the interactive path and giving up is genuinely
+        // free: the browser still holds the token, and the next chart call offers it again. See
+        // `resync.ts` for why a null lock is a no-op here and not permission to proceed.
+        await syncStoreFromBrowser(refreshed, { lockTimeoutMs: 5_000 });
+      }
     } catch {
       /* the session in the profile is still whatever it was; nothing is made worse by not storing it */
     }

@@ -328,6 +328,39 @@ function currentRefreshToken(domain: TokenDomain): string | null {
   return stored;
 }
 
+/**
+ * Last resort before declaring the main session dead: look in the stored web session.
+ *
+ * The browser holds the rotated copy — the SPA calls the refresh route on every page load, and this
+ * project captures the resulting cookies after every chart call. Until the resync existed, nothing
+ * read the token out of that blob, so "you drew on a chart, then asked for a quote" produced this
+ * 401 and a message telling the user to log in again for a credential that was sitting on disk.
+ *
+ * A file read. No browser, no network, nothing interactive. `alreadyLocked` because this runs inside
+ * `doRefresh`'s lock and `acquireDirLock` is not reentrant — without it the resync would block for
+ * its whole timeout and then decline to do anything.
+ *
+ * The import is dynamic to keep `resync.ts` → `session.ts` a one-way dependency at module scope;
+ * it is paid only on a 401.
+ */
+async function recoverFromStoredWebSession(slot: StoreSlot, spent: string): Promise<boolean> {
+  try {
+    const [{ loadWebSession }, { syncStoreFromBrowser }] = await Promise.all([
+      import("./websession.js"),
+      import("./resync.js"),
+    ]);
+    const web = loadWebSession();
+    if (!web) return false;
+    const result = await syncStoreFromBrowser(web, { alreadyLocked: true });
+    if (!result.adopted) return false;
+    // Confirm the store really moved. Adopting the same token we just presented would send the
+    // retry straight back into this branch.
+    return getStore(slot).get() !== spent;
+  } catch {
+    return false;
+  }
+}
+
 async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToken> {
   const spec = DOMAINS[domain];
   const store = getStore(spec.slot);
@@ -365,6 +398,19 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
       const now = getStore(spec.slot).get();
       if (now && now !== refreshToken) {
         return refreshOnce(domain, attempt + 1);
+      }
+      // Nothing newer on disk — but for the main session there is one more place to look, and it is
+      // the place the token most likely went. The browser holds the rotated copy in the web session
+      // this project already captures after every chart call; until now nobody read it, so the
+      // ordinary consequence of "you drew on a chart, then asked for a quote" was this exact 401
+      // and a message telling the user to log in again.
+      //
+      // A file read. No browser, no network, no interactive step: `websession.enc` is already on
+      // disk. If it holds something newer, this stops being a fatal error and becomes a hiccup
+      // nobody sees.
+      if (domain === "main") {
+        const recovered = await recoverFromStoredWebSession(spec.slot, refreshToken);
+        if (recovered) return refreshOnce(domain, attempt + 1);
       }
     }
     throw new StockbitError(
