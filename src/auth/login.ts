@@ -372,7 +372,11 @@ export async function captureViaBrowserLogin(
               // Inside the existing `wantsWebSession` guard on purpose: that guard is already
               // exactly `persist && slot === "main"`, which keeps the trading-login capture and
               // `doctor`'s non-persisting self-test from ever writing the main slot.
-              const resync = await syncStoreFromBrowser(web);
+              // A short timeout, like the chart path. This runs at the tail of an interactive
+              // login, after the credential is already stored and the user has been told they can
+              // close the window; inheriting the full lock wait would hold that window open for a
+              // minute or more to do something the next call would do anyway.
+              const resync = await syncStoreFromBrowser(web, { lockTimeoutMs: 5_000 });
               dbg("store resync from browser:", resync.reason);
             } else {
               dbg("web session capture found nothing to store");

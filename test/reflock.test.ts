@@ -9,7 +9,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   acquireRefreshLock,
+  refreshLockTimeoutMsFor,
   REFRESH_LOCK_TIMEOUT_MS,
+  staleMsFor,
   STALE_MS,
   withCredentialLock,
 } from "../src/auth/reflock.ts";
@@ -208,12 +210,17 @@ test("the refresh goes out as the declared loginRefresh route, not a hand-rolled
 test("both lock timings exceed the worst case a legitimate holder can take", () => {
   // `refreshOnce` issues one request bounded by `requestTimeoutMs`, and a 401 makes it re-read the
   // store and issue a second — inside the same lock. So two full request timeouts is the worst case
-  // BEFORE anything has gone wrong.
+  // on the file backend, BEFORE anything has gone wrong.
   //
-  // This assertion exists so that raising `RATE.requestTimeoutMs` breaks a test rather than the
-  // behaviour. The old values (wait 10 s, stale at 30 s, against a 40 s worst case) failed both
-  // halves of it, and the symptom — a slow-but-healthy holder having its lock broken out from under
-  // it, then both processes rotating — looks nothing like a timeout bug.
+  // Asserted against LITERALS, not against the same expression the source computes. A test that
+  // recomputes the formula agrees with the constant rather than with what the lock actually holds:
+  // the first version of this assertion stayed green when the Keychain allowance was added AND when
+  // it was taken away again, because both sides moved together. These numbers are what the values
+  // are, and changing either input has to be a deliberate edit here too.
+  assert.equal(RATE.requestTimeoutMs, 20_000, "the input these are sized against");
+  assert.equal(STALE_MS, 50_000, "2 x requestTimeoutMs, plus a 10 s cushion");
+  assert.equal(REFRESH_LOCK_TIMEOUT_MS, 55_000, "STALE_MS plus 5 s");
+
   const worstCase = 2 * RATE.requestTimeoutMs;
   assert.ok(
     STALE_MS > worstCase,
@@ -226,6 +233,23 @@ test("both lock timings exceed the worst case a legitimate holder can take", () 
       `(${worstCase}), or a caller queued behind a healthy refresh gives up and refreshes in ` +
       "parallel — the exact collision the lock exists to prevent",
   );
+});
+
+test("the file backend pays no Keychain cushion, and the Keychain backend does", () => {
+  // These tests run under STOCKBIT_FORCE_FILE_STORE=1, which is also every Linux and Windows
+  // install. Making them wait out a macOS-only hazard is a real cost for no benefit: on this
+  // backend a read is a decrypt and a write is an fsync, so there is nothing to cushion.
+  //
+  // The Keychain figure is asserted from the function rather than exercised, because the backend
+  // cannot be switched inside a test process — but it is asserted, so the allowance cannot be
+  // silently dropped or doubled.
+  assert.equal(staleMsFor("main"), STALE_MS, "the file backend gets the plain figure");
+  assert.equal(refreshLockTimeoutMsFor("main"), REFRESH_LOCK_TIMEOUT_MS);
+
+  // Every domain is sized the same way; a per-domain divergence would be a mistake, not a feature.
+  for (const domain of ["main", "securities", "eipo"] as const) {
+    assert.equal(staleMsFor(domain), STALE_MS, `${domain} must be sized like the others`);
+  }
 });
 
 test("the acquisition timeout outlives the staleness threshold, so a crashed holder is recoverable", () => {

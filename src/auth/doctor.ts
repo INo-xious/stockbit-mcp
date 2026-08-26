@@ -335,7 +335,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
       const probe = probeKeychainWrite();
       checks.push({
         name: "Keychain write",
-        status: probe.method === "stdin" ? "pass" : probe.method === "argv" ? "warn" : "fail",
+        status:
+          probe.method === "stdin" ? "pass" : probe.method === null ? "fail" : "warn",
         detail: probe.detail,
       });
     } catch (err) {

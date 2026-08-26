@@ -26,7 +26,7 @@
  */
 import { AUTH } from "../config.js";
 import { getStore, type StoreSlot, type TokenStore } from "./store.js";
-import { acquireRefreshLock, REFRESH_LOCK_TIMEOUT_MS } from "./reflock.js";
+import { acquireRefreshLock } from "./reflock.js";
 import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
 import { logStderr, redact } from "../redact.js";
@@ -317,11 +317,11 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   // See reflock.ts. Failing to take the lock is not fatal — a possible clobber beats a guaranteed
   // outage.
   //
-  // The timeout is the module's own, which is derived from `RATE.requestTimeoutMs`. It used to be a
-  // hard-coded 10_000, shorter than a single request is allowed to take — so a caller queued behind
-  // a perfectly healthy refresh gave up and refreshed in parallel, producing the exact collision
-  // the lock is for.
-  const release = await acquireRefreshLock(REFRESH_LOCK_TIMEOUT_MS, domain);
+  // No explicit timeout: `reflock` sizes it per domain and per backend. It used to be a hard-coded
+  // 10_000, shorter than a single request is allowed to take — so a caller queued behind a perfectly
+  // healthy refresh gave up and refreshed in parallel, producing the exact collision the lock is
+  // for.
+  const release = await acquireRefreshLock(undefined, domain);
   const locked = release !== null;
   try {
     // Double-checked, and this `if` is the whole feature rather than an optimisation on top of it.

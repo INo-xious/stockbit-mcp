@@ -69,7 +69,7 @@ function keychainAvailable(): boolean {
   // Test/CI override: force the file backend so we never touch the real Keychain.
   if (process.env.STOCKBIT_FORCE_FILE_STORE === "1") return false;
   if (process.platform !== "darwin") return false;
-  const r = spawnSync("security", ["-h"], { stdio: "ignore" });
+  const r = spawnSync("security", ["-h"], { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS });
   return r.status === 0 || r.status === 1; // `security -h` exits non-zero but exists
 }
 
@@ -115,8 +115,14 @@ export function keychainWriteArgsWithToken(token: string, slot: StoreSlot = "mai
   return [...keychainWriteArgs(slot), token];
 }
 
-/** Which mechanism actually got the token into the Keychain. `doctor` reports this. */
-export type KeychainWriteMethod = "stdin" | "argv";
+/**
+ * Which mechanism got the token into the Keychain.
+ *
+ * `stdin-unverified` is the honest third answer: `security` exited 0, so it says the value is
+ * stored, but the read-back could not confirm it — a locked Keychain, a prompt nobody answered, a
+ * read that hit its timeout. See `keychainWrite` for why that does NOT fall back to `argv`.
+ */
+export type KeychainWriteMethod = "stdin" | "stdin-unverified" | "argv";
 
 /**
  * How long any single `security` invocation may run.
@@ -154,6 +160,15 @@ function keychainRead(slot: StoreSlot): { status: number | null; value: string |
  * worst outcome available here, because the process carries on believing the credential is stored.
  * With it, "did the safe form work" stops being a question anybody has to answer in the abstract:
  * it is settled per write, on the machine it matters on.
+ *
+ * **A read-back that could not answer is not a read-back that said no.** That distinction is the
+ * whole of the second branch below, and getting it wrong is a credential leak rather than an
+ * inconvenience: a Keychain prompt raised behind another window makes the read time out, and
+ * falling back from there would spawn `security … -w <the refresh token>` with the credential in
+ * `argv`, where `ps` shows it to every process running as this user — undoing the entire reason the
+ * value moved to stdin. So the fallback fires only on a DEFINITE no: the item read back with a
+ * different value, or it is genuinely not there (44). Anything else keeps the stdin result, which
+ * `security` reported as successful, and says it could not be confirmed.
  */
 function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
   const prompted = spawnSync("security", keychainWriteArgs(slot), {
@@ -165,7 +180,14 @@ function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
     stdio: ["pipe", "ignore", "ignore"],
     timeout: KEYCHAIN_TIMEOUT_MS,
   });
-  if (prompted.status === 0 && keychainRead(slot).value === token) return "stdin";
+
+  if (prompted.status === 0) {
+    const back = keychainRead(slot);
+    if (back.value === token) return "stdin";
+    // `status` is 0 for a successful read, 44 for "not there", and null when the child was killed
+    // by the timeout. Only the first two are answers.
+    if (back.status !== 0 && back.status !== 44) return "stdin-unverified";
+  }
 
   const viaArgv = spawnSync("security", keychainWriteArgsWithToken(token, slot), {
     stdio: "ignore",
@@ -209,12 +231,25 @@ export function probeKeychainWrite(): { available: boolean; method: KeychainWrit
       stdio: ["pipe", "ignore", "ignore"],
       timeout: KEYCHAIN_TIMEOUT_MS,
     });
-    if (prompted.status === 0 && readBack() === value) {
-      return {
-        available: true,
-        method: "stdin",
-        detail: "the token is passed on stdin — never visible in `ps`",
-      };
+    if (prompted.status === 0) {
+      const back = readBack();
+      if (back === value) {
+        return {
+          available: true,
+          method: "stdin",
+          detail: "the token is passed on stdin — never visible in `ps`",
+        };
+      }
+      if (back === null) {
+        return {
+          available: true,
+          method: "stdin-unverified",
+          detail:
+            "the stdin write reported success but could not be read back — probably a Keychain " +
+            "prompt nobody answered. The token is NOT put in `ps` to find out; if a session goes " +
+            "missing after a rotation, this row is where to look",
+        };
+      }
     }
     const viaArgv = spawnSync("security", [...args, value], {
       stdio: "ignore",
@@ -261,10 +296,15 @@ function keychainStore(slot: StoreSlot): TokenStore {
       keychainWrite(token, slot);
     },
     clear() {
+      // Bounded like the rest. `delete-generic-password` prompts on a locked Keychain exactly as the
+      // others do, and every logout path calls this while holding the credential lock — so an
+      // unanswered prompt here wedges the holder, and `STALE_MS` later everyone else breaks the
+      // lock as stale and two processes rotate. That is the failure the timeouts exist to prevent,
+      // arriving through the one call that did not have one.
       spawnSync(
         "security",
         ["delete-generic-password", "-s", KEYCHAIN.service, "-a", account],
-        { stdio: "ignore" },
+        { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS },
       );
     },
   };

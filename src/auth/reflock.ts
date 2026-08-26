@@ -42,44 +42,63 @@ import { fileDir, getStore, KEYCHAIN_WORST_CASE_MS } from "./store.js";
 import { RATE } from "../config.js";
 
 /**
- * The longest a holder can legitimately hold this lock.
+ * The longest a holder can legitimately hold this lock — and it depends on the backend.
  *
- * Two things happen under it, and the second was missed the first time this was sized.
+ * The network part is the same everywhere. `refreshOnce` issues one request bounded by
+ * `RATE.requestTimeoutMs`, and a 401 makes it re-read the store and issue a second, inside the same
+ * lock, because that retry exists precisely to handle "another process rotated while we were
+ * queued". Two full request timeouts.
  *
- * `refreshOnce` issues one request bounded by `RATE.requestTimeoutMs`, and a 401 makes it re-read
- * the store and issue a second — inside the same lock, because the retry exists precisely to handle
- * "another process rotated while we were queued". That is two full request timeouts.
+ * The credential part is not. On the **file** backend a read is a decrypt and a write is an
+ * fsync-and-rename: microseconds, and no cushion buys anything. On the **Keychain** backend every
+ * one of those is a `security` subprocess that can raise a dialog nobody answers, and there are
+ * several under one lock — the pre-check read, the read inside `refreshOnce`, the 401 re-read, the
+ * retry's read, and `persistRotated`'s write, which is itself up to three invocations and retries
+ * once. Sizing against `persistRotated` alone was still short: a traced 401-retry path reaches
+ * about ninety seconds of *legitimate* work, and the first attempt at this allowed eighty.
  *
- * Then `persistRotated` writes the rotated token, and on the Keychain backend one write is up to
- * three bounded `security` invocations (the prompted write, the read-back, the argv fallback) — and
- * it retries once. Sizing the cushion against the requests alone left ten seconds against a
- * possible thirty of Keychain work, so a holder waiting on a slow or prompting Keychain crossed the
- * staleness threshold while entirely healthy and had its lock broken.
+ * So the allowance is per backend, and the file backend goes back to exactly what it had. That
+ * matters beyond tidiness: `STALE_MS` is also how long a caller waits before it may break the lock
+ * a SIGKILLed process left behind, and making Linux and Windows wait out a macOS-only hazard is a
+ * real cost for no benefit.
  *
- * Everything below is derived from these rather than written down, and `test/reflock.test.ts`
- * asserts the relationship against a literal, so a change to either input has to be deliberate.
+ * `test/reflock.test.ts` asserts these against literals, not against the same expression — a test
+ * that recomputes the formula agrees with the constant rather than with what the lock holds.
  */
-const WORST_CASE_HOLD_MS = 2 * RATE.requestTimeoutMs + 2 * KEYCHAIN_WORST_CASE_MS;
+const KEYCHAIN_ALLOWANCE_MS = 6 * KEYCHAIN_WORST_CASE_MS;
+
+function worstCaseHoldMs(domain: LockDomain): number {
+  const network = 2 * RATE.requestTimeoutMs;
+  return getStore(domain).backend === "keychain" ? network + KEYCHAIN_ALLOWANCE_MS : network;
+}
 
 /**
- * A lock older than this is assumed to belong to a dead process.
+ * A lock older than this belongs to a process that died holding it.
  *
- * It must exceed `WORST_CASE_HOLD_MS`. It was 30_000 against a 40_000 worst case — the wrong side of
- * that line — so a slow but entirely legitimate holder had its lock broken out from under it, and
- * the double rotation this module exists to prevent happened anyway. Raising the acquisition
+ * It must exceed the worst legitimate hold. It was 30_000 against a 40_000 worst case — the wrong
+ * side of that line — so a slow but entirely healthy holder had its lock broken out from under it
+ * and the double rotation this module exists to prevent happened anyway. Raising the acquisition
  * timeout without raising this one fixes half the bug and looks like it fixed all of it.
  */
-export const STALE_MS = WORST_CASE_HOLD_MS + 10_000;
+export function staleMsFor(domain: LockDomain): number {
+  return worstCaseHoldMs(domain) + 10_000;
+}
 
 /**
  * How long a caller waits for the lock before giving up.
  *
- * It must exceed `STALE_MS`, not merely `WORST_CASE_HOLD_MS`. `acquireDirLock` only breaks a stale
- * lock *while it is still waiting*, so a waiter whose timeout is shorter than `staleMs` can never
- * break one — it gives up first, and so does the next caller, and the lock a crashed process left
- * behind wedges every refresh until someone deletes it by hand. The old pair (wait 10 s, stale at
- * 30 s) had exactly that hole.
+ * It must exceed the staleness threshold, not merely the worst hold. `acquireDirLock` only breaks a
+ * stale lock *while it is still waiting*, so a waiter whose timeout is shorter than `staleMs` can
+ * never break one — it gives up first, and so does the next caller, and the lock a crashed process
+ * left behind wedges every refresh until someone deletes it by hand. The old pair (wait 10 s, stale
+ * at 30 s) had exactly that hole.
  */
+export function refreshLockTimeoutMsFor(domain: LockDomain): number {
+  return staleMsFor(domain) + 5_000;
+}
+
+/** The file-backend figures, which is what every test and every non-macOS install sees. */
+export const STALE_MS = 2 * RATE.requestTimeoutMs + 10_000;
 export const REFRESH_LOCK_TIMEOUT_MS = STALE_MS + 5_000;
 
 const POLL_MS = 120;
@@ -129,10 +148,14 @@ function lockPath(domain: LockDomain): string {
  * error: the caller refreshes anyway, accepting the small clobber risk rather than failing.
  */
 export async function acquireRefreshLock(
-  timeoutMs = REFRESH_LOCK_TIMEOUT_MS,
+  timeoutMs?: number,
   domain: LockDomain = "main",
 ): Promise<(() => void) | null> {
-  return acquireDirLock(lockPath(domain), { staleMs: STALE_MS, timeoutMs, pollMs: POLL_MS });
+  return acquireDirLock(lockPath(domain), {
+    staleMs: staleMsFor(domain),
+    timeoutMs: timeoutMs ?? refreshLockTimeoutMsFor(domain),
+    pollMs: POLL_MS,
+  });
 }
 
 /**
@@ -160,7 +183,7 @@ export async function acquireRefreshLock(
 export async function withCredentialLock<T>(
   slot: LockDomain,
   fn: () => T | Promise<T>,
-  timeoutMs = REFRESH_LOCK_TIMEOUT_MS,
+  timeoutMs?: number,
 ): Promise<T> {
   const release = await acquireRefreshLock(timeoutMs, slot);
   try {
