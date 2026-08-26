@@ -117,6 +117,28 @@ tidak perlu diatur apa-apa. Untuk membuka semua 138 tool:
 Instalasi lengkap untuk setiap client, termasuk Desktop Extension dan plugin Claude Code, ada di
 [README bahasa Inggris](README.md#installation).
 
+## Selalu versi terbaru
+
+Semua konfigurasi di atas memakai `npx -y stockbit-mcp` tanpa nomor versi, dan itu disengaja: **npx
+mengambil rilis terbaru setiap kali server dijalankan.** Versi baru sampai ke Anda saat client
+berikutnya menjalankannya — tidak ada yang perlu dikerjakan.
+
+Ini terukur, bukan asumsi: dengan 1.1.0 masih ada di cache npx, perintah `npx -y stockbit-mcp`
+berikutnya menjalankan 1.1.1.
+
+| Cara instalasi | Dapat versi baru otomatis? |
+|---|---|
+| `npx -y stockbit-mcp` | **Ya** — saat dijalankan berikutnya |
+| `npm i -g stockbit-mcp` | Tidak. Jalankan `npm update -g stockbit-mcp` |
+| Desktop Extension (`.mcpb`) | **Tidak.** Unduh `.mcpb` baru dari [Releases](https://github.com/INo-xious/stockbit-mcp/releases) |
+| Dari source | Tidak. `git pull && npm ci && npm run build` |
+
+Kalau ingin tetap di satu versi, kunci saja — `"args": ["-y", "stockbit-mcp@1.1.1"]`. Atau terima
+perbaikan tanpa perubahan yang merusak: `"stockbit-mcp@^1"`. Proyek ini mengikuti semver, jadi hanya
+rilis major yang bisa merusak setup Anda.
+
+Detail lengkap ada di [README bahasa Inggris](README.md#staying-up-to-date).
+
 ## Mulai cepat
 
 1. **Instal** — salah satu cara di atas.

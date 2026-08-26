@@ -213,7 +213,46 @@ npm ci && npm run build
 node dist/bin/stockbit-mcp.js
 ```
 
-`npm i -g stockbit-mcp` avoids the npx cold start on every launch.
+`npm i -g stockbit-mcp` avoids the npx cold start on every launch — at the cost of the automatic
+updates described next.
+
+## Staying up to date
+
+Every configuration above uses `npx -y stockbit-mcp` with no version, and that is deliberate: **npx
+re-resolves the newest release each time the server starts.** A new version reaches you the next time
+your client launches it, with nothing to do.
+
+That is measured, not assumed. With 1.1.0 already sitting in the npx cache, the next bare
+`npx -y stockbit-mcp` ran 1.1.1.
+
+| How you installed | Do you get new versions automatically? |
+|---|---|
+| `npx -y stockbit-mcp` (every config above) | **Yes** — on the next launch |
+| `npm i -g stockbit-mcp` | No. Run `npm update -g stockbit-mcp` |
+| Desktop Extension (`.mcpb`) | **No.** Download the new `.mcpb` from [Releases](https://github.com/INo-xious/stockbit-mcp/releases) |
+| From source | No. `git pull && npm ci && npm run build` |
+
+**If you would rather not move.** Pin a version and nothing changes under you:
+
+```json
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp@1.1.1"] } } }
+```
+
+Or take patches and minors but never a breaking change — this project follows semver, so a new major
+is the only release that can break your setup:
+
+```json
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp@^1"] } } }
+```
+
+**To force a refresh right now**, without waiting for a restart:
+
+```bash
+npx -y stockbit-mcp@latest --version
+```
+
+Which version you are actually running is always answerable — ask your assistant *"is my Stockbit MCP
+working?"* and `status` reports it, alongside what else is and is not set up.
 
 ## Quick start
 
