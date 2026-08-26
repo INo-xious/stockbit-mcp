@@ -27,9 +27,19 @@
  * truncations instead of one. It is deliberately not a fourth `StoreSlot`, for the same reason the
  * website session is not: a slot holds one JWT and the whole Keychain path is built around that.
  *
- * **No lock, and the reason is worth writing down.** A lost update here costs a cache miss. A lost
- * update on `refresh.enc` costs a forced re-login. Those are not the same kind of write and do not
- * deserve the same ceremony.
+ * **No lock, and the reason is worth writing down — with its one exception.** A lost update on a
+ * WRITE costs a cache miss: the resurrected entry's fingerprint no longer matches the rotated
+ * refresh token, so it simply does not hit. A lost update on `refresh.enc` costs a forced re-login.
+ * Those are not the same kind of write and do not deserve the same ceremony.
+ *
+ * A lost update on a CLEAR is different, and the honest version is: it can put back an entry that
+ * was deliberately removed. `forceRefresh` clears because the token was rejected — and a concurrent
+ * `writeAccessCache` for another domain, which read the file before that clear and writes after it,
+ * restores the whole snapshot including the dead entry, whose fingerprint still matches and whose
+ * expiry is still in the future. The window is milliseconds and needs a cross-domain refresh in
+ * another process, but it is real. `session.ts` closes it from the side that matters:
+ * `forceRefresh` refuses the next cache hit outright (`DomainState.skipCacheOnce`) rather than
+ * trusting the file it just cleared.
  *
  * **Every entry is bound to the refresh token it was minted from**, by fingerprint. Without that,
  * logging in as a second account leaves the first account's access token on disk and usable for a

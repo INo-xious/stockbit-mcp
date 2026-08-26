@@ -38,22 +38,28 @@
 import { join } from "node:path";
 import { tmpdir, userInfo } from "node:os";
 import { acquireDirLock } from "../util/dirlock.js";
-import { fileDir, getStore } from "./store.js";
+import { fileDir, getStore, KEYCHAIN_WORST_CASE_MS } from "./store.js";
 import { RATE } from "../config.js";
 
 /**
  * The longest a holder can legitimately hold this lock.
  *
+ * Two things happen under it, and the second was missed the first time this was sized.
+ *
  * `refreshOnce` issues one request bounded by `RATE.requestTimeoutMs`, and a 401 makes it re-read
  * the store and issue a second — inside the same lock, because the retry exists precisely to handle
- * "another process rotated while we were queued". Two full request timeouts is therefore the worst
- * case *before anything has gone wrong*.
+ * "another process rotated while we were queued". That is two full request timeouts.
  *
- * Both constants below are derived from this rather than written down, and `test/reflock.test.ts`
- * asserts the relationship, so raising `RATE.requestTimeoutMs` breaks a test instead of quietly
- * breaking the lock.
+ * Then `persistRotated` writes the rotated token, and on the Keychain backend one write is up to
+ * three bounded `security` invocations (the prompted write, the read-back, the argv fallback) — and
+ * it retries once. Sizing the cushion against the requests alone left ten seconds against a
+ * possible thirty of Keychain work, so a holder waiting on a slow or prompting Keychain crossed the
+ * staleness threshold while entirely healthy and had its lock broken.
+ *
+ * Everything below is derived from these rather than written down, and `test/reflock.test.ts`
+ * asserts the relationship against a literal, so a change to either input has to be deliberate.
  */
-const WORST_CASE_HOLD_MS = 2 * RATE.requestTimeoutMs;
+const WORST_CASE_HOLD_MS = 2 * RATE.requestTimeoutMs + 2 * KEYCHAIN_WORST_CASE_MS;
 
 /**
  * A lock older than this is assumed to belong to a dead process.

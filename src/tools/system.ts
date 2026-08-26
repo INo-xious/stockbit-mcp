@@ -107,11 +107,12 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
           toolCount: options.toolCount,
           profileLabel: options.profileLabel,
           profileIsDefault: options.profileIsDefault,
-          // Which families this profile kept out — read at CALL time, when registration is complete.
-          // `status` needs it for the trap the default profile creates: `core` has no order tools,
-          // so a user who deliberately ran `trading-enable --live` finds nothing to place an order
-          // with and no explanation anywhere.
-          missingFamilies: [...new Set(define.skipped().map((entry) => entry.family))],
+          // Which tool NAMES this profile kept out — read at CALL time, when registration is
+          // complete. `status` needs it for the trap the default profile creates: `core` has no
+          // order tools, so a user who deliberately ran `trading-enable --live` finds nothing to
+          // place an order with and no explanation anywhere. Names rather than families, because a
+          // family with one tool missing is not a family that is gone.
+          missingTools: define.skippedNames(),
         }),
       ),
   );
@@ -389,23 +390,35 @@ async function doLogout(request: LogoutRequest) {
     resetSession(slot === "securities" ? "securities" : slot);
   }
 
-  // The WEBSITE session, and the shared access-token cache.
+  // The access token and the health journal are cleared PER SLOT, for every scope.
   //
-  // `doLogout` cleared neither. The CLI's `logout` has cleared the web session since it was added,
-  // so a logout through the MCP tool left a working, decryptable Stockbit session on disk — while
-  // this very tool's description called the browser profile "a SECOND copy of the session". A
-  // logout that leaves a usable credential is not one. The access cache is the same argument with a
-  // shorter fuse: it is a bearer token good for up to a day, and it is shared with every process on
-  // the machine.
+  // An access token is a bearer credential good for up to a day, so leaving one behind is exactly
+  // what logout exists to prevent — and `logout { scope: "trading" }` leaving a live carina token
+  // on disk is the worst version of it, because the securities session is the one with money behind
+  // it. Clearing all three on a `main` scope is the mirror-image mistake: it costs the other two
+  // domains an unnecessary rotation and drops their recorded health for no reason.
+  for (const scope of scopes) {
+    const slot = SCOPE_SLOTS[scope];
+    try {
+      clearAccessCache(slot);
+      clearSessionHealth(slot);
+    } catch {
+      // Diagnostics and a cache. Neither is worth failing a logout that has already cleared the
+      // credential itself.
+    }
+  }
+
+  // The WEBSITE session belongs to the main session alone.
   //
-  // Both are cleared on any scope that includes `main`, because both belong to the main session.
+  // `doLogout` never cleared it. The CLI's `logout` has since it was added, so a logout through the
+  // MCP tool left a working, decryptable Stockbit session on disk — while this very tool's
+  // description called the browser profile "a SECOND copy of the session". A logout that leaves a
+  // usable credential is not one.
   let webSession = "not part of this scope";
   if (scopes.includes("main")) {
     try {
       clearWebSession();
-      clearAccessCache();
-      clearSessionHealth();
-      webSession = "cleared, along with the shared access-token cache";
+      webSession = "cleared, along with the main access token and its recorded health";
     } catch (err) {
       webSession = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
     }

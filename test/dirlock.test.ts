@@ -75,3 +75,27 @@ test(
     release!();
   },
 );
+
+test("a holder broken as stale cannot delete the lock that replaced it", async () => {
+  // `release()` used to remove the directory unconditionally. Sequence: A takes the lock and is
+  // slow; B waits, sees it is stale, breaks it and takes its own; A finishes and deletes B's — and
+  // C walks straight in while B is still working. One stale break did not cost one collision, it
+  // dropped mutual exclusion entirely for the following critical section.
+  const path = join(DIR, "stale-handoff.lock");
+  const a = await acquireDirLock(path, opts);
+  assert.ok(a, "A takes the lock");
+
+  // A is now slow enough to look dead.
+  const old = new Date(Date.now() - opts.staleMs - 5_000);
+  utimesSync(path, old, old);
+
+  const b = await acquireDirLock(path, opts);
+  assert.ok(b, "B breaks the stale lock and takes its own");
+
+  a!(); // A finishes, late.
+  assert.equal(existsSync(path), true, "A must not have deleted B's lock");
+  assert.equal(await acquireDirLock(path, opts), null, "and C must still be locked out");
+
+  b!();
+  assert.equal(existsSync(path), false, "B's own release still works");
+});

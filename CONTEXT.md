@@ -14,7 +14,7 @@ A glossary, not a spec. One meaning per word; the code and the docs use these wo
 
 ## Account and credentials
 - **Token domain** — which credential a request carries: `main` (exodus, market data), `securities` (carina, Stockbit Sekuritas), `eipo` (api-sekuritas).
-- **Credential** — the stored refresh token for one domain. **Access token** — the short-lived bearer minted from it, memory only. **Session** (auth) — a domain's live login: a credential that still refreshes.
+- **Credential** — the stored refresh token for one domain. **Access token** — the 24-hour bearer minted from it; held in memory and, unless `STOCKBIT_NO_ACCESS_CACHE=1`, shared between processes through `access.enc` (see `SECURITY.md`). **Session** (auth) — a domain's live login: a credential that still refreshes.
 - **Website session** — the FOURTH credential, and deliberately not a token domain: the browser's own cookies and Local Storage, captured to `websession.enc`. It is what the chart runs on, it lasts about a day, and no refresh token can mint one — only a real login. `status` reports it separately because a healthy refresh token says nothing about it.
 - **Rotation** — a successful `/login/refresh` mints a new refresh token and retires the one presented. Observed, not assumed. It is why two processes refreshing at once lock each other out, and why the browser loading a Stockbit page spends the CLI's credential.
 - **Store / backend** — where credentials live: macOS Keychain, or an encrypted file elsewhere.

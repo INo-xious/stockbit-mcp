@@ -20,7 +20,8 @@
  * That decision belongs to the caller and is deliberately not encoded here: this module reports
  * whether it got the lock and says nothing about what that should mean.
  */
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -63,25 +64,46 @@ export async function acquireDirLock(
       // fail on a missing `~/.stockbit`.
       //
       // Owner-only, matching `store.ts`. Without the mode, a lock taken before any credential was
-      // ever written — which is the ordinary order on a fresh machine, because `bootstrap` and
-      // `login` both lock before they store — creates `~/.stockbit` at 0755, and every credential
-      // file written into it afterwards sits in a directory anyone on the box can list. The files
-      // themselves are still 0600; the directory is the part that was wrong.
+      // ever written — which is the ordinary order on a fresh machine, because `bootstrap` locks
+      // before it stores, and so does every refresh — creates `~/.stockbit` at 0755, and every
+      // credential file written into it afterwards sits in a directory anyone on the box can list.
+      // The files themselves are still 0600; the directory is the part that was wrong. (The login
+      // capture is the one credential write that deliberately takes no lock — see `reflock.ts`.)
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       // mkdir is atomic and fails if the directory exists — the test-then-create race does not exist
       // here, which is the whole reason for using a directory rather than a file.
       mkdirSync(path);
+      // An owner token, not just a pid. `release()` used to delete the directory unconditionally,
+      // which is wrong the moment a stale break happens: A takes the lock and is slow, B breaks it
+      // as stale and takes its own, then A finishes and deletes B's — and C walks straight in while
+      // B is still working. One stale break did not cost one collision, it dropped mutual exclusion
+      // entirely for the next critical section. Reading the token back before removing means a
+      // holder can only ever delete its own lock.
+      //
+      // A pid alone would not do: pids are reused, and two runs of the same script can share one.
+      const owner = `${process.pid}.${randomBytes(8).toString("hex")}`;
+      const ownerFile = join(path, "owner");
       try {
-        writeFileSync(join(path, "pid"), String(process.pid));
+        writeFileSync(ownerFile, owner);
       } catch {
-        /* informational only */
+        /* best effort; the release below falls back to removing only if it cannot tell */
       }
       let released = false;
       return () => {
         if (released) return;
         released = true;
         try {
-          rmSync(path, { recursive: true, force: true });
+          // If the file is unreadable we cannot prove ownership either way. Removing is the older
+          // behaviour and the one that cannot wedge the lock forever, so that is what happens —
+          // but a token we CAN read and that is not ours is proof we were broken as stale, and
+          // deleting then would take someone else's lock with it.
+          let mine = true;
+          try {
+            mine = readFileSync(ownerFile, "utf8") === owner;
+          } catch {
+            mine = true;
+          }
+          if (mine) rmSync(path, { recursive: true, force: true });
         } catch {
           /* a lock we cannot remove will be broken as stale */
         }

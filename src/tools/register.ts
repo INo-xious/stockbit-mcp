@@ -181,7 +181,10 @@ export function registerTools(
   // `status`, `login`, `logout`. Registered first so they exist even when a profile has filtered
   // everything else out — they are how a user finds out why.
   registerSystemTools(define.family("system"), {
-    profileLabel: options.profile?.label ?? DEFAULT_TOOL_PROFILE,
+    // `all` when there is no profile at all: `registerTools` with no options filters nothing, and
+    // `createServer()` (the package's own export) is exactly that case. Reporting `core` beside a
+    // toolCount of 138 is self-refuting for anyone embedding this server.
+    profileLabel: options.profile?.label ?? "all",
     profileIsDefault: options.profileIsDefault === true,
     ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
   });
@@ -1574,15 +1577,34 @@ export function registerTools(
       "single reading.",
     {},
     async () =>
-      runTool(async () => ({
-        count: BUILTIN_WORKFLOWS.length,
-        workflows: BUILTIN_WORKFLOWS.map((w) => ({
-          name: w.name,
-          description: w.description,
-          inputs: w.inputs,
-          steps: w.steps.map((s) => ({ id: s.id, tool: s.tool, describe: s.describe, fansOut: Boolean(s.forEach) })),
-        })),
-      })),
+      runTool(async () => {
+        // Only the ones that can actually RUN here. The prompt menu was filtered the same way and
+        // for the same reason, and this tool is the other half of it: its own description tells the
+        // model to "use `workflow_list` first to see names", so listing a recipe whose steps are
+        // not registered is an invitation to a refusal. Under the default profile that is
+        // `pine_handoff` and `strategy_check`, both of which call `pine_script`.
+        const disabled = new Set(define.skippedNames());
+        const runnable = BUILTIN_WORKFLOWS.filter((w) => !w.steps.some((step) => disabled.has(step.tool)));
+        const hidden = BUILTIN_WORKFLOWS.length - runnable.length;
+        return {
+          count: runnable.length,
+          workflows: runnable.map((w) => ({
+            name: w.name,
+            description: w.description,
+            inputs: w.inputs,
+            steps: w.steps.map((s) => ({ id: s.id, tool: s.tool, describe: s.describe, fansOut: Boolean(s.forEach) })),
+          })),
+          // Named rather than silently dropped: a count that quietly shrinks reads as a shorter
+          // menu, not as a configuration choice somebody made.
+          ...(hidden === 0
+            ? {}
+            : {
+                note:
+                  `${hidden} more workflow(s) exist but need tools this server did not register ` +
+                  `(tool profile: ${options.profile?.label ?? "all"}). Set STOCKBIT_TOOLS=all to see them.`,
+              }),
+        };
+      }),
   );
 
   defWorkflows.read(

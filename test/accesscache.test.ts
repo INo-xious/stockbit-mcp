@@ -15,7 +15,7 @@
  *   3. **Skew is applied at comparison, never baked in.** Otherwise changing the skew only affects
  *      tokens minted afterwards, which is the kind of half-applied setting nobody can debug.
  */
-import { mkdtempSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -147,16 +147,26 @@ test("STOCKBIT_NO_ACCESS_CACHE=1 disables BOTH directions", () => {
   assert.equal(readAccessCache("main", REFRESH), null, "and nothing was written while it was off");
 });
 
-test("writing never throws, even when the directory is gone", () => {
+test("writing never throws when the store directory cannot be created", () => {
   // It runs after a refresh that has already succeeded. A cache that cannot be written is a cache
   // miss next time, never a reason to fail a request that worked.
+  //
+  // The path is made unusable by putting a FILE where the directory has to go. Merely pointing at a
+  // path that does not exist proves nothing: `writeFile` calls `mkdirSync(recursive)` first, so it
+  // would simply be created and the write would succeed — the catch this test is named after would
+  // never be entered, and deleting it would not fail the test.
   const saved = process.env.STOCKBIT_STORE_DIR;
-  process.env.STOCKBIT_STORE_DIR = join(STORE, "not-a-dir-at-all", "deeper");
+  const blocker = join(STORE, "a-file-not-a-dir");
+  writeFileSync(blocker, "not a directory");
+  process.env.STOCKBIT_STORE_DIR = join(blocker, "deeper");
   try {
+    assert.throws(() => mkdirSync(join(blocker, "deeper"), { recursive: true }), "precondition: the path really is unusable");
     assert.doesNotThrow(() => writeAccessCache("main", ACCESS, FUTURE, REFRESH));
     assert.doesNotThrow(() => clearAccessCache());
+    assert.doesNotThrow(() => clearAccessCache("main"));
     assert.doesNotThrow(() => readAccessCache("main", REFRESH));
   } finally {
     process.env.STOCKBIT_STORE_DIR = saved;
+    rmSync(blocker, { force: true });
   }
 });

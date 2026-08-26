@@ -27,6 +27,8 @@ import { collectStatus, formatStatus, loginStarted, loginFinished, resetLoginSta
 import { getStore, resetStoreCache } from "../src/auth/store.ts";
 import { settingsPath } from "../src/settings.ts";
 import { clearSessionHealth, recordRefreshFailure, recordRefreshOk } from "../src/auth/health.ts";
+import { clearAccessCache } from "../src/auth/accesscache.ts";
+import { resetSession } from "../src/auth/session.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
 
@@ -250,7 +252,7 @@ test("trading on with no trading tools registered is called out, and nextStep na
     const report = await collectStatus({
       profileLabel: "core",
       profileIsDefault: true,
-      missingFamilies: ["trading", "pine", "eipo"],
+      missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel", "order_amend", "pine_script"],
     });
     assert.equal(report.trading.enabled, true, "trading really is on");
     assert.ok(
@@ -269,7 +271,11 @@ test("trading off with no trading tools registered is not worth mentioning", asy
   // people to ignore the warning that matters.
   clearAllSlots();
   getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
-  const report = await collectStatus({ profileLabel: "core", profileIsDefault: true, missingFamilies: ["trading"] });
+  const report = await collectStatus({
+    profileLabel: "core",
+    profileIsDefault: true,
+    missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel"],
+  });
   assert.equal(report.trading.mode, "off");
   assert.equal(report.checks.some((c) => c.name === "trading tools"), false);
   clearAllSlots();
@@ -308,6 +314,48 @@ test("the live check is explicitly not run unless it is asked for", async () => 
   assert.ok(live);
   assert.equal(live.status, "warn");
   assert.match(live.detail, /Not run/);
+});
+
+test("live: true actually makes a request, even when the access cache is warm", async () => {
+  // The worst kind of bug: a check that reports success without checking. `collectStatus` proved
+  // liveness with `ensureFresh`, which consults the shared access cache before it ever reaches the
+  // wire — so in a fresh process with a warm cache, `--verify` / `live: true` made ZERO requests and
+  // still reported "The stored token refreshed against Stockbit". A user could revoke their session
+  // from Stockbit's own web UI and be told, for the next 24 hours, that it was fine.
+  //
+  // Worse, the tool description tells the model this costs the user their website session and to ask
+  // permission first. Spending that consent on a no-op is the part that makes it indefensible.
+  clearAllSlots();
+  clearAccessCache();
+  const token = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  getStore("main").set(token);
+
+  const real = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests++;
+    return new Response(
+      JSON.stringify({ data: { access_token: fakeJwt(Math.floor(Date.now() / 1000) + 3600) } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    // Warm the cache the way any ordinary tool call would.
+    await collectStatus({ live: true });
+    assert.equal(requests, 1, "precondition: the first live check refreshes");
+
+    requests = 0;
+    resetSession();
+    const report = await collectStatus({ live: true });
+    assert.equal(requests, 1, "a second live check must ALSO refresh — that is what live: true means");
+    assert.ok(report.checks.some((c) => c.name === "live check" && c.status === "ok"));
+  } finally {
+    globalThis.fetch = real;
+    clearAccessCache();
+    clearAllSlots();
+    resetSession();
+  }
 });
 
 test("a login in progress is reported, and forgotten when it finishes", async () => {

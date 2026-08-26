@@ -14,7 +14,7 @@ a real brokerage account.
 
 ```bash
 npm run typecheck     # src/, bin/, scripts/
-npm test              # ~1,160 tests, offline, no skips
+npm test              # the whole suite, offline, no skips
 npm run build         # cleans dist/ first
 npm run smoke         # starts the built binary over stdio and asks it what it registered
 npm run check:pack    # asserts npm publish would ship the build and nothing else

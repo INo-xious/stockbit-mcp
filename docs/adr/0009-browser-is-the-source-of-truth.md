@@ -99,11 +99,19 @@ here rather than left implicit in a diff. It is bounded three ways: it happens o
 `stockbit-auth login`, only on the pinned profile this project created, and only after a harvest has
 already failed — except under `--switch-account`, where the user asked for it in the imperative. It
 is done with `Storage.clearDataForOrigin` scoped to `https://stockbit.com` rather than
-`Network.clearBrowserCookies`, so no `Network` or `Fetch` domain is enabled anywhere in this path.
+`Network.clearBrowserCookies`, so **clearing does not itself require** a `Network` or `Fetch`
+domain. Stated exactly, because the stronger version would be false: the login capture enables both
+domains on every session it attaches to — that is how it intercepts the token — and the clear is
+sent on one of those sessions. What the choice buys is that the ability to clear adds nothing to
+what is already enabled, and that the same call works from a context which enables neither.
 ADR-0005 restricts the *Chartbit driver* to `Page` and `Runtime`, and `test/chartbit.test.ts` only
-greps `src/chartbit/`, so `src/auth/` code would not trip it. Matching the restraint anyway is the
-decision: the reason for the rule — this project does not enable the domains that read response
-bodies unless it is capturing a login — applies just as much here.
+greps `src/chartbit/`, so `src/auth/` code would not trip it either way; matching the restraint
+where it costs nothing is the decision.
+
+The clear falls back to a browser-wide `Storage.clearCookies` when the origin-scoped call is
+unavailable — a bigger hammer, acceptable only because this profile exists solely for Stockbit, and
+reported by `doctor` so it is never a silent substitution. It must also be sent to a **page**
+session: at browser level Chromium answers "Internal error", which was measured, not assumed.
 
 **Widening `tokenUrlAllowed` to accept `/login/refresh` is rejected.** It looks like the natural fix
 and is worse. The SPA's boot refresh fires on *every* page load, so `--switch-account` would capture

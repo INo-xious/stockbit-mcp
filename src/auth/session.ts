@@ -32,6 +32,7 @@ import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/
 import { logStderr, redact } from "../redact.js";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscache.js";
 import { recordRefreshFailure, recordRefreshOk } from "./health.js";
+import { tokenFingerprint } from "./fingerprint.js";
 
 export type { TokenDomain } from "../http/transport.js";
 
@@ -39,6 +40,21 @@ interface AccessToken {
   token: string;
   /** epoch seconds */
   expiresAt: number;
+  /**
+   * Fingerprint of the refresh token this was minted from, when that is known.
+   *
+   * The DISK cache was hardened against a second account's login leaving the first account's token
+   * usable for a day; the in-memory copy needs exactly the same binding for exactly the same reason,
+   * and by a route the disk cache cannot cover. A long-running server holds `current` for up to 24
+   * hours. If the user runs `stockbit-auth login --switch-account` in a terminal, the store gains
+   * account B's refresh token, the disk cache correctly misses on fingerprint — and the running
+   * server, which never re-checks, keeps answering `portfolio` and `watchlist` as **account A**,
+   * with nothing anywhere saying so. The CLI has no way to reach into that process.
+   *
+   * Absent for `adoptAccessToken` and `STOCKBIT_ACCESS_TOKEN`, which are seeded from something other
+   * than a stored refresh token; an absent fingerprint is never treated as a mismatch.
+   */
+  from?: string;
 }
 
 interface DomainState {
@@ -58,6 +74,21 @@ interface DomainState {
    * a Keychain that was locked for a minute. See `persistRotated` and `currentRefreshToken`.
    */
   rotated: { token: string; supersedes: string | null } | null;
+  /**
+   * Do not take the NEXT cache hit for this domain.
+   *
+   * Set by `forceRefresh`, which runs because the token in hand was rejected. Clearing the cache
+   * file is not enough on its own: the file is an unlocked read-modify-write shared with other
+   * processes, so a concurrent `writeAccessCache` for another domain can restore the snapshot it
+   * read a moment earlier — dead entry and all — between the clear and the re-read. The entry's
+   * fingerprint still matches (the refresh token has not rotated yet) and its `expiresAt` is still
+   * in the future (a revoked token keeps its expiry), so it reads as a hit and hands back exactly
+   * the token that just 401'd.
+   *
+   * It is also what makes `live: true` honest: a forced refresh must reach the wire, or the check
+   * that claims to have proved the token is proving nothing.
+   */
+  skipCacheOnce: boolean;
 }
 
 /**
@@ -101,9 +132,9 @@ const DOMAINS: Record<TokenDomain, DomainSpec> = {
 };
 
 const state: Record<TokenDomain, DomainState> = {
-  main: { current: null, inFlight: null, rotated: null },
-  securities: { current: null, inFlight: null, rotated: null },
-  eipo: { current: null, inFlight: null, rotated: null },
+  main: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
+  securities: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
+  eipo: { current: null, inFlight: null, rotated: null, skipCacheOnce: false },
 };
 
 /** Decode a JWT payload without verifying (we only read exp). Returns {} on failure. */
@@ -240,6 +271,21 @@ export function parseRefresh(body: unknown): { access: string; newRefresh?: stri
 }
 
 /**
+ * Whether an in-memory access token was minted from the refresh token that is in the store NOW.
+ *
+ * A token with no recorded origin passes: `adoptAccessToken` (used by `trading-login`, which is
+ * handed the pair together) and `STOCKBIT_ACCESS_TOKEN` both seed one deliberately, and neither has
+ * a stored refresh token to be bound to. Treating "unknown" as a mismatch would make `trading-login`
+ * throw away the access token it was just given and immediately spend a rotation to replace it.
+ */
+function mintedFromCurrentCredential(domain: TokenDomain, token: AccessToken): boolean {
+  if (!token.from) return true;
+  const refreshToken = currentRefreshToken(domain);
+  if (!refreshToken) return false;
+  return token.from === tokenFingerprint(refreshToken);
+}
+
+/**
  * A cached access token for a domain, if there is one fresh enough to use.
  *
  * The skew is applied HERE rather than baked into what was stored, so changing
@@ -251,12 +297,13 @@ export function parseRefresh(body: unknown): { access: string; newRefresh?: stri
  * first account's token on disk and making every request as the wrong person for a day.
  */
 function fromAccessCache(domain: TokenDomain, nowSeconds: number): AccessToken | null {
+  if (state[domain].skipCacheOnce) return null;
   const refreshToken = currentRefreshToken(domain);
   if (!refreshToken) return null;
   const entry = readAccessCache(domain, refreshToken);
   if (!entry) return null;
   if (entry.expiresAt - nowSeconds <= AUTH.expirySkewSeconds) return null;
-  return { token: entry.token, expiresAt: entry.expiresAt };
+  return { token: entry.token, expiresAt: entry.expiresAt, from: entry.from };
 }
 
 async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
@@ -270,6 +317,7 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   // a perfectly healthy refresh gave up and refreshed in parallel, producing the exact collision
   // the lock is for.
   const release = await acquireRefreshLock(REFRESH_LOCK_TIMEOUT_MS, domain);
+  const locked = release !== null;
   try {
     // Double-checked, and this `if` is the whole feature rather than an optimisation on top of it.
     //
@@ -283,7 +331,7 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
       state[domain].current = shared;
       return shared;
     }
-    return await refreshOnce(domain);
+    return await refreshOnce(domain, 0, locked);
   } finally {
     release?.();
   }
@@ -354,9 +402,19 @@ function persistRotated(
  * perfectly well reports that it has none.
  */
 function currentRefreshToken(domain: TokenDomain): string | null {
-  const stored = getStore(DOMAINS[domain].slot).get();
+  const store = getStore(DOMAINS[domain].slot);
   const held = state[domain].rotated;
-  if (!held) return stored;
+  if (!held) return store.get();
+
+  // `readState`, not `get() === null`. Those are two different facts and collapsing them destroys
+  // the credential this branch exists to save: a LOCKED Keychain returns null from `get()`, which
+  // is also what a store that has moved on looks like — and a locked Keychain is precisely the
+  // condition that made the write fail and created `rotated` in the first place. Dropping the token
+  // here, milliseconds later, would hand the user "No Stockbit session stored. Run login" for a
+  // credential this process is holding and could still use.
+  if (store.readState() === "unavailable") return held.token;
+
+  const stored = store.get();
   if (stored === held.supersedes) return held.token;
   state[domain].rotated = null;
   return stored;
@@ -377,7 +435,11 @@ function currentRefreshToken(domain: TokenDomain): string | null {
  * The import is dynamic to keep `resync.ts` → `session.ts` a one-way dependency at module scope;
  * it is paid only on a 401.
  */
-async function recoverFromStoredWebSession(slot: StoreSlot, spent: string): Promise<boolean> {
+async function recoverFromStoredWebSession(
+  slot: StoreSlot,
+  spent: string,
+  alreadyLocked: boolean,
+): Promise<boolean> {
   try {
     const [{ loadWebSession }, { syncStoreFromBrowser }] = await Promise.all([
       import("./websession.js"),
@@ -385,7 +447,11 @@ async function recoverFromStoredWebSession(slot: StoreSlot, spent: string): Prom
     ]);
     const web = loadWebSession();
     if (!web) return false;
-    const result = await syncStoreFromBrowser(web, { alreadyLocked: true });
+    // The REAL lock state, not a constant. When `doRefresh` fails to take the lock it proceeds
+    // anyway — documented, and correct, because a possible clobber beats a guaranteed outage — but
+    // the resync must then take the lock itself rather than be told one is already held. A null
+    // lock makes it a no-op, which is exactly its own policy.
+    const result = await syncStoreFromBrowser(web, { alreadyLocked, lockTimeoutMs: 2_000 });
     if (!result.adopted) return false;
     // Confirm the store really moved. Adopting the same token we just presented would send the
     // retry straight back into this branch.
@@ -395,7 +461,13 @@ async function recoverFromStoredWebSession(slot: StoreSlot, spent: string): Prom
   }
 }
 
-async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToken> {
+/**
+ * @param locked Whether `doRefresh` actually holds this domain's lock. Acquisition is best-effort —
+ * a null lock is documented as non-fatal — so it cannot be assumed, and the 401 self-heal below
+ * writes the store. Claiming a lock that is not held would make that write completely
+ * unsynchronised, which is the one thing `resync.ts` says must never happen.
+ */
+async function refreshOnce(domain: TokenDomain, attempt = 0, locked = false): Promise<AccessToken> {
   const spec = DOMAINS[domain];
   const store = getStore(spec.slot);
   const refreshToken = currentRefreshToken(domain);
@@ -435,7 +507,7 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
     if (res.status === 401 && attempt === 0) {
       const now = getStore(spec.slot).get();
       if (now && now !== refreshToken) {
-        return refreshOnce(domain, attempt + 1);
+        return refreshOnce(domain, attempt + 1, locked);
       }
       // Nothing newer on disk — but for the main session there is one more place to look, and it is
       // the place the token most likely went. The browser holds the rotated copy in the web session
@@ -447,8 +519,8 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
       // disk. If it holds something newer, this stops being a fatal error and becomes a hiccup
       // nobody sees.
       if (domain === "main") {
-        const recovered = await recoverFromStoredWebSession(spec.slot, refreshToken);
-        if (recovered) return refreshOnce(domain, attempt + 1);
+        const recovered = await recoverFromStoredWebSession(spec.slot, refreshToken, locked);
+        if (recovered) return refreshOnce(domain, attempt + 1, locked);
       }
     }
     // Write it down before throwing. This is the whole point of the journal: the next `status` can
@@ -481,7 +553,13 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
   // this pair. Letting a storage failure throw from here therefore discarded a working 24-hour
   // access token *on top of* a credential that was gone either way, turning a disk problem into an
   // immediate outage instead of a warning about tomorrow.
-  const token = { token: access, expiresAt };
+  const token: AccessToken = {
+    token: access,
+    expiresAt,
+    // Bound to whichever refresh token is current after this call — the rotated one when there is
+    // one, because that is what the store now holds and what any later check compares against.
+    from: tokenFingerprint(newRefresh ?? refreshToken),
+  };
   state[domain].current = token;
 
   // Rotation: persist the new refresh token the moment we receive one, or the next process to start
@@ -524,7 +602,11 @@ function adoptEnvAccessToken(): string | null {
 export async function ensureFresh(domain: TokenDomain = "main"): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const slotState = state[domain];
-  if (slotState.current && slotState.current.expiresAt - now > AUTH.expirySkewSeconds) {
+  if (
+    slotState.current &&
+    slotState.current.expiresAt - now > AUTH.expirySkewSeconds &&
+    mintedFromCurrentCredential(domain, slotState.current)
+  ) {
     return slotState.current.token;
   }
   // Env-injected access token takes precedence when there's no stored refresh token — main only.
@@ -566,7 +648,14 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
   // this, the very next `ensureFresh` re-hydrates the dead token from the cache and the session
   // 401s forever, having "refreshed" each time.
   clearAccessCache(domain);
-  return ensureFresh(domain);
+  // And refuse the next cache hit outright. See `DomainState.skipCacheOnce`: clearing the file is
+  // not enough, because another process can restore the snapshot it read a moment ago.
+  state[domain].skipCacheOnce = true;
+  try {
+    return await ensureFresh(domain);
+  } finally {
+    state[domain].skipCacheOnce = false;
+  }
 }
 
 /**

@@ -21,7 +21,7 @@ import {
   type WebSession,
 } from "../src/auth/websession.ts";
 import { getStore } from "../src/auth/store.ts";
-import { ensureFresh, forceRefresh, resetSession } from "../src/auth/session.ts";
+import { ensureFresh, forceRefresh, hasStoredSession, resetSession } from "../src/auth/session.ts";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "../src/auth/accesscache.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { StockbitError } from "../src/http/errors.ts";
@@ -576,6 +576,136 @@ test("the loser of a lock race gets the winner's token rather than a second rota
     assert.equal(presented.length, 0, "and must not have issued a request at all");
   } finally {
     held!();
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+/* ------------------- regressions found by review, not by the gate ------------------- */
+
+test("a rotated token survives a store that CANNOT BE READ, not just one that moved on", async () => {
+  // The bug: `currentRefreshToken` compared `get()` against `supersedes`, and `get()` returns null
+  // for two different facts — "nothing there" and "I could not look". A locked Keychain is the
+  // second, and it is the SAME condition that made the write fail and created the in-memory copy in
+  // the first place. So the token was rescued and then discarded milliseconds later, and the user
+  // was told to log in again for a credential this process was holding.
+  const spent = jwt(2000000000, "spent");
+  const rotated = jwt(2000000000, "rotated");
+  serverToken = spent;
+  presented.length = 0;
+  resetSession();
+  clearAccessCache();
+
+  const store = getStore();
+  store.set(spent);
+
+  // The write fails, so the rotated token is kept in memory.
+  const realSet = store.set.bind(store);
+  (store as unknown as { set: (t: string) => void }).set = () => {
+    throw new Error("Keychain write failed");
+  };
+  try {
+    await forceRefresh();
+  } finally {
+    (store as unknown as { set: unknown }).set = realSet;
+  }
+
+  // Now the store goes UNREADABLE — a locked Keychain answers null to every read.
+  const realGet = store.get.bind(store);
+  const realReadState = store.readState.bind(store);
+  (store as unknown as { get: () => string | null }).get = () => null;
+  (store as unknown as { readState: () => string }).readState = () => "unavailable";
+  try {
+    assert.equal(hasStoredSession("main"), true, "the process still holds a usable credential");
+
+    serverToken = rotated;
+    presented.length = 0;
+    resetSession();
+    clearAccessCache();
+    await forceRefresh();
+    assert.deepEqual(
+      [...presented],
+      [rotated],
+      "it must still present the rescued token rather than reporting no session",
+    );
+  } finally {
+    (store as unknown as { get: unknown }).get = realGet;
+    (store as unknown as { readState: unknown }).readState = realReadState;
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("forceRefresh reaches the wire even with a warm cache", async () => {
+  // `ensureFresh` consults the shared cache before the wire; `forceRefresh` must not, or every
+  // caller that refreshes to PROVE something proves nothing. (`status`'s `live: true` is that
+  // caller, and `test/status.test.ts` covers it end to end.)
+  //
+  // Note what this does NOT cover: `DomainState.skipCacheOnce`. In one process `clearAccessCache`
+  // already empties the file, so this passes with or without that guard — it exists for the
+  // cross-process case where another process restores the snapshot it read before the clear, which
+  // a single-process test cannot construct. Asserting otherwise here would be coverage theatre.
+  const token = jwt(2000000000, "warm-cache");
+  const store = getStore();
+  store.set(token);
+  serverToken = token;
+  resetSession();
+  clearAccessCache();
+
+  try {
+    await ensureFresh();
+    presented.length = 0;
+    resetSession();
+
+    // A warm cache: a plain ensureFresh must NOT go to the wire...
+    await ensureFresh();
+    assert.equal(presented.length, 0, "precondition: the cache is warm and ensureFresh uses it");
+
+    // ...and forceRefresh must, whatever the cache says.
+    serverToken = jwt(2000000000, "rotated");
+    store.set(serverToken);
+    await forceRefresh();
+    assert.equal(presented.length, 1, "forceRefresh must actually refresh, or `--verify` proves nothing");
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("an access token minted from another account is not reused after the store changes", async () => {
+  // A running server holds `current` for up to 24 hours. If the user runs
+  // `stockbit-auth login --switch-account` in a terminal, the store gains account B's refresh token
+  // — and the server, which never re-checked, kept answering as account A with nothing saying so.
+  // The disk cache was hardened against exactly this; the in-memory copy was not.
+  const accountA = jwt(2000000000, "account-a");
+  const accountB = jwt(2000000000, "account-b");
+  const store = getStore();
+  store.set(accountA);
+  serverToken = accountA;
+  resetSession();
+  clearAccessCache();
+
+  try {
+    await ensureFresh();
+    presented.length = 0;
+
+    // The rotation from that refresh is what the store now holds; simulate the terminal replacing
+    // it wholesale with a different account's credential.
+    store.set(accountB);
+    serverToken = accountB;
+    clearAccessCache();
+
+    await ensureFresh();
+    assert.equal(
+      presented.length,
+      1,
+      "the in-memory token was minted from another credential, so it must not be reused",
+    );
+    assert.deepEqual([...presented], [accountB], "and the new account's credential is what goes out");
+  } finally {
     clearAccessCache();
     store.clear();
     resetSession();

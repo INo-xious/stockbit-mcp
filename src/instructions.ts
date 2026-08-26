@@ -54,8 +54,9 @@ seen there. Anything else means the state is uncertain: relay "message" and DO N
 is how one intention becomes two orders.
 `
     : `ORDER ENTRY IS NOT REGISTERED IN THIS SERVER
-The active tool profile does not include the \`trading\` family, so there is no way to place, amend
-or cancel an order from here whatever the trading mode says. Do not offer to. Adding
+This server has no order_preview / order_buy / order_sell / order_amend / order_cancel, so there is
+no way to place, amend or cancel an order from here whatever the trading mode says. Do not offer to.
+The trading account can still be READ if the tools above list it. Adding
 STOCKBIT_TOOLS=${surface.profileLabel},trading to the client's config and restarting it is what
 changes that, and it is the user's decision to make.
 `;
@@ -73,37 +74,37 @@ recognised — which is not the same as zero. Say that, rather than reporting a 
   // ("Order entry: order_preview, then order_buy / …") — which is FALSE under the default profile,
   // where none of those four exist. A model reading it would offer to place an order and then fail
   // to find the tool, which reads as a broken server rather than as a profile.
-  const whatIsHere: string[] = [];
-  if (has("quote")) {
-    whatIsHere.push(
-      "- Market data: quotes, orderbook depth, intraday and daily bars, movers, running trade, seasonality.",
-    );
-  }
-  if (has("broker_summary")) {
-    whatIsHere.push(
-      "- Bandarmology: broker_summary, broker_distribution, broker_activity, bandar_detector — who accumulated",
-      "  and who distributed. This is the data no other market API has, and it is why this server exists.",
-    );
-  }
-  if (has("keystats") || has("company_profile")) {
-    whatIsHere.push(
-      "- Company: profile, fundamentals, ratios, financial statements, ownership, insider activity, corporate",
-      "  actions, analyst ratings, peer comparison.",
-    );
-  }
-  if (has("stream") || has("news")) whatIsHere.push("- Stream and research: posts, news, reports, the IPO pipeline.");
-  if (has("workflow_run")) whatIsHere.push("- Screener, watchlists, and saved workflows (workflow_list / workflow_run).");
-  if (has("chartbit_open")) {
-    whatIsHere.push("- Chartbit: read the user's real chart and draw on it in their own browser (chartbit_*).");
-  }
-  if (has("portfolio")) {
-    whatIsHere.push(
-      "- The trading account: portfolio, position, cash_balance, orders, order_history, trading_info, account.",
-    );
-  }
-  if (has("order_preview")) {
-    whatIsHere.push("- Order entry: order_preview, then order_buy / order_sell / order_amend / order_cancel.");
-  }
+  // Every line names ONLY tools that are registered.
+  //
+  // Gating a line on one tool and then listing six was the original bug wearing a different hat:
+  // under the default profile the block still promised `running_trade`, `order_history`,
+  // `trading_info`, `account`, the whole insider and corporate-action families and the IPO
+  // pipeline. A model told those exist calls one and gets "no such tool", which reads as a broken
+  // server. `named()` keeps only what is really there, so a line can never over-promise; a line
+  // whose every tool was filtered disappears entirely.
+  const named = (...names: string[]): string => names.filter(has).join(", ");
+  const line = (label: string, listed: string, tail = ""): string | null =>
+    listed ? `- ${label}: ${listed}.${tail}` : null;
+
+  const whatIsHere = [
+    line(
+      "Market data",
+      named("quote", "orderbook", "price_bands", "top_movers", "bars", "intraday_prices", "running_trade", "market_session"),
+    ),
+    line(
+      "Bandarmology",
+      named("broker_summary", "broker_distribution", "broker_activity", "bandar_detector"),
+      " Who accumulated and who distributed — the data no other market API has, and why this server exists.",
+    ),
+    line("Analysis", named("technicals", "patterns", "analyze", "scan", "backtest", "strategy_compare", "timeframe_alignment", "position_size", "price_chart")),
+    line("Company and fundamentals", named("company_profile", "keystats", "ratios", "financials", "seasonality", "ownership", "insider_transactions", "corporate_actions", "analyst_ratings", "peer_comparison")),
+    line("Stream and research", named("stream", "news", "reports", "ipo_pipeline")),
+    line("Lists and recipes", named("watchlist", "screener", "workflow_list", "workflow_run")),
+    line("Chartbit — the user's real chart, in their own browser", named("chartbit_open", "chartbit_draw", "chartbit_screenshot", "chartbit_clear", "chartbit_save")),
+    line("Alerts", named("alert_create", "alert_list", "alert_delete", "alert_check")),
+    line("The trading account", named("portfolio", "position", "cash_balance", "orders", "order_history", "trading_info", "account", "trading_status")),
+    line("Order entry", named("order_preview", "order_buy", "order_sell", "order_amend", "order_cancel")),
+  ].filter((l): l is string => l !== null);
 
   return `Stockbit MCP — the Indonesian exchange (IDX), through the user's own Stockbit account.
 Unofficial. Every request is made as them.

@@ -2,8 +2,11 @@
  * Refresh-token store. Prefers the macOS Keychain (via the built-in `security` CLI — no native
  * module to compile), and falls back to an AES-256-GCM encrypted file elsewhere.
  *
- * Only the long-lived REFRESH token is persisted. Access tokens are short-lived and derived at
- * runtime, so they never touch disk.
+ * This module persists the long-lived REFRESH token and nothing else. Access tokens are NOT stored
+ * here — but they are no longer memory-only either: `accesscache.ts` writes them to `access.enc`,
+ * through this file's own `writeFileAtomic`, because rotation makes N processes each minting their
+ * own retire each other's credential. That file is deliberately not a `StoreSlot`; see its header
+ * for the trade, which on macOS is a real one.
  *
  * File-fallback caveat: the key is derived from machine + user identifiers, which protects against
  * casual disk reads but not a determined local attacker. The Keychain path is strongly preferred.
@@ -116,19 +119,27 @@ export function keychainWriteArgsWithToken(token: string, slot: StoreSlot = "mai
 export type KeychainWriteMethod = "stdin" | "argv";
 
 /**
- * How long the prompted write may run before it is assumed to be waiting on a terminal.
+ * How long any single `security` invocation may run.
  *
  * The failure being bounded is not an error but a *hang*: if `security` opens `/dev/tty` and prompts
- * there, nothing answers, and an unbounded `spawnSync` would wedge the process holding the
- * credential lock.
+ * there, nothing answers, and an unbounded `spawnSync` wedges the process holding the credential
+ * lock — which then gets broken as stale while it is still alive, and two processes rotate.
+ *
+ * Applied to EVERY spawn, not just the prompted write. The read-back and the argv fallback run on
+ * the same code path, under the same lock, in the same call; bounding one of three and explaining
+ * the bound in terms of the lock would have been the reasoning without the protection. Together
+ * they are why `reflock.ts` sizes its cushion the way it does.
  */
-const KEYCHAIN_WRITE_TIMEOUT_MS = 5_000;
+const KEYCHAIN_TIMEOUT_MS = 5_000;
+
+/** How long ALL Keychain work in one write may take: the prompted write, the read-back, the fallback. */
+export const KEYCHAIN_WORST_CASE_MS = 3 * KEYCHAIN_TIMEOUT_MS;
 
 function keychainRead(slot: StoreSlot): { status: number | null; value: string | null } {
   const r = spawnSync(
     "security",
     ["find-generic-password", "-s", KEYCHAIN.service, "-a", KEYCHAIN.accounts[slot], "-w"],
-    { encoding: "utf8" },
+    { encoding: "utf8", timeout: KEYCHAIN_TIMEOUT_MS },
   );
   if (r.status !== 0) return { status: r.status, value: null };
   const token = r.stdout.trim();
@@ -152,11 +163,14 @@ function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
     // was saved. It is also the reason the read-back below is not optional.
     input: `${token}\n${token}\n`,
     stdio: ["pipe", "ignore", "ignore"],
-    timeout: KEYCHAIN_WRITE_TIMEOUT_MS,
+    timeout: KEYCHAIN_TIMEOUT_MS,
   });
   if (prompted.status === 0 && keychainRead(slot).value === token) return "stdin";
 
-  const viaArgv = spawnSync("security", keychainWriteArgsWithToken(token, slot), { stdio: "ignore" });
+  const viaArgv = spawnSync("security", keychainWriteArgsWithToken(token, slot), {
+    stdio: "ignore",
+    timeout: KEYCHAIN_TIMEOUT_MS,
+  });
   if (viaArgv.status !== 0) throw new Error("Keychain write failed");
   return "argv";
 }
@@ -179,20 +193,21 @@ export function probeKeychainWrite(): { available: boolean; method: KeychainWrit
     const r = spawnSync(
       "security",
       ["find-generic-password", "-s", KEYCHAIN.service, "-a", account, "-w"],
-      { encoding: "utf8" },
+      { encoding: "utf8", timeout: KEYCHAIN_TIMEOUT_MS },
     );
     return r.status === 0 ? r.stdout.trim() : null;
   };
   const remove = () =>
     spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN.service, "-a", account], {
       stdio: "ignore",
+      timeout: KEYCHAIN_TIMEOUT_MS,
     });
 
   try {
     const prompted = spawnSync("security", args, {
       input: `${value}\n${value}\n`,
       stdio: ["pipe", "ignore", "ignore"],
-      timeout: KEYCHAIN_WRITE_TIMEOUT_MS,
+      timeout: KEYCHAIN_TIMEOUT_MS,
     });
     if (prompted.status === 0 && readBack() === value) {
       return {
@@ -201,7 +216,10 @@ export function probeKeychainWrite(): { available: boolean; method: KeychainWrit
         detail: "the token is passed on stdin — never visible in `ps`",
       };
     }
-    const viaArgv = spawnSync("security", [...args, value], { stdio: "ignore" });
+    const viaArgv = spawnSync("security", [...args, value], {
+      stdio: "ignore",
+      timeout: KEYCHAIN_TIMEOUT_MS,
+    });
     if (viaArgv.status === 0 && readBack() === value) {
       return {
         available: true,

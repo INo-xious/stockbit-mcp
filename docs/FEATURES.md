@@ -388,7 +388,10 @@ All of it lives in one directory — `~/.stockbit` by default, or wherever
 
 | path | what |
 |---|---|
-| `~/.stockbit/refresh.enc` | your session token, AES-256-GCM |
+| `~/.stockbit/refresh.enc` | your session token, AES-256-GCM. On macOS the token is in the Keychain instead and this file does not exist |
+| `~/.stockbit/access.enc` | the 24-hour access tokens, shared between processes so they do not each spend a rotation. AES-256-GCM, `0600`. `STOCKBIT_NO_ACCESS_CACHE=1` turns it off — see [SECURITY.md](../SECURITY.md) |
+| `~/.stockbit/websession.enc` | the browser's own Stockbit session (cookies + Local Storage), which is what the chart tools run on. AES-256-GCM |
+| `~/.stockbit/session-health.json` | what happened the last time each credential was used. **Plaintext, and holds no tokens** — only an outcome, a time, and an 8-character digest. Safe to read, and safe to paste |
 | `~/.stockbit/charts/` | rendered `.svg` charts |
 | `~/.stockbit/pine/` | generated `.pine` scripts |
 | `~/.stockbit/alerts.json` | alert rules |

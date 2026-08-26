@@ -124,8 +124,10 @@ async function runOnce({ label, profileEnv, expectTools, expectPrompts }) {
     if (client.getServerCapabilities()?.prompts) {
       const { prompts } = await client.listPrompts();
       promptNames = prompts.map((p) => p.name).sort();
-      check(prompts.length === expectPrompts, `prompts/list returned ${prompts.length}, expected ${expectPrompts}`);
-    } else {
+      if (expectPrompts !== undefined) {
+        check(prompts.length === expectPrompts, `prompts/list returned ${prompts.length}, expected ${expectPrompts}`);
+      }
+    } else if (expectPrompts !== undefined) {
       check(expectPrompts === 0, `expected ${expectPrompts} prompts but the server declares no prompt capability`);
     }
 
@@ -172,12 +174,15 @@ async function main() {
       );
       process.exit(1);
     }
+    // `--expect-prompts` is OPTIONAL and unset means "do not check". Defaulting it to 0 made the
+    // usage this file documents fail every time: `STOCKBIT_TOOLS=core npm run smoke
+    // --expect-tools 40` registers 6 prompts and was told to expect none.
     runs = [
       {
         label: override,
         profileEnv: override,
         expectTools,
-        expectPrompts: flag("--expect-prompts") ?? 0,
+        expectPrompts: flag("--expect-prompts"),
       },
     ];
   } else {

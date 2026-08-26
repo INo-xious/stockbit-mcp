@@ -38,6 +38,8 @@ import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
 import { logStderr, redactValue } from "../src/redact.js";
 import { collectStatus, formatStatus } from "../src/status.js";
+import { resolveToolProfile } from "../src/tools/_profile.js";
+import { describeSurface } from "../src/tools/surface.js";
 
 async function promptSecret(question: string): Promise<string> {
   const rl = createInterface({ input: stdin, output: stdout, terminal: true });
@@ -224,7 +226,32 @@ async function cmdStatus(argv: string[]): Promise<void> {
   // paste the output of `stockbit-auth status --offline --json`, and a flag error there would turn
   // a security report into a support question.
   const live = argv.includes("--verify");
-  const report = await collectStatus({ live });
+
+  // What a server started from THIS environment would register.
+  //
+  // Without this the report claimed a tool profile it had not computed, and the "trading is on but
+  // there are no order tools" warning was dead on the CLI path — which is precisely the terminal the
+  // user is standing in when they run `trading-enable --live`. Describing a server this process is
+  // not is the whole reason it has to be derived rather than defaulted.
+  let profileLabel: string | undefined;
+  let profileIsDefault = false;
+  let missingTools: string[] | undefined;
+  try {
+    const known = new Set(describeSurface().tools.map((t) => t.name));
+    const resolved = resolveToolProfile(process.env.STOCKBIT_TOOLS, known);
+    profileLabel = resolved.profile.label;
+    profileIsDefault = resolved.isDefault;
+    missingTools = describeSurface(resolved.profile, resolved.isDefault).skipped;
+  } catch {
+    // An unparsable STOCKBIT_TOOLS stops `stockbit-mcp` from starting, with its own message. It
+    // must not stop `status`, which is the command someone runs to find out why.
+  }
+
+  const report = await collectStatus({
+    live,
+    ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
+    ...(missingTools === undefined ? {} : { missingTools }),
+  });
 
   if (argv.includes("--json")) {
     // Redacted on the way out even though `collectStatus` never copies a token in: this output is
@@ -261,9 +288,12 @@ async function cmdLogout(argv: string[]): Promise<void> {
   // its browser from. It is a working Stockbit session on its own, so a logout that left it on disk
   // would not be a logout — the same reasoning that already removes the browser profile below.
   clearWebSession();
-  clearAccessCache();
-  clearSessionHealth();
-  logStderr("Cleared the stored browser web session and the shared access-token cache.");
+  // Per slot. `cmdLogout` clears only the MAIN credential above, so clearing all three domains'
+  // access tokens here would cost the securities and e-IPO sessions a rotation they did not ask
+  // for, and drop health this command never touched.
+  clearAccessCache("main");
+  clearSessionHealth("main");
+  logStderr("Cleared the stored browser web session and the main access token.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
   // Chartbit driver at a browser with no session and no explanation.

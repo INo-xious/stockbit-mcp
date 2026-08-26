@@ -29,6 +29,8 @@ import { getJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { getStore } from "./store.js";
 import { withCredentialLock } from "./reflock.js";
+import { clearAccessCache } from "./accesscache.js";
+import { clearSessionHealth } from "./health.js";
 import { adoptAccessToken, parseRefresh, resetSession } from "./session.js";
 
 /** The `login_token` grant, wherever the envelope puts it. */
@@ -130,6 +132,13 @@ export async function logoutSecurities(): Promise<{ remote: "ok" | "skipped" | s
   }
 
   await withCredentialLock("securities", () => store.clear());
+  // The access token too. This function's own doc says a logout "must mean the token is gone from
+  // this machine whatever the network did" — and the carina ACCESS token is a bearer credential for
+  // the brokerage account, good for up to 24 hours, sitting in a file whose key anything running as
+  // this user can derive. It matters most in the case this function already handles specially: the
+  // remote logout failing, leaving the session open at Stockbit's end as well.
+  clearAccessCache("securities");
+  clearSessionHealth("securities");
   resetSession("securities");
   return { remote, cleared: true };
 }

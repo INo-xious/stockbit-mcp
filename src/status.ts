@@ -36,7 +36,7 @@ import {
   type SlotHealthState,
 } from "./auth/health.js";
 import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
-import { decodeJwt, ensureFresh } from "./auth/session.js";
+import { decodeJwt, forceRefresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
@@ -141,8 +141,15 @@ export interface CollectStatusOptions {
   profileLabel?: string;
   /** Whether that profile is the default rather than something the user asked for. */
   profileIsDefault?: boolean;
-  /** Families this profile kept out entirely, so `status` can explain a missing tool. */
-  missingFamilies?: string[];
+  /**
+   * Tool NAMES this profile kept out, so `status` can explain a missing tool.
+   *
+   * Names, not families. A family with one skipped tool is not a family that is absent, and
+   * `STOCKBIT_TOOLS=core,order_preview,order_buy,…` registers every order tool while leaving
+   * `order_history` and friends behind — which at family granularity read as "no order tools at
+   * all" and hijacked `nextStep` away from the advice the user actually needed.
+   */
+  missingTools?: string[];
 }
 
 /* ------------------------------- login progress ------------------------------- */
@@ -324,8 +331,8 @@ function nextStepFor(
   // nothing else anywhere reports.
   if (surface.tradingToolsMissing) {
     return (
-      `Trading is ${trading.mode}, but this server registered no order tools — the ` +
-      `\`${surface.profileLabel}\` tool profile does not include the \`trading\` family. Set ` +
+      `Trading is ${trading.mode}, but this server did not register the order-entry tools — the ` +
+      `\`${surface.profileLabel}\` tool profile does not include them. Set ` +
       `STOCKBIT_TOOLS=${surface.profileLabel},trading in the client's config and restart it.`
     );
   }
@@ -441,24 +448,36 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   // `trading-enable --live` at their own terminal — a deliberate, two-step, opt-in act — finds no
   // order tool in the server and NOTHING anywhere saying why. Trading reports "on", the tools are
   // simply absent, and the natural conclusion is that order entry is broken.
-  const missingFamilies = new Set(options.missingFamilies ?? []);
-  const tradingToolsMissing = trading.enabled && missingFamilies.has("trading");
+  // By NAME. These four are what "place an order" means; everything else in the trading family is a
+  // read, and a profile that filtered one of those has not taken order entry away.
+  const missing = new Set(options.missingTools ?? []);
+  const ORDER_TOOLS = ["order_preview", "order_buy", "order_sell", "order_cancel"];
+  const absentOrderTools = ORDER_TOOLS.filter((name) => missing.has(name));
+  const tradingToolsMissing = trading.enabled && absentOrderTools.length > 0;
   if (tradingToolsMissing) {
     const label = options.profileLabel ?? DEFAULT_TOOL_PROFILE;
     checks.push({
       name: "trading tools",
       status: "warn",
       detail:
-        `Trading is ${trading.mode}, but the \`trading\` family is not registered, so this server ` +
-        `has no order tools at all. The \`${label}\` profile does not include them` +
-        `${options.profileIsDefault ? " and it is the default" : ""}. Set ` +
+        `Trading is ${trading.mode}, but this server did not register ${absentOrderTools.join(", ")}` +
+        `${absentOrderTools.length === ORDER_TOOLS.length ? " — it has no order-entry tools at all" : ""}. ` +
+        `The \`${label}\` profile does not include them` +
+        `${options.profileIsDefault ? ", and it is the default" : ""}. Set ` +
         `STOCKBIT_TOOLS=${label},trading and restart the client.`,
     });
   }
 
   if (options.live) {
     try {
-      await ensureFresh("main");
+      // `forceRefresh`, NOT `ensureFresh`. `ensureFresh` consults the shared access cache before it
+      // ever reaches the wire, so on a warm cache this check made ZERO requests and still reported
+      // "the stored token refreshed against Stockbit" — for a token that may have been revoked an
+      // hour earlier. That is the precise failure this whole release was written to remove, and it
+      // would have been reported as a proof. `forceRefresh` drops the in-memory copy, clears the
+      // cache and refuses the next cache hit, so the request the description promises is the
+      // request that happens.
+      await forceRefresh("main");
       checks.push({ name: "live check", status: "ok", detail: "The stored token refreshed against Stockbit." });
     } catch (err) {
       checks.push({
@@ -493,9 +512,11 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       version: VERSION,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
-      // `core`, not `all`: that is what a server started with no STOCKBIT_TOOLS registers. The CLI
-      // reaches here without a server at all, so this is the honest answer to "what would run".
-      toolProfile: options.profileLabel ?? DEFAULT_TOOL_PROFILE,
+      // `all`, because no label means no profile was applied and nothing was filtered. Callers that
+      // know better say so: the `status` tool passes the server's real label, and the CLI passes what
+      // its own environment would produce. Defaulting to `core` here made `createServer()` with no
+      // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
+      toolProfile: options.profileLabel ?? "all",
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
     },
     auth,
@@ -505,7 +526,10 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     webSession: web,
     store: { dir, backend: auth.main.backend, browserPinned },
     checks,
-    nextStep: nextStepFor(auth, trading, { tradingToolsMissing, profileLabel: options.profileLabel ?? DEFAULT_TOOL_PROFILE }),
+    nextStep: nextStepFor(auth, trading, {
+      tradingToolsMissing,
+      profileLabel: options.profileLabel ?? DEFAULT_TOOL_PROFILE,
+    }),
   };
 }
 

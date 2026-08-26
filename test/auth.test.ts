@@ -96,12 +96,15 @@ test("the Keychain write command does not carry the token in argv", () => {
   ]);
   assert.equal(args.at(-1), "-w", "`-w` must be last, so the value is prompted for and not an argument");
 
-  const token = "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.sig";
+  // Not "does this literal appear" — `keychainWriteArgs` takes no token, so that could never fail.
+  // The property that matters is that NOTHING in the args is credential-shaped, which would catch a
+  // future edit that put one back.
   assert.equal(
-    keychainWriteArgs().some((a) => a.includes(token)),
+    args.some((a) => /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(a)),
     false,
-    "no argument may contain the token",
+    "no argument may be JWT-shaped",
   );
+  assert.equal(args.length, 7, "seven fixed arguments and nowhere for a value to hide");
 });
 
 test("Keychain writes preserve the default trusted creator without granting broad access", () => {

@@ -23,8 +23,8 @@ See [ADR-0009](docs/adr/0009-browser-is-the-source-of-truth.md) for the decision
 - **`STOCKBIT_TOOLS` now defaults to `core`, not `all`.** This is the one change that may need
   action: a server with no configuration registers **40 tools**, not 138. Startup was never the
   problem — a built server boots and answers `status` in about 200 ms. The cost is per *turn*:
-  `tools/list` for the full surface is 217,794 bytes, roughly 54,400 tokens, in the model's context
-  on **every message**; `core` is 69,105 bytes, roughly 17,300. Set `STOCKBIT_TOOLS=all` to get
+  `tools/list` for the full surface is around 220,000 bytes, roughly 55,000 tokens, in the model's
+  context on **every message**; `core` is about a third of that. Set `STOCKBIT_TOOLS=all` to get
   everything back, or `STOCKBIT_TOOLS=core,<family>` to add one family. It also aligns the code with
   the docs, which have recommended `core` in the copy-paste snippet since the profile existed.
 - **`stockbit-auth status` no longer refreshes by default.** A refresh *rotates* the token family

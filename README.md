@@ -174,8 +174,9 @@ On Windows, npx needs a shell:
 **Claude Desktop Extension** — download the latest `stockbit-mcp-*.mcpb` from
 [Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
-**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools; the default `core` profile is exactly
-40, so nothing extra is needed:
+**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools and the default `core` profile is
+exactly 40, so nothing extra is needed — though that leaves no room for a second MCP server, and
+running one means a narrower list (`STOCKBIT_TOOLS=market,bandarmology`, say):
 
 ```json
 { "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
@@ -370,15 +371,15 @@ not backtest against it and believe the number.
 ## Tool profiles and context management
 
 Every client pays for the whole tool list in the model's context on every turn — and that is a
-**per-turn** cost, not a startup one. The full surface is 217,794 bytes of `tools/list`, roughly
-54,400 tokens, on every single message; `core` is 69,105 bytes, roughly 17,300.
+**per-turn** cost, not a startup one. The full surface is around 220,000 bytes of `tools/list`,
+roughly 55,000 tokens, on every single message; `core` is about a third of that.
 
 **`core` is the default.** `STOCKBIT_TOOLS` changes it:
 
 | Value | Effect |
 |---|---|
 | unset — **the default** | `core`: 40 tools and 6 prompts. The questions people actually ask. Fits Cursor's cap. No order writes. |
-| `all` | All 138. Roughly 54,400 tokens of tool schemas per turn, against ~17,300 for `core`. |
+| `all` | All 138. Roughly 55,000 tokens of tool schemas per turn, against ~17,700 for `core`. |
 | `market,bandarmology` | Those families only. |
 | `core,trading` | Core plus order entry. |
 | `quote,analyze` | Individual tools, mixed freely with families. |
@@ -421,7 +422,7 @@ Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user
 | `stockbit-auth import-har` | Import a login captured in any browser. |
 | `stockbit-auth doctor` | Diagnose browsers, the token store and the capture path. |
 | `stockbit-auth bootstrap` | Paste a refresh token by hand. |
-| `stockbit-auth status [--offline] [--json]` | Everything, redacted. `--json` is safe to paste into an issue. |
+| `stockbit-auth status [--verify] [--json]` | Everything, redacted. `--json` is safe to paste into an issue. `--verify` spends one refresh to prove the token — which ROTATES it and ends your website session. |
 | `stockbit-auth logout [--keep-profile]` | Clear the token and the logged-in browser profile. |
 | `stockbit-auth trading-login [--browser]` | Unlock Stockbit Sekuritas with your PIN. Never stored. |
 | `stockbit-auth trading-status [--offline]` | The trading policy, and whether the session works. |
@@ -485,7 +486,7 @@ is written outside it.
 ```bash
 npm ci
 npm run typecheck
-npm test          # ~1,160 tests, entirely offline — fetch is stubbed, no network, no skips
+npm test          # the whole suite, entirely offline — fetch is stubbed, no network, no skips
 npm run build
 npm run smoke     # starts the built binary over stdio and asks it what it registered
 npm run check:pack
