@@ -32,6 +32,7 @@ import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js"
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { clearWebSession } from "../src/auth/websession.js";
 import { clearAccessCache } from "../src/auth/accesscache.js";
+import { clearSessionHealth } from "../src/auth/health.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
@@ -194,21 +195,35 @@ async function cmdBootstrap(argv: string[]): Promise<void> {
 }
 
 /**
- * Report what is stored, and — unless asked not to — whether it actually works.
+ * Report what is stored, and what is known about whether it works.
  *
  * The expiry in the JWT payload is a *claim about time*, not a statement of validity. A refresh
  * token can be revoked, rotated out from under this store by another process, or invalidated
- * server-side, and none of that changes a byte of the payload. So this command used to answer
+ * server-side, and none of that changes a byte of the payload. So this command could answer
  * "present, expires in ~1.4 day(s)" for a token that 401s on its first use, which is the most
  * expensive kind of wrong answer: it sends you off to debug the thing you were about to do.
  *
- * One real refresh settles it. `--offline` keeps the old behaviour for when the network is not
- * available or a round trip is unwanted, and says plainly that it did not check.
+ * The fix used to be a live refresh, ON BY DEFAULT. That was worse than the problem. A refresh
+ * ROTATES the token family, which ends the website session the Chartbit browser is holding — so the
+ * command a confused user runs first was the one that broke the other half of their setup, and the
+ * `status` tool description told the model to call it "FIRST whenever anything looks wrong".
+ *
+ * So the default is off, and the honest answer comes from a journal instead: every refresh this
+ * project makes records its outcome, so `status` can say "Stockbit rejected this at 14:12" for free.
+ * `--verify` still spends one refresh for anyone who wants proof, and now says what that costs.
  */
 async function cmdStatus(argv: string[]): Promise<void> {
   // The same report the `status` MCP tool returns. One implementation, so a user reading the
   // terminal and a model reading the tool result cannot be told two different stories.
-  const live = !argv.includes("--offline");
+  // `--verify` opts IN. This used to default to live, which meant the command a confused user runs
+  // FIRST was the command that rotated their refresh token and ended their website session. The
+  // journal now answers "did it last work" for free, so the round trip is only worth making when
+  // somebody deliberately asks for it.
+  //
+  // `--offline` is kept as an accepted no-op because SECURITY.md tells vulnerability reporters to
+  // paste the output of `stockbit-auth status --offline --json`, and a flag error there would turn
+  // a security report into a support question.
+  const live = argv.includes("--verify");
   const report = await collectStatus({ live });
 
   if (argv.includes("--json")) {
@@ -218,7 +233,12 @@ async function cmdStatus(argv: string[]): Promise<void> {
   } else {
     logStderr(formatStatus(report));
     if (!live) {
-      logStderr("Validity: NOT CHECKED (--offline). An expiry in the payload does not mean the token still works.");
+      logStderr(
+        "Validity: not proved by a request. An expiry in the payload does not mean the token still " +
+          "works — but `health` above is derived from what actually happened the last time it was " +
+          "used, which is free. Pass --verify to spend one refresh proving it, which ROTATES the " +
+          "token and ends your website session.",
+      );
     }
   }
 
@@ -241,6 +261,7 @@ async function cmdLogout(argv: string[]): Promise<void> {
   // would not be a logout — the same reasoning that already removes the browser profile below.
   clearWebSession();
   clearAccessCache();
+  clearSessionHealth();
   logStderr("Cleared the stored browser web session and the shared access-token cache.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
@@ -575,7 +596,8 @@ async function main(): Promise<void> {
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");
       logStderr("  status      show store backend, every session, the trading mode and the IDX clock");
-      logStderr("              --offline  skip the live validity check");
+      logStderr("              --verify   spend one refresh to prove the token works — this ROTATES it");
+      logStderr("              --offline  accepted, and now the default: nothing is spent");
       logStderr("              --json     print the whole report as JSON (redacted; safe to paste)");
       logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
       logStderr("              --keep-profile  keep the browser profile (still logged in)");

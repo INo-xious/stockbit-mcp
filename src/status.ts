@@ -28,6 +28,12 @@
  * off by default because `status` is the thing you call when you suspect the network.
  */
 import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
+import {
+  lastEventFor,
+  readHealthJournal,
+  slotHealthState,
+  type SlotHealthState,
+} from "./auth/health.js";
 import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
 import { decodeJwt, ensureFresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
@@ -50,6 +56,18 @@ export interface SlotStatus {
   expiresInDays?: number;
   /** True when `exp` is already in the past. */
   expired?: boolean;
+  /**
+   * What is known about whether this credential still WORKS, as opposed to whether it has expired.
+   *
+   * An expiry is a claim about time. A token can be revoked, or superseded by another login, and
+   * not one byte of its payload changes — so `expiresInDays` has always been able to report health
+   * on a token that 401s on its first use. This is derived from what actually happened the last
+   * time a refresh was made, which costs nothing and is the only way to say `failing` at zero
+   * requests. See `src/auth/health.ts`.
+   */
+  health?: SlotHealthState;
+  /** When the last recorded refresh happened, and whether it worked. Never a token. */
+  lastRefresh?: { at: string; ok: boolean; status?: number };
   /** What to do about this slot, when there is something to do. */
   hint?: string;
 }
@@ -223,7 +241,48 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
       });
     }
   }
+
+  // What is RECORDED about this token, which is a different question from what its payload claims.
+  // Wrapped because this function must never throw: a corrupt journal is a diagnostic that is
+  // missing, never a status report that fails.
+  try {
+    const journal = readHealthJournal();
+    result.health = slotHealthState(slot, token, result.expired === true, journal);
+    const event = lastEventFor(slot, journal);
+    if (event) {
+      result.lastRefresh = {
+        at: event.at,
+        ok: event.reason === undefined,
+        ...(event.status === undefined ? {} : { status: event.status }),
+      };
+    }
+    if (result.health === "failing") {
+      checks.push({
+        name: `${slot} session`,
+        status: "fail",
+        detail:
+          `Stockbit REJECTED this token at ${event ? formatTime(event.at) : "an unrecorded time"}` +
+          `${event?.status ? ` (HTTP ${event.status})` : ""}. It is present and unexpired, so an ` +
+          "expiry check cannot see this — it has been revoked, or superseded by another login.",
+      });
+      result.hint =
+        slot === "main"
+          ? "Log in again — this token is present and unexpired but Stockbit no longer accepts it."
+          : `${SLOT_HINTS[slot]} The stored one was rejected.`;
+    }
+  } catch {
+    /* the journal is diagnostics; its absence is not a status failure */
+  }
+
   return result;
+}
+
+/** `HH:MM` in local time, or the raw string if it will not parse. Never throws. */
+function formatTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** The one thing to do next, chosen from the state rather than listed as options. */
@@ -231,6 +290,16 @@ function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport[
   // Before anything else: if the store would not answer, every branch below is reasoning from a
   // fact nobody established. "Log in again" is the one piece of advice that must not be given here.
   if (auth.main.unreadable) return auth.main.hint!;
+  // The branch that was missing. Present, unexpired, and rejected — which every expiry-based check
+  // reports as healthy, and which is what a revoked or superseded session actually looks like.
+  if (auth.main.health === "failing") {
+    const when = auth.main.lastRefresh ? ` at ${formatTime(auth.main.lastRefresh.at)}` : "";
+    return (
+      `The stored market-data token is present and unexpired, but Stockbit rejected it${when} — ` +
+      "revoked, or superseded by another login. Log in again: say \"log me into Stockbit\", or run " +
+      "`npx -y -p stockbit-mcp stockbit-auth login`."
+    );
+  }
   if (!auth.main.stored || auth.main.expired) {
     return (
       'Say "log me into Stockbit" (a browser window opens — sign in there), or run ' +
@@ -402,7 +471,13 @@ export function formatStatus(report: StatusReport): string {
         : s.expired
           ? `EXPIRED ${Math.abs(s.expiresInDays)} day(s) ago`
           : `expires in ~${s.expiresInDays} day(s)`;
-    return `${name.padEnd(16)} stored (${s.backend}), ${expiry}`;
+    // `health` is shown only when it says something an expiry cannot. "ok" and "unknown" would just
+    // be noise beside a line that already reports what is stored and for how long.
+    const health =
+      s.health === "failing"
+        ? `, REJECTED by Stockbit${s.lastRefresh ? ` at ${formatTime(s.lastRefresh.at)}` : ""}`
+        : "";
+    return `${name.padEnd(16)} stored (${s.backend}), ${expiry}${health}`;
   };
 
   const lines = [

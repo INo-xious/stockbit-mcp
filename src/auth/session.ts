@@ -31,6 +31,7 @@ import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
 import { logStderr, redact } from "../redact.js";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscache.js";
+import { recordRefreshFailure, recordRefreshOk } from "./health.js";
 
 export type { TokenDomain } from "../http/transport.js";
 
@@ -407,6 +408,10 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
     // from the route's auth kind: header for main, body for carina, query for e-IPO.
     res = await authenticatedRequest(spec.refreshRoute, { token: refreshToken });
   } catch (err) {
+    // Recorded before rethrowing. A transport failure is not evidence the credential is bad — the
+    // journal keeps `ok` and `failure` apart precisely so `status` can tell "Stockbit rejected this"
+    // from "the network was down", and only the first of those means log in again.
+    recordRefreshFailure(spec.slot, refreshToken, undefined, String(err));
     if (err instanceof StockbitError) throw err;
     throw new StockbitError("upstream", `Refresh request failed: ${redact(String(err))}`);
   }
@@ -446,6 +451,10 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
         if (recovered) return refreshOnce(domain, attempt + 1);
       }
     }
+    // Write it down before throwing. This is the whole point of the journal: the next `status` can
+    // then say "present and unexpired, but Stockbit rejected it at HH:MM" without spending anything
+    // — and a revoked session becomes visible at zero requests instead of only at the next failure.
+    recordRefreshFailure(spec.slot, refreshToken, res.status, `HTTP ${res.status}`);
     throw new StockbitError(
       "auth",
       res.status === 401
@@ -484,6 +493,11 @@ async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToke
   // Share it, keyed to whichever refresh token is now current — the rotated one when there is one,
   // because that is what the next process reads out of the store and checks against.
   writeAccessCache(domain, access, expiresAt, newRefresh ?? refreshToken);
+
+  // And record the success against the token that is now current, for the same reason: `status`
+  // reports on what is in the store, so the journal has to be keyed to that and not to the token
+  // that has just been retired.
+  recordRefreshOk(spec.slot, newRefresh ?? refreshToken);
 
   return token;
 }

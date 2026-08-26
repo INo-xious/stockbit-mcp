@@ -25,6 +25,7 @@ import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { collectStatus, formatStatus, loginStarted, loginFinished, resetLoginStatus } from "../src/status.ts";
 import { getStore, resetStoreCache } from "../src/auth/store.ts";
+import { clearSessionHealth, recordRefreshFailure, recordRefreshOk } from "../src/auth/health.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
 
@@ -142,6 +143,74 @@ test("a stored token yields an expiry and never the token", async () => {
     assert.ok(!serialised.includes(token));
     assert.doesNotMatch(formatStatus(report), JWT_SHAPED);
   } finally {
+    clearAllSlots();
+  }
+});
+
+test("a token Stockbit rejected is reported as failing, and nextStep says so", async () => {
+  // The gap this closes. A refresh token can be revoked, or superseded by another login, and not
+  // one byte of its payload changes — so `expiresInDays` reported "healthy, ~7 days" for a token
+  // that 401s on its first use, which is the most expensive kind of wrong answer. Proving it live
+  // costs a rotation and ends the user's website session, so instead the last outcome is recorded
+  // and read back for free.
+  clearAllSlots();
+  clearSessionHealth();
+  const token = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  getStore("main").set(token);
+  recordRefreshFailure("main", token, 401, "HTTP 401");
+
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.stored, true, "it IS stored");
+    assert.equal(report.auth.main.expired, undefined, "and it has not expired");
+    assert.equal(report.auth.main.health, "failing", "but it does not work, and that is knowable");
+    assert.equal(report.auth.main.lastRefresh?.status, 401);
+    assert.match(report.nextStep, /rejected/i, "nextStep must name what actually happened");
+    assert.match(report.nextStep, /log in again|stockbit-auth login/i);
+    assert.ok(
+      report.checks.some((c) => c.name === "main session" && c.status === "fail"),
+      "and it is a failed check, not a warning",
+    );
+    assert.match(formatStatus(report), /REJECTED/, "the terminal rendering must not read as healthy");
+
+    const serialised = JSON.stringify(report);
+    assert.doesNotMatch(serialised, /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./, "still no token anywhere");
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("a rejection recorded against a token that has since been replaced is not reported", async () => {
+  // Otherwise `status` tells a user to log in again over a credential they replaced ten minutes ago.
+  clearAllSlots();
+  clearSessionHealth();
+  const older = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  const fresh = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400 + 1);
+  recordRefreshFailure("main", older, 401, "HTTP 401");
+  getStore("main").set(fresh);
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.health, "unknown", "nothing is known about the NEW token");
+    assert.doesNotMatch(report.nextStep, /rejected/i);
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("a token that last refreshed successfully reports ok, and stays quiet about it", async () => {
+  clearAllSlots();
+  clearSessionHealth();
+  const token = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  getStore("main").set(token);
+  recordRefreshOk("main", token);
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.health, "ok");
+    assert.doesNotMatch(formatStatus(report), /REJECTED/, "ok is not worth a line of its own");
+  } finally {
+    clearSessionHealth();
     clearAllSlots();
   }
 });

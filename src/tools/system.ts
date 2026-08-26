@@ -48,6 +48,7 @@ import { getStore, type StoreSlot } from "../auth/store.js";
 import { withCredentialLock } from "../auth/reflock.js";
 import { clearWebSession } from "../auth/websession.js";
 import { clearAccessCache } from "../auth/accesscache.js";
+import { clearSessionHealth } from "../auth/health.js";
 import { hasStoredSession, resetSession } from "../auth/session.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
@@ -78,15 +79,24 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "why, the IDX session clock in WIB, and a `nextStep` naming the single next command.\n" +
       "It answers with no session at all — that is the state every new user is in, and the answer " +
       "is the useful one.\n" +
-      "`live: true` additionally refreshes the market-data token against Stockbit (one request) to " +
-      "prove it still works. Without it, `expiresInDays` is a claim from the token's payload, not " +
-      "evidence: a revoked token keeps its expiry.\n" +
+      "Each session also carries a `health`: `ok` / `failing` / `expired` / `not-stored` / `unknown`, " +
+      "derived from what actually happened the last time that credential was used. **`failing` means " +
+      "present and unexpired but REJECTED by Stockbit** — revoked, or superseded by another login. " +
+      "That is the case an expiry check cannot see, and it costs no requests.\n" +
+      "`live: true` is NOT free and is rarely what you want. It refreshes the market-data token, " +
+      "which ROTATES the refresh-token family and therefore ENDS the user\u2019s Stockbit website " +
+      "session — the one the chart tools run on. Use `health` instead; only pass `live: true` if the " +
+      "user explicitly asks to prove the token with a real request.\n" +
       "The `market` block does not model public holidays; call `market_session` for that.",
     {
       live: z
         .boolean()
         .optional()
-        .describe("Also refresh the market-data token to prove it works. One request. Default false."),
+        .describe(
+          "Prove the market-data token with one real refresh. This ROTATES the token family and " +
+            "ends the user's Stockbit website session — ask them first. Default false; `health` " +
+            "answers the same question for free.",
+        ),
     },
     async (a) =>
       runTool(async () =>
@@ -386,6 +396,7 @@ async function doLogout(request: LogoutRequest) {
     try {
       clearWebSession();
       clearAccessCache();
+      clearSessionHealth();
       webSession = "cleared, along with the shared access-token cache";
     } catch (err) {
       webSession = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
