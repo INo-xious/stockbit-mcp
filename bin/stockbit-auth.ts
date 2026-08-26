@@ -16,6 +16,7 @@ import { stdin, stdout } from "node:process";
 import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
+import { withCredentialLock } from "../src/auth/reflock.js";
 import {
   decodeJwt,
   forceRefresh,
@@ -227,7 +228,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
 }
 
 async function cmdLogout(argv: string[]): Promise<void> {
-  getStore().clear();
+  // Under the credential lock, like every other credential write. A logout that races a refresh
+  // would otherwise be undone by the rotation landing a moment later — the user would be told they
+  // were logged out while a working token sat back on disk.
+  await withCredentialLock("main", () => getStore().clear());
   logStderr("Cleared stored refresh token.");
 
   // A THIRD copy: the captured web session (cookies + Local Storage) that the Chartbit driver seeds

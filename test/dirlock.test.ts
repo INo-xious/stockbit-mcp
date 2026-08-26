@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireDirLock } from "../src/util/dirlock.ts";
@@ -54,3 +54,24 @@ test("the parent directory is created if it does not exist", async () => {
   assert.ok(release);
   release!();
 });
+
+test(
+  "the parent directory is created owner-only",
+  { skip: process.platform === "win32" ? "NTFS cannot express POSIX mode 0o700" : false },
+  async () => {
+    // The lock is often the FIRST thing written under `~/.stockbit` on a fresh machine — `bootstrap`
+    // and `login` both take it before they store anything. Without an explicit mode, `mkdirSync`
+    // used the process umask and left the directory at 0755, and every credential file written into
+    // it afterwards sat somewhere any user on the box could list. The files are 0600 either way;
+    // the directory was the part that was wrong.
+    const parent = join(mkdtempSync(join(tmpdir(), "stockbit-dirlock-mode-")), "made-by-the-lock");
+    const release = await acquireDirLock(join(parent, "d.lock"), opts);
+    assert.ok(release, "the lock must be takeable in a directory that did not exist");
+    assert.equal(
+      statSync(parent).mode & 0o777,
+      0o700,
+      "a directory created on the way to taking the lock must be owner-only",
+    );
+    release!();
+  },
+);

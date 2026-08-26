@@ -329,6 +329,14 @@ export async function captureViaBrowserLogin(
       // swallowed, leaving `done` false and the capture running until it reported "no session
       // captured" fifteen minutes later. That is the opposite of what happened, and it points
       // diagnosis at interception instead of at the store.
+      //
+      // This is the ONE credential write that deliberately takes no lock, and it is not an
+      // oversight — every other one in the project now goes through `withCredentialLock`. Two
+      // reasons, either of which alone is sufficient. An interactive re-login is *meant* to
+      // supersede whatever was stored: the user is standing there having just typed a password,
+      // and a concurrent refresh losing to them is the correct outcome, not a clobber. And
+      // `accept` is synchronous by design — making it await a lock would let the capture promise
+      // settle, and the CLI `process.exit` that follows it, before the write ever landed.
       if (persist) {
         try {
           getStore(options.slot ?? "main").set(refresh);

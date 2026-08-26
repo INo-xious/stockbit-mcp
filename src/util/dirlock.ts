@@ -61,7 +61,13 @@ export async function acquireDirLock(
     try {
       // The parent must exist before the lock can; creating it here means a first-ever run does not
       // fail on a missing `~/.stockbit`.
-      mkdirSync(dirname(path), { recursive: true });
+      //
+      // Owner-only, matching `store.ts`. Without the mode, a lock taken before any credential was
+      // ever written — which is the ordinary order on a fresh machine, because `bootstrap` and
+      // `login` both lock before they store — creates `~/.stockbit` at 0755, and every credential
+      // file written into it afterwards sits in a directory anyone on the box can list. The files
+      // themselves are still 0600; the directory is the part that was wrong.
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       // mkdir is atomic and fails if the directory exists — the test-then-create race does not exist
       // here, which is the whole reason for using a directory rather than a file.
       mkdirSync(path);

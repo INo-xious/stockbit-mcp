@@ -7,7 +7,13 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-lock-"));
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { acquireRefreshLock, STALE_MS } from "../src/auth/reflock.ts";
+import {
+  acquireRefreshLock,
+  REFRESH_LOCK_TIMEOUT_MS,
+  STALE_MS,
+  withCredentialLock,
+} from "../src/auth/reflock.ts";
+import { RATE } from "../src/config.ts";
 import { getStore } from "../src/auth/store.ts";
 import { forceRefresh, resetSession } from "../src/auth/session.ts";
 import { StockbitError } from "../src/http/errors.ts";
@@ -187,4 +193,201 @@ test("the refresh goes out as the declared loginRefresh route, not a hand-rolled
   globalThis.fetch = stub;
   assert.equal(seenMethod, "POST");
   assert.match(seenUrl, /^https:\/\/exodus\.stockbit\.com\/login\/refresh$/);
+});
+
+/* ------------------------------ the arithmetic ------------------------------ */
+
+test("both lock timings exceed the worst case a legitimate holder can take", () => {
+  // `refreshOnce` issues one request bounded by `requestTimeoutMs`, and a 401 makes it re-read the
+  // store and issue a second — inside the same lock. So two full request timeouts is the worst case
+  // BEFORE anything has gone wrong.
+  //
+  // This assertion exists so that raising `RATE.requestTimeoutMs` breaks a test rather than the
+  // behaviour. The old values (wait 10 s, stale at 30 s, against a 40 s worst case) failed both
+  // halves of it, and the symptom — a slow-but-healthy holder having its lock broken out from under
+  // it, then both processes rotating — looks nothing like a timeout bug.
+  const worstCase = 2 * RATE.requestTimeoutMs;
+  assert.ok(
+    STALE_MS > worstCase,
+    `STALE_MS (${STALE_MS}) must exceed 2 x requestTimeoutMs (${worstCase}), or a holder that is ` +
+      "merely slow has its lock broken as if it had crashed",
+  );
+  assert.ok(
+    REFRESH_LOCK_TIMEOUT_MS > worstCase,
+    `REFRESH_LOCK_TIMEOUT_MS (${REFRESH_LOCK_TIMEOUT_MS}) must exceed 2 x requestTimeoutMs ` +
+      `(${worstCase}), or a caller queued behind a healthy refresh gives up and refreshes in ` +
+      "parallel — the exact collision the lock exists to prevent",
+  );
+});
+
+test("the acquisition timeout outlives the staleness threshold, so a crashed holder is recoverable", () => {
+  // `acquireDirLock` only breaks a stale lock WHILE IT IS STILL WAITING. A waiter whose timeout is
+  // shorter than staleMs therefore can never break one: it gives up first, and so does the next
+  // caller, and the lock a crashed process left behind wedges every refresh until a human deletes
+  // it. The old pair had exactly that hole.
+  assert.ok(
+    REFRESH_LOCK_TIMEOUT_MS > STALE_MS,
+    `REFRESH_LOCK_TIMEOUT_MS (${REFRESH_LOCK_TIMEOUT_MS}) must exceed STALE_MS (${STALE_MS})`,
+  );
+});
+
+/* --------------------------- withCredentialLock --------------------------- */
+
+test("withCredentialLock runs the write while holding the lock, and releases it after", async () => {
+  let heldDuring: boolean | null = null;
+  const result = await withCredentialLock("main", () => {
+    heldDuring = existsSync(LOCK);
+    return "written";
+  });
+  assert.equal(result, "written", "the callback's value is returned to the caller");
+  assert.equal(heldDuring, true, "the lock must be held while the write runs");
+  assert.equal(existsSync(LOCK), false, "the lock must be released afterwards");
+});
+
+test("withCredentialLock releases the lock even when the write throws", async () => {
+  await assert.rejects(
+    () =>
+      withCredentialLock("main", () => {
+        throw new Error("keychain refused");
+      }),
+    /keychain refused/,
+  );
+  assert.equal(existsSync(LOCK), false, "a throwing write must not leak the lock");
+});
+
+test("withCredentialLock proceeds when the lock cannot be taken", async () => {
+  // Documented policy, and the opposite of `syncStoreFromBrowser`'s: for every caller of this
+  // helper the alternative is refusing to do what the user just asked — refusing to store a token
+  // they pasted, refusing to log out — and a possible clobber is better than that.
+  const held = await acquireRefreshLock(1000);
+  assert.ok(held, "hold the lock so the helper cannot take it");
+  let ran = false;
+  const result = await withCredentialLock("main", () => {
+    ran = true;
+    return 42;
+  }, 200);
+  assert.equal(ran, true, "a null lock must not skip the write");
+  assert.equal(result, 42);
+  held!();
+});
+
+/* --------------------- never lose a rotated refresh token --------------------- */
+
+/** Run `fn` with the store's `set` replaced, restoring it even if the assertion throws. */
+async function withStoreSet(writes: (token: string) => void, fn: () => Promise<void>): Promise<void> {
+  const store = getStore();
+  const real = store.set.bind(store);
+  (store as unknown as { set: (t: string) => void }).set = writes;
+  try {
+    await fn();
+  } finally {
+    (store as unknown as { set: unknown }).set = real;
+  }
+}
+
+test("a rotated token that cannot be written is kept, not thrown away", async () => {
+  // The failure this prevents: `store.set` throws (locked Keychain, denied ACL prompt, EPERM from
+  // an antivirus holding the temp file), the exception propagates, and the rotated token is lost
+  // PERMANENTLY — the one it replaced was retired server-side the instant this pair was issued.
+  // A transient disk error used to cost a forced interactive re-login.
+  const stale = jwt(2000000000, "pre-rotation");
+  const rotated = jwt(2000000000, "rotated");
+  serverToken = stale;
+  presented.length = 0;
+  resetSession();
+
+  let writeAttempts = 0;
+  await withStoreSet(
+    () => {
+      writeAttempts++;
+      throw new Error("Keychain write failed");
+    },
+    async () => {
+      await withStoredTokens(
+        () => stale,
+        async () => {
+          const access = await forceRefresh();
+          assert.ok(access, "the access token must still be returned — it is valid for 24 hours");
+          assert.equal(writeAttempts, 2, "the write is retried once before giving up");
+        },
+      );
+    },
+  );
+
+  // The rotated token is now held in memory. The next refresh must present IT, not the spent copy
+  // still sitting in the store.
+  serverToken = rotated;
+  presented.length = 0;
+  resetSession();
+  await withStoredTokens(
+    () => stale,
+    async () => {
+      await forceRefresh();
+      assert.deepEqual(
+        [...presented],
+        [rotated],
+        "the in-memory rotated token must be presented instead of the spent stored one",
+      );
+    },
+  );
+});
+
+test("a rotated token held in memory is dropped once the store moves on", async () => {
+  // Without this, a token kept in memory after a failed write would shadow a credential the user
+  // had just deliberately replaced — `bootstrap`, `login` and `logout` all write the store directly.
+  const stale = jwt(2000000000, "before");
+  const rotated = jwt(2000000000, "rotated");
+  const pasted = jwt(2000000000, "what-the-user-just-bootstrapped");
+
+  serverToken = stale;
+  presented.length = 0;
+  resetSession();
+  await withStoreSet(
+    () => {
+      throw new Error("Keychain write failed");
+    },
+    async () => {
+      await withStoredTokens(
+        () => stale,
+        async () => {
+          await forceRefresh();
+        },
+      );
+    },
+  );
+
+  // The user runs `bootstrap`. The store now holds something the in-memory copy never superseded.
+  serverToken = pasted;
+  presented.length = 0;
+  resetSession();
+  await withStoredTokens(
+    () => pasted,
+    async () => {
+      await forceRefresh();
+      assert.deepEqual(
+        [...presented],
+        [pasted],
+        "the store is authoritative once it stops holding what the in-memory copy superseded",
+      );
+    },
+  );
+  assert.notEqual(rotated, pasted, "the two tokens must differ for this test to mean anything");
+});
+
+test("the 401 retry is bounded at one, even when the store keeps changing", async () => {
+  // The re-read has to differ for the retry to fire, so in principle it terminates on its own. "In
+  // principle" is doing the work there: the failure mode of being wrong is unbounded recursion
+  // inside a HELD lock, issuing a request per level, while every other process waits on it.
+  serverToken = jwt(2000000000, "never-matches");
+  presented.length = 0;
+  resetSession();
+
+  let reads = 0;
+  await withStoredTokens(
+    () => jwt(2000000000, `moving-target-${reads++}`),
+    async () => {
+      await assert.rejects(() => forceRefresh(), StockbitError);
+      assert.equal(presented.length, 2, "one request plus exactly one retry, never more");
+    },
+  );
 });

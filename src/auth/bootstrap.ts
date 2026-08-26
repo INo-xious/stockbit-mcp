@@ -9,6 +9,7 @@
  * `bootstrap` and `import-har` share it. Pass `verify` to opt back into the round trip.
  */
 import { getStore } from "./store.js";
+import { withCredentialLock } from "./reflock.js";
 import { forceRefresh, decodeJwt, resetSession } from "./session.js";
 import { logStderr } from "../redact.js";
 
@@ -38,7 +39,12 @@ export async function bootstrap(refreshToken: string, options: BootstrapOptions 
   if (!trimmed) throw new Error("Empty refresh token");
 
   const store = getStore();
-  store.set(trimmed);
+  // Under the credential lock. A bootstrap landing while another process is mid-refresh would
+  // otherwise be overwritten by that rotation, or overwrite it — and the loser is a token the
+  // server has already retired, so the next refresh 401s and the user is told to log in again for
+  // a token they just pasted. A null lock still proceeds: refusing to store a credential the user
+  // typed is worse than the clobber it avoids.
+  await withCredentialLock("main", () => store.set(trimmed));
   resetSession();
 
   const payload = decodeJwt(trimmed);

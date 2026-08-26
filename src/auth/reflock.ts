@@ -36,11 +36,46 @@
  * since another process may legitimately have rotated the token while this one was waiting.
  */
 import { join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
 import { acquireDirLock } from "../util/dirlock.js";
-import { fileDir } from "./store.js";
+import { fileDir, getStore } from "./store.js";
+import { RATE } from "../config.js";
 
-/** A lock older than this is assumed to belong to a dead process. */
-export const STALE_MS = 30_000;
+/**
+ * The longest a holder can legitimately hold this lock.
+ *
+ * `refreshOnce` issues one request bounded by `RATE.requestTimeoutMs`, and a 401 makes it re-read
+ * the store and issue a second — inside the same lock, because the retry exists precisely to handle
+ * "another process rotated while we were queued". Two full request timeouts is therefore the worst
+ * case *before anything has gone wrong*.
+ *
+ * Both constants below are derived from this rather than written down, and `test/reflock.test.ts`
+ * asserts the relationship, so raising `RATE.requestTimeoutMs` breaks a test instead of quietly
+ * breaking the lock.
+ */
+const WORST_CASE_HOLD_MS = 2 * RATE.requestTimeoutMs;
+
+/**
+ * A lock older than this is assumed to belong to a dead process.
+ *
+ * It must exceed `WORST_CASE_HOLD_MS`. It was 30_000 against a 40_000 worst case — the wrong side of
+ * that line — so a slow but entirely legitimate holder had its lock broken out from under it, and
+ * the double rotation this module exists to prevent happened anyway. Raising the acquisition
+ * timeout without raising this one fixes half the bug and looks like it fixed all of it.
+ */
+export const STALE_MS = WORST_CASE_HOLD_MS + 10_000;
+
+/**
+ * How long a caller waits for the lock before giving up.
+ *
+ * It must exceed `STALE_MS`, not merely `WORST_CASE_HOLD_MS`. `acquireDirLock` only breaks a stale
+ * lock *while it is still waiting*, so a waiter whose timeout is shorter than `staleMs` can never
+ * break one — it gives up first, and so does the next caller, and the lock a crashed process left
+ * behind wedges every refresh until someone deletes it by hand. The old pair (wait 10 s, stale at
+ * 30 s) had exactly that hole.
+ */
+export const REFRESH_LOCK_TIMEOUT_MS = STALE_MS + 5_000;
+
 const POLL_MS = 120;
 
 /** Lock names by token domain. `main` keeps its historical name so an in-flight lock survives an upgrade. */
@@ -53,8 +88,32 @@ const LOCK_NAMES = {
 /** The token domains that hold their own refresh lock. Mirrors `TokenDomain` in `session.ts`. */
 export type LockDomain = keyof typeof LOCK_NAMES;
 
+/**
+ * Where a domain's lock directory lives — which depends on the backend, and has to.
+ *
+ * **File backend:** beside the credential it guards, as before. Both move with `STOCKBIT_STORE_DIR`,
+ * so two clients pointed at different store dirs hold *different credentials* and correctly take
+ * different locks. Every `STOCKBIT_FORCE_FILE_STORE=1` test is on this path and is unaffected by
+ * anything below.
+ *
+ * **Keychain backend:** the macOS login Keychain is per-user and machine-global. It does not move
+ * with `STOCKBIT_STORE_DIR` at all. A lock resolved under the store dir therefore let two clients
+ * configured with different store dirs take DIFFERENT locks over the SAME credential — which is no
+ * lock, and the failure it allows is the one this module exists to prevent.
+ *
+ * The known limit, stated rather than hidden: this resolves through `os.tmpdir()`, so two processes
+ * that disagree about `$TMPDIR` still take different locks. Every client that matters inherits the
+ * user's — Claude Code, Claude Desktop, a daemon, a terminal — and it is strictly narrower than the
+ * hole it replaces. A path under `~` was considered and rejected: a lock directory there can be
+ * mirrored by a file-sync client, and `mkdir` atomicity on a synced or network home directory is
+ * not something anyone has promised.
+ */
 function lockPath(domain: LockDomain): string {
-  return join(fileDir(), LOCK_NAMES[domain]);
+  if (getStore(domain).backend !== "keychain") return join(fileDir(), LOCK_NAMES[domain]);
+  // Sanitised because a username reaches a path here. On darwin it will not contain a separator,
+  // but this is not the place to depend on that.
+  const user = userInfo().username.replace(/[^A-Za-z0-9._-]/g, "_");
+  return join(tmpdir(), `stockbit-mcp-locks-${user}`, LOCK_NAMES[domain]);
 }
 
 /**
@@ -64,8 +123,43 @@ function lockPath(domain: LockDomain): string {
  * error: the caller refreshes anyway, accepting the small clobber risk rather than failing.
  */
 export async function acquireRefreshLock(
-  timeoutMs = 10_000,
+  timeoutMs = REFRESH_LOCK_TIMEOUT_MS,
   domain: LockDomain = "main",
 ): Promise<(() => void) | null> {
   return acquireDirLock(lockPath(domain), { staleMs: STALE_MS, timeoutMs, pollMs: POLL_MS });
+}
+
+/**
+ * Run `fn` holding a slot's credential lock.
+ *
+ * The refresh path was never the only writer. `bootstrap`, `trading-login`, the e-IPO mint and
+ * every `logout` also write or clear a credential, and none of them took the lock — so a
+ * `bootstrap` landing while another process was mid-refresh could be overwritten by that rotation,
+ * or overwrite it. The consequence is identical to the one the lock was built for: whichever write
+ * lands last wins the file, and if it is the older token, every later refresh 401s.
+ *
+ * The failure policy is `doRefresh`'s, deliberately: **a null lock proceeds anyway.** For every
+ * caller of this helper the alternative is refusing to do the thing the user just asked for —
+ * refusing to store a token they pasted, refusing to log out — and a possible clobber is better
+ * than that.
+ *
+ * Two writers are deliberately NOT on this helper, and both are load-bearing:
+ *
+ *   - the login capture in `login.ts` — an interactive re-login intentionally supersedes whatever
+ *     was stored, and making that path async would let the capture promise settle before the write
+ *     landed;
+ *   - `syncStoreFromBrowser`, whose alternative *is* safe — the browser still holds a working token
+ *     — so it takes the lock itself and treats a null as a no-op rather than as permission.
+ */
+export async function withCredentialLock<T>(
+  slot: LockDomain,
+  fn: () => T | Promise<T>,
+  timeoutMs = REFRESH_LOCK_TIMEOUT_MS,
+): Promise<T> {
+  const release = await acquireRefreshLock(timeoutMs, slot);
+  try {
+    return await fn();
+  } finally {
+    release?.();
+  }
 }

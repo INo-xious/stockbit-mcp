@@ -25,11 +25,11 @@
  * (keys and value types, never values) so the next edit is informed rather than guessed.
  */
 import { AUTH } from "../config.js";
-import { getStore, type StoreSlot } from "./store.js";
-import { acquireRefreshLock } from "./reflock.js";
+import { getStore, type StoreSlot, type TokenStore } from "./store.js";
+import { acquireRefreshLock, REFRESH_LOCK_TIMEOUT_MS } from "./reflock.js";
 import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
-import { redact } from "../redact.js";
+import { logStderr, redact } from "../redact.js";
 
 export type { TokenDomain } from "../http/transport.js";
 
@@ -42,6 +42,20 @@ interface AccessToken {
 interface DomainState {
   current: AccessToken | null;
   inFlight: Promise<AccessToken> | null;
+  /**
+   * A rotated refresh token this process holds but could NOT write to the store.
+   *
+   * `token` is the live credential; `supersedes` is what the store held when the write failed, and
+   * is what makes this safe. The moment the store stops holding `supersedes` — another process
+   * rotated, a `bootstrap` pasted a new token, a `login` captured one, a `logout` cleared it — this
+   * record is stale and is dropped. Without that check a token kept here would shadow a credential
+   * the user had just deliberately replaced.
+   *
+   * It is a credential rather than a cache, which is why `resetSession` does not clear it: dropping
+   * it would throw away the only live copy and force an interactive re-login for what may have been
+   * a Keychain that was locked for a minute. See `persistRotated` and `currentRefreshToken`.
+   */
+  rotated: { token: string; supersedes: string | null } | null;
 }
 
 /**
@@ -85,9 +99,9 @@ const DOMAINS: Record<TokenDomain, DomainSpec> = {
 };
 
 const state: Record<TokenDomain, DomainState> = {
-  main: { current: null, inFlight: null },
-  securities: { current: null, inFlight: null },
-  eipo: { current: null, inFlight: null },
+  main: { current: null, inFlight: null, rotated: null },
+  securities: { current: null, inFlight: null, rotated: null },
+  eipo: { current: null, inFlight: null, rotated: null },
 };
 
 /** Decode a JWT payload without verifying (we only read exp). Returns {} on failure. */
@@ -228,7 +242,12 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   // the SAME domain at once invalidate each other and the loser's token is what ends up on disk.
   // See reflock.ts. Failing to take the lock is not fatal — a possible clobber beats a guaranteed
   // outage.
-  const release = await acquireRefreshLock(10_000, domain);
+  //
+  // The timeout is the module's own, which is derived from `RATE.requestTimeoutMs`. It used to be a
+  // hard-coded 10_000, shorter than a single request is allowed to take — so a caller queued behind
+  // a perfectly healthy refresh gave up and refreshed in parallel, producing the exact collision
+  // the lock is for.
+  const release = await acquireRefreshLock(REFRESH_LOCK_TIMEOUT_MS, domain);
   try {
     return await refreshOnce(domain);
   } finally {
@@ -236,10 +255,83 @@ async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
   }
 }
 
-async function refreshOnce(domain: TokenDomain): Promise<AccessToken> {
+/**
+ * Persist a rotated refresh token — and never lose one.
+ *
+ * `set` can fail for reasons that have nothing to do with the credential: a locked Keychain, a
+ * denied access prompt, EPERM from an antivirus holding the temp file, a full disk. Before this,
+ * such a failure threw out of `refreshOnce`, and the rotated token was gone *permanently* — the one
+ * it replaced had already been retired server-side the moment this pair was issued. A transient
+ * disk error cost a forced interactive re-login.
+ *
+ * So: try twice, then keep it in memory anyway. `state[domain].rotated` is what this process
+ * presents on its next refresh, which is what lets a long-running server survive a Keychain that
+ * was locked for a minute.
+ *
+ * The retry is immediate rather than delayed on purpose. The realistic failures here — a locked
+ * Keychain, a denied ACL prompt — do not heal in a few hundred milliseconds, and a sleep on the
+ * refresh path would be paid by every user for a case that almost never recovers.
+ *
+ * The warning names no token, and the reason is passed through `redact` because a store error can
+ * quote a path and a wrapped `fetch` error can quote a URL.
+ */
+function persistRotated(
+  domain: TokenDomain,
+  store: TokenStore,
+  newRefresh: string,
+  presented: string,
+): void {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      store.set(newRefresh);
+      state[domain].rotated = null;
+      return;
+    } catch (err) {
+      if (attempt === 0) continue;
+      // Keep the ORIGINAL `supersedes` across a chain of failures. On the second failure the store
+      // still holds what it held on the first — not the token we just presented, which never
+      // reached it — and recording the wrong one would make the next read drop this record and
+      // present a doubly-spent token.
+      state[domain].rotated = {
+        token: newRefresh,
+        supersedes: state[domain].rotated?.supersedes ?? presented,
+      };
+      logStderr(
+        `Warning: the ${domain} refresh token rotated but could not be written to the ` +
+          `${store.backend} store (${redact(err instanceof Error ? err.message : String(err))}). ` +
+          "This process keeps working; another one starting now would find a spent token. " +
+          "Run `stockbit-auth login` when convenient.",
+      );
+    }
+  }
+}
+
+/**
+ * The refresh token this process would actually present for a domain.
+ *
+ * Prefers a rotated token held in memory because the store write failed — from here the stored copy
+ * is spent, and presenting it is a guaranteed 401. But only while the store still holds exactly what
+ * it held when that write failed. Anything else means the store has moved on under us: another
+ * process rotated, or the user ran `bootstrap`, `login` or `logout`. In every one of those cases the
+ * store is authoritative and the in-memory copy is not, so it is dropped here rather than by asking
+ * five call sites to remember to drop it.
+ *
+ * Every caller that asks "is there a session" goes through this, or a process that is working
+ * perfectly well reports that it has none.
+ */
+function currentRefreshToken(domain: TokenDomain): string | null {
+  const stored = getStore(DOMAINS[domain].slot).get();
+  const held = state[domain].rotated;
+  if (!held) return stored;
+  if (stored === held.supersedes) return held.token;
+  state[domain].rotated = null;
+  return stored;
+}
+
+async function refreshOnce(domain: TokenDomain, attempt = 0): Promise<AccessToken> {
   const spec = DOMAINS[domain];
   const store = getStore(spec.slot);
-  const refreshToken = store.get();
+  const refreshToken = currentRefreshToken(domain);
   if (!refreshToken) throw new StockbitError("auth", spec.missing);
 
   let res: Response;
@@ -264,10 +356,15 @@ async function refreshOnce(domain: TokenDomain): Promise<AccessToken> {
     // A 401 here usually means another process rotated the token while this one was queued behind
     // the lock: our copy was valid when we read it and was superseded before we presented it.
     // Re-reading the store and retrying once turns that lockout into a hiccup.
-    if (res.status === 401) {
+    //
+    // Bounded at one retry. The re-read has to differ for the retry to fire, so in principle it
+    // terminates on its own — but "in principle" is doing the work there, and the failure mode of
+    // being wrong is an unbounded recursion inside a held lock, issuing a request per level, while
+    // every other process waits on it.
+    if (res.status === 401 && attempt === 0) {
       const now = getStore(spec.slot).get();
       if (now && now !== refreshToken) {
-        return refreshOnce(domain);
+        return refreshOnce(domain, attempt + 1);
       }
     }
     throw new StockbitError(
@@ -290,13 +387,21 @@ async function refreshOnce(domain: TokenDomain): Promise<AccessToken> {
   }
   const { access, newRefresh, expiresAt } = parsed;
 
-  // Rotation: persist a new refresh token the moment we receive one, or we lock ourselves out.
-  if (newRefresh && newRefresh !== refreshToken) {
-    store.set(newRefresh);
-  }
-
+  // The access token is cached FIRST, and unconditionally. The order is the fix, not a tidy-up.
+  //
+  // The refresh token we presented is already spent — Stockbit retired it the instant it issued
+  // this pair. Letting a storage failure throw from here therefore discarded a working 24-hour
+  // access token *on top of* a credential that was gone either way, turning a disk problem into an
+  // immediate outage instead of a warning about tomorrow.
   const token = { token: access, expiresAt };
   state[domain].current = token;
+
+  // Rotation: persist the new refresh token the moment we receive one, or the next process to start
+  // locks itself out.
+  if (newRefresh && newRefresh !== refreshToken) {
+    persistRotated(domain, store, newRefresh, refreshToken);
+  }
+
   return token;
 }
 
@@ -322,7 +427,7 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
     return slotState.current.token;
   }
   // Env-injected access token takes precedence when there's no stored refresh token — main only.
-  if (domain === "main" && !getStore("main").get()) {
+  if (domain === "main" && !currentRefreshToken("main")) {
     const env = adoptEnvAccessToken();
     if (env) {
       if (state.main.current!.expiresAt - now <= 0) {
@@ -365,6 +470,12 @@ export function adoptAccessToken(domain: TokenDomain, token: string, expiresAt?:
  * With no argument it clears every domain, which is what a test wants. Callers ending ONE session —
  * `trading-logout` — must name theirs, or logging out of trading would also drop the market-data
  * token and cost an extra refresh on the next quote.
+ *
+ * `rotated` is deliberately NOT cleared. It holds a refresh token that could not be written to the
+ * store, which makes it a credential rather than a cache — the only live copy on this machine.
+ * Dropping it here would turn "the Keychain was locked for a minute" into a forced re-login, which
+ * is the opposite of what this function is for. It stops being used on its own the moment the store
+ * stops holding what it superseded, which covers `logout` — see `currentRefreshToken`.
  */
 export function resetSession(domain?: TokenDomain): void {
   const domains: TokenDomain[] = domain ? [domain] : ["main", "securities", "eipo"];
@@ -376,7 +487,7 @@ export function resetSession(domain?: TokenDomain): void {
 
 /** Whether a domain has a stored refresh token at all — a question `status` asks without a round trip. */
 export function hasStoredSession(domain: TokenDomain): boolean {
-  return Boolean(getStore(DOMAINS[domain].slot).get());
+  return Boolean(currentRefreshToken(domain));
 }
 
 /** The store slot backing a domain, so the CLI can report its backend without duplicating the table. */

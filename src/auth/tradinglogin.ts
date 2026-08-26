@@ -28,6 +28,7 @@
 import { getJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { getStore } from "./store.js";
+import { withCredentialLock } from "./reflock.js";
 import { adoptAccessToken, parseRefresh, resetSession } from "./session.js";
 
 /** The `login_token` grant, wherever the envelope puts it. */
@@ -99,7 +100,7 @@ export async function loginSecurities({ pin }: { pin: string }): Promise<Trading
   }
 
   const store = getStore("securities");
-  store.set(parsed.newRefresh);
+  await withCredentialLock("securities", () => store.set(parsed.newRefresh!));
   // Seed the access token rather than throwing it away: the alternative is an immediate refresh
   // that spends the token we were just handed.
   adoptAccessToken("securities", parsed.access, parsed.expiresAt);
@@ -128,7 +129,7 @@ export async function logoutSecurities(): Promise<{ remote: "ok" | "skipped" | s
     }
   }
 
-  store.clear();
+  await withCredentialLock("securities", () => store.clear());
   resetSession("securities");
   return { remote, cleared: true };
 }

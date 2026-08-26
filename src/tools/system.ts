@@ -45,6 +45,7 @@ import { clearBrowserProfile, readBrowserProfile } from "../auth/browserprofile.
 import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
 import { getStore, type StoreSlot } from "../auth/store.js";
+import { withCredentialLock } from "../auth/reflock.js";
 import { hasStoredSession, resetSession } from "../auth/session.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
@@ -314,7 +315,7 @@ async function doLogout(request: LogoutRequest) {
       } catch (err) {
         cleared.trading = `local store cleared, remote logout failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
         try {
-          getStore("securities").clear();
+          await withCredentialLock("securities", () => getStore("securities").clear());
         } catch {
           /* already reported */
         }
@@ -325,7 +326,9 @@ async function doLogout(request: LogoutRequest) {
     const slot = SCOPE_SLOTS[scope];
     const had = hasStoredSession(slot === "securities" ? "securities" : slot);
     try {
-      getStore(slot).clear();
+      // Under the credential lock, like every other credential write — a logout that races a
+      // refresh must not be undone by the rotation landing a moment later.
+      await withCredentialLock(slot, () => getStore(slot).clear());
       cleared[scope] = had ? "cleared" : "nothing stored";
     } catch (err) {
       cleared[scope] = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
