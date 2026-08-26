@@ -341,7 +341,10 @@ function fromAccessCache(domain: TokenDomain, nowSeconds: number): AccessToken |
   const entry = readAccessCache(domain, refreshToken);
   if (!entry) return null;
   if (entry.expiresAt - nowSeconds <= AUTH.expirySkewSeconds) return null;
-  return { token: entry.token, expiresAt: entry.expiresAt, from: entry.from };
+  // `checkedAt` is set here because the binding has just been verified: `readAccessCache` only
+  // returns an entry whose fingerprint matches the refresh token now in the store. Leaving it unset
+  // would make the very next request re-read the store to confirm something this line already knew.
+  return { token: entry.token, expiresAt: entry.expiresAt, from: entry.from, checkedAt: Date.now() };
 }
 
 async function doRefresh(domain: TokenDomain): Promise<AccessToken> {
