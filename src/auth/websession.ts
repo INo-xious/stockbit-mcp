@@ -93,7 +93,24 @@ function sessionPath(): string {
   return join(fileDir(), FILE_NAME);
 }
 
-export function saveWebSession(session: WebSession): void {
+/**
+ * Persist a captured session — refusing, by default, to move the credential BACKWARDS.
+ *
+ * This file has three writers: the login capture, the post-chart re-capture in `chartbit/driver.ts`,
+ * and `alignStoredCredential`. They are not ordered with respect to each other and the last write
+ * wins. That is fine when every write carries the same or a newer credential, and silently
+ * destructive when one does not:
+ *
+ *   - a capture taken from a page that had not finished restoring holds no `credentialStorage` at
+ *     all, and would replace a good one with nothing;
+ *   - a capture that began before a rotation and lands after it puts the RETIRED pair back, undoing
+ *     the alignment and reintroducing the blank chart it exists to prevent.
+ *
+ * Both look like a successful save and read afterwards as a logout. A login is never affected: a
+ * fresh pair always carries a later expiry than the one it replaces.
+ */
+export function saveWebSession(session: WebSession, options: { allowOlder?: boolean } = {}): void {
+  if (!options.allowOlder && !supersedesStored(session)) return;
   mkdirSync(fileDir(), { recursive: true, mode: 0o700 });
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", fileKey(), iv);
@@ -124,6 +141,24 @@ export function loadWebSession(): WebSession | null {
     // right response to all three is the same: log in again.
     return null;
   }
+}
+
+/**
+ * Is `incoming` at least as current as what is already stored?
+ *
+ * Compares the ACCESS token's expiry, the one field that moves monotonically with each rotation.
+ * Anything unreadable on the incoming side, when the stored side IS readable, counts as older — an
+ * unreadable credential cannot be shown to be an improvement, and assuming it is one is how a good
+ * session gets replaced by a half-loaded page's cookies.
+ */
+function supersedesStored(incoming: WebSession): boolean {
+  const stored = loadWebSession();
+  if (!stored) return true;
+  const storedAt = readSessionAccessToken(stored)?.expiresAt ?? null;
+  if (storedAt === null) return true;
+  const incomingAt = readSessionAccessToken(incoming)?.expiresAt ?? null;
+  if (incomingAt === null) return false;
+  return incomingAt >= storedAt;
 }
 
 export function clearWebSession(): void {
@@ -354,34 +389,55 @@ export async function seedWebSession(
  * refresh token runs a week. That asymmetry is why the two drift apart so fast.
  */
 /*
- * DO NOT add a "write the CLI's rotated tokens back into credentialStorage" path here.
+ * Writing the CLI's rotated tokens back into `credentialStorage`: forbidden in general, REQUIRED in
+ * one narrow case. Read both halves before touching `alignStoredCredential` below.
  *
- * It was built, and it was wrong, and the shape of it is inviting enough that it will be proposed
- * again — so this is the record of why it cannot work.
+ * ## What the original experiment actually showed
  *
- * The idea: the CLI refreshes, receives a new access token and a rotated refresh token, and those
- * are the same two fields the website keeps in `credentialStorage`. Writing them back looks like it
- * would keep both sides on the same rotation instead of fighting over it.
+ * An earlier attempt planted a pair minted 0.6s earlier by `forceRefresh` — all 16 cookies plus 53
+ * localStorage keys — into a CLEAN Chrome profile. The site redirected to /login and answered five
+ * requests with 401. That was read as proof that the CLI cannot produce tokens the website accepts,
+ * because Stockbit's JWTs carry a `dvc` (device fingerprint) and `ses` (session id) in the `data`
+ * claim and nothing here sends either.
  *
- * It does not. MEASURED: a pair minted 0.6 seconds earlier through `forceRefresh`, planted as all 16
- * cookies PLUS 53 localStorage keys into a clean Chrome profile, is rejected by the website — it
- * redirects to /login and answers five requests with 401. The tokens are the right shape, the right
- * issuer, and unexpired. The site still refuses them, because its own tokens carry a device binding
- * the CLI's refresh route does not reproduce: `docs/stockbit-api.md` records `dvc` (device
- * fingerprint) and `ses` (session id) inside the JWT `data` claim, and nothing in this project sends
- * either.
+ * The conclusion was broader than the experiment. A clean profile varies TWO things at once: the
+ * tokens AND every device-identifying cookie the site sets on first contact. It cannot distinguish a
+ * rejected token from an unrecognised browser.
  *
- * So writing CLI tokens into the cookie does not extend the website session. It OVERWRITES a working
- * one with credentials the site will not accept, turning a healthy profile into a logged-out one.
+ * ## What is measured now
  *
- * What actually works is already here: capture the browser's OWN session (login, and after every
- * chart use in `chartbit/driver.ts`) and seed it back. The website session can be preserved within
- * its ~24h life. It cannot be renewed from this side. See `webSessionHealth` below.
+ * The CLI and the browser do not hold related tokens — they hold THE SAME STRINGS. Verified against
+ * a live store: the CLI's stored refresh token and this cookie's refresh token are byte-identical,
+ * as are the two access tokens, sharing one `jti`, one `ses`, one `dvc`, one `iat`. One pair, kept
+ * in two places. The CLI is not a second client; it is the same client with a second copy.
  *
- * The OPPOSITE direction — reading the browser's token out of this cookie and into the CLI's store —
- * is not what the paragraphs above forbid, and is now done: see `readCredentialStorage` immediately
- * below and `resync.ts`. Nothing about the device binding stands in the way of *reading*; it is
- * precisely what makes the browser's copy the authoritative one. See ADR-0009.
+ * That is what makes rotation different from minting. A rotated pair is issued BY the site FROM the
+ * pair it just retired, so it inherits that pair's `ses` and `dvc` — the CLI never has to forge a
+ * device binding, because it never mints one. Verified end to end: a deliberate rotation moved the
+ * family to a new `jti`, the binding was unchanged, the rewritten cookie was accepted by the website
+ * (chart page loaded signed in as the real user, normal body height, no login form), and drawing
+ * worked on three symbols.
+ *
+ * Also measured, and it is the reason any of this matters: the refresh deadline moves FORWARD by the
+ * elapsed time on each rotation. The ~7 days runs from the last rotation, not from the login. The
+ * paragraph that used to stand here — "the website session can be preserved within its ~24h life; it
+ * cannot be renewed from this side" — is wrong in both halves, and believing it is what produced a
+ * login prompt roughly every day.
+ *
+ * ## The rule
+ *
+ * MINTING a website session from this side remains impossible and must not be attempted.
+ *
+ * PROPAGATING a rotation is necessary. Without it the two copies diverge the first time the CLI
+ * refreshes on its own — about 24 hours after each login, when the shared access token lapses — and
+ * the chart renders a zero-height body that reads as "logged out" on a session with six days left.
+ *
+ * The guard is what makes it safe: `alignStoredCredential` writes ONLY when the cookie holds the very
+ * pair the refresh just retired. Such a cookie is ALREADY DEAD — the refresh killed it — so replacing
+ * it can restore a session and cannot cost one.
+ *
+ * The OPPOSITE direction — reading the browser's token into the CLI's store — was never what this
+ * forbade, and is done in `readCredentialStorage` and `resync.ts`. See ADR-0009.
  */
 
 /** The cookie name the Stockbit web app keeps its token pair in. */
@@ -413,19 +469,35 @@ export const CREDENTIAL_COOKIE = "credentialStorage";
  * in principle find a `refresh`-keyed value somewhere else in it. The explicit path says which field
  * this project means; the fallback survives the envelope moving, which it has done before.
  */
-export function readCredentialStorage(
-  session: WebSession,
-  options: CaptureOptions = {},
-): string | null {
+/**
+ * The credential cookie, decoded once, with everything a reader OR a writer needs.
+ *
+ * Split out of `readCredentialStorage` because there are now four things that need this cookie —
+ * the refresh token, the access token, the two expiries, and the write-back — and four copies of a
+ * three-pass decode loop is four chances to disagree about what the cookie says.
+ *
+ * `decodes` is carried because a writer has to re-encode exactly as many times as the reader peeled.
+ * Writing plain JSON over a value that arrived URL-encoded parses fine here and not in the browser.
+ */
+interface ParsedCredential {
+  /** Where the cookie sits in `session.cookies`, so a writer can put it back in place. */
+  index: number;
+  /** How many `decodeURIComponent` passes were needed to reach JSON. */
+  decodes: number;
+  payload: unknown;
+}
+
+function parseCredentialCookie(session: WebSession, options: CaptureOptions = {}): ParsedCredential | null {
   const hostFilter = options.hostFilter ?? isStockbitCookieHost;
-  const cookie = session.cookies.find((c) => c.name === CREDENTIAL_COOKIE && hostFilter(c.domain));
+  const index = session.cookies.findIndex((c) => c.name === CREDENTIAL_COOKIE && hostFilter(c.domain));
+  if (index < 0) return null;
+  const cookie = session.cookies[index];
   if (!cookie?.value) return null;
 
   let text = cookie.value;
   for (let decodes = 0; decodes < 3; decodes++) {
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      return { index, decodes, payload: JSON.parse(text) as unknown };
     } catch {
       // Not JSON yet. Peel one layer of URL encoding and try again — but only if peeling actually
       // changes something, or a value that is simply not JSON spins for the full three passes.
@@ -437,15 +509,57 @@ export function readCredentialStorage(
       }
       if (next === text) return null;
       text = next;
-      continue;
     }
-
-    const state = (parsed as { state?: unknown } | null)?.state;
-    const direct = (state as { refresh?: unknown } | undefined)?.refresh;
-    if (looksLikeJwt(direct)) return direct;
-    return extractRefresh(parsed);
   }
   return null;
+}
+
+/**
+ * One slot of the cookie's token pair, in either shape it has been seen in.
+ *
+ * The header above documents `{ "access": <JWT>, "refresh": <JWT> }`, and that is what
+ * `readCredentialStorage` was written against. The live cookie on a current Stockbit build carries
+ * `{ "access": { "token": <JWT>, "expired_at": <ISO> }, ... }` instead. Both are handled, because
+ * assuming either one exclusively is how this stops working on a Tuesday.
+ */
+function slotToken(slot: unknown): string | null {
+  if (looksLikeJwt(slot)) return slot;
+  const nested = (slot as { token?: unknown } | undefined)?.token;
+  return looksLikeJwt(nested) ? nested : null;
+}
+
+/** A slot's expiry: the explicit `expired_at` when present, else the JWT's own `exp`. */
+function slotExpirySeconds(slot: unknown): number | null {
+  const explicit = (slot as { expired_at?: unknown } | undefined)?.expired_at;
+  if (typeof explicit === "string") {
+    const parsed = Date.parse(explicit);
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  }
+  const token = slotToken(slot);
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { exp?: unknown };
+    return typeof claims.exp === "number" ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readCredentialStorage(
+  session: WebSession,
+  options: CaptureOptions = {},
+): string | null {
+  const parsed = parseCredentialCookie(session, options);
+  if (!parsed) return null;
+  const state = (parsed.payload as { state?: unknown } | null)?.state;
+  const direct = (state as { refresh?: unknown } | undefined)?.refresh;
+  // `slotToken` rather than `looksLikeJwt` alone: the explicit path must find the token in the
+  // object shape too, or a current cookie falls through to the structural search for no reason.
+  const explicit = slotToken(direct);
+  if (explicit) return explicit;
+  return extractRefresh(parsed.payload);
 }
 
 /** How old a restored session is, for reporting. */
@@ -462,23 +576,108 @@ export function sessionAgeHours(session: WebSession): number | null {
  * the website logs out while `status` still reports a healthy token, and why the two must be reported
  * as separate things rather than as one "are you logged in".
  */
-export const WEB_SESSION_LIFETIME_HOURS = 24;
+/**
+ * The ACCESS token's life, which is NOT the session's life.
+ *
+ * Measured on the real `credentialStorage` cookie: `state.access` carries `exp = iat + 24h`. That
+ * number used to stand in for the whole session, and that was the bug — see `webSessionHealth`.
+ */
+export const ACCESS_TOKEN_LIFETIME_HOURS = 24;
 
+/** The two expiries carried inside the credential cookie, and who it belongs to. Safe to log. */
+export interface WebSessionCredential {
+  /** ISO timestamp the 24h access token dies. Expiring is normal and not fatal — the SPA renews it. */
+  accessExpiresAt: string | null;
+  /** ISO timestamp the ~7d refresh token dies. THIS is the session's real deadline. */
+  refreshExpiresAt: string | null;
+  username: string | null;
+}
+
+/**
+ * Pull the expiries out of a stored session, and nothing else.
+ *
+ * Deliberately returns no tokens, so it stays safe to log and to put in a status report. Tolerant by
+ * construction: every failure is `null` rather than a throw, because `collectStatus` requires a
+ * health probe that cannot fail.
+ */
+export function readSessionCredential(session: WebSession): WebSessionCredential | null {
+  const parsed = parseCredentialCookie(session);
+  if (!parsed) return null;
+  const state = (parsed.payload as { state?: Record<string, unknown> } | null)?.state;
+  if (!state || typeof state !== "object") return null;
+
+  const iso = (seconds: number | null) => (seconds === null ? null : new Date(seconds * 1000).toISOString());
+  const user = (state as { user?: { username?: unknown } }).user;
+  return {
+    accessExpiresAt: iso(slotExpirySeconds(state.access)),
+    refreshExpiresAt: iso(slotExpirySeconds(state.refresh)),
+    username: typeof user?.username === "string" ? user.username : null,
+  };
+}
+
+/**
+ * The ACCESS token the browser is currently holding.
+ *
+ * Separate from `readSessionCredential`, which returns expiries only and must stay safe to log.
+ * This one hands back a live bearer credential, so it exists for exactly one purpose: letting the
+ * CLI adopt the browser's token instead of minting one and retiring the browser's in the process.
+ */
+export function readSessionAccessToken(session: WebSession): { token: string; expiresAt: number } | null {
+  const parsed = parseCredentialCookie(session);
+  if (!parsed) return null;
+  const state = (parsed.payload as { state?: Record<string, unknown> } | null)?.state;
+  if (!state || typeof state !== "object") return null;
+  const token = slotToken(state.access);
+  const expiresAt = slotExpirySeconds(state.access);
+  // A token with no readable deadline is worse than none: it would be served until it 401s.
+  if (!token || expiresAt === null) return null;
+  return { token, expiresAt };
+}
+
+/**
+ * Three states, not two — and only one of them may stop a browser from launching.
+ *
+ * `likelyValid` and `expired` are NOT complements. Both are false in the third state, "unknown",
+ * where the credential could not be read at all. That distinction is the entire fix: treating
+ * unknown as dead is what made a readable-but-old session block, and treating it as alive would
+ * hide a real logout. Unknown means "go and look".
+ */
 export interface WebSessionHealth {
   present: boolean;
+  /** Capture age. Informational — it is NOT what decides anything any more. */
   ageHours: number | null;
-  /** Age-based only. A session can also die early — anything that rotates the family ends it. */
+  /** PROVABLY alive: the refresh token's expiry was read and is in the future. */
   likelyValid: boolean;
+  /** PROVABLY dead: the refresh token's expiry was read and has passed. Only this blocks a launch. */
+  expired: boolean;
   hint: string;
+  /** What the verdict rests on. `unknown` means nothing is claimed either way. */
+  basis: "refresh-token" | "unknown" | "absent";
+  /** Hours until the ~7d refresh token dies — the session's real deadline. Null if unreadable. */
+  refreshHoursLeft: number | null;
+  refreshExpiresAt: string | null;
+  /** Hours until the 24h access token dies. Negative is NORMAL and not fatal. */
+  accessHoursLeft: number | null;
+  accessExpiresAt: string | null;
 }
 
 /**
  * How healthy is the stored website session, as far as can be told WITHOUT spending anything?
  *
- * Deliberately age-based rather than a live check: proving a session works means using it, using it
- * means refreshing, and refreshing is exactly what kills it. So this answers the cheap question and
- * is honest that the answer is a floor — `likelyValid` says the session has not aged out, never that
- * it is definitely alive.
+ * ## Judge the refresh token, not the clock
+ *
+ * This used to answer "is the stored session younger than 24 hours", and that was wrong in the
+ * expensive direction. 24 hours is the ACCESS token's life. The same cookie carries a REFRESH token
+ * good for about a week, and the SPA spends it on boot. So a session whose access token lapsed
+ * overnight is not dead — it is one page load from being renewed.
+ *
+ * Reporting it as aged out made `withChart` refuse to launch a browser that would have worked, and
+ * told the user to log in again roughly every day on a credential with six days left. The old code
+ * even said so out loud: "Stockbit's lasts about 24h, so it has aged out."
+ *
+ * The tell was an inversion. The guard only fired when a session was PRESENT, so a missing
+ * `websession.enc` sailed through while a readable 25-hour-old one was refused — deleting the file
+ * behaved better than keeping it. Whenever absence outperforms evidence, the test is backwards.
  *
  * Never throws: `collectStatus` requires that, and a health probe that can fail is not one.
  */
@@ -489,40 +688,222 @@ export function webSessionHealth(): WebSessionHealth {
   } catch {
     session = null;
   }
+
+  const base = {
+    ageHours: null,
+    likelyValid: false,
+    expired: false,
+    refreshHoursLeft: null,
+    refreshExpiresAt: null,
+    accessHoursLeft: null,
+    accessExpiresAt: null,
+  };
+
   if (!session) {
     return {
+      ...base,
       present: false,
-      ageHours: null,
-      likelyValid: false,
+      basis: "absent" as const,
       hint: "No website session stored — the chart needs a login before it will open.",
     };
   }
+
   const age = sessionAgeHours(session);
-  if (age === null) {
-    return {
-      present: true,
-      ageHours: null,
-      likelyValid: false,
-      hint: "A website session is stored but its age is unreadable; treat it as needing a login.",
-    };
-  }
-  const left = WEB_SESSION_LIFETIME_HOURS - age;
-  if (left <= 0) {
-    return {
-      present: true,
-      ageHours: age,
-      likelyValid: false,
-      hint:
-        `The stored website session is ${age.toFixed(1)}h old and Stockbit's lasts about ` +
-        `${WEB_SESSION_LIFETIME_HOURS}h, so it has aged out. A fresh login is needed.`,
-    };
-  }
-  return {
+  const credential = readSessionCredential(session);
+  const hoursUntil = (iso: string | null) => (iso === null ? null : (Date.parse(iso) - Date.now()) / 3_600_000);
+  const refreshHoursLeft = hoursUntil(credential?.refreshExpiresAt ?? null);
+  const accessHoursLeft = hoursUntil(credential?.accessExpiresAt ?? null);
+  const shared = {
+    ...base,
     present: true,
     ageHours: age,
-    likelyValid: true,
-    hint:
-      `Website session is ${age.toFixed(1)}h old, roughly ${left.toFixed(1)}h before it ages out. ` +
-      "It can still end sooner if something rotates the token family.",
+    refreshExpiresAt: credential?.refreshExpiresAt ?? null,
+    accessExpiresAt: credential?.accessExpiresAt ?? null,
+    refreshHoursLeft,
+    accessHoursLeft,
   };
+
+  // Unknown. Say so, and do not stand in the way — the chart's own logged-out detection is a better
+  // answer than a guess made from here.
+  if (refreshHoursLeft === null) {
+    return {
+      ...shared,
+      basis: "unknown" as const,
+      hint:
+        "A website session is stored but its credential could not be read, so nothing is claimed " +
+        "about it either way. Opening a chart will settle it.",
+    };
+  }
+
+  if (refreshHoursLeft <= 0) {
+    return {
+      ...shared,
+      expired: true,
+      basis: "refresh-token" as const,
+      hint:
+        `The stored website session's refresh token expired ${Math.abs(refreshHoursLeft).toFixed(1)}h ago, ` +
+        "so the chart cannot open. Run `stockbit-auth login`. The REST tools use a separate credential " +
+        "and are unaffected.",
+    };
+  }
+
+  const days = (refreshHoursLeft / 24).toFixed(1);
+  const accessNote =
+    accessHoursLeft !== null && accessHoursLeft <= 0
+      ? " Its 24h access token has lapsed, which is normal overnight — the page re-mints one on load."
+      : "";
+  return {
+    ...shared,
+    likelyValid: true,
+    basis: "refresh-token" as const,
+    hint:
+      `Website session is alive — its refresh token is good for another ${days} day(s)` +
+      (age === null ? "" : ` (captured ${age.toFixed(1)}h ago)`) +
+      `.${accessNote} Each token refresh slides that deadline forward, so regular use keeps it alive.`,
+  };
+}
+
+/**
+ * The reason a chart must NOT be opened, or null.
+ *
+ * Split out from the health report so the launch decision has exactly one input and cannot drift
+ * from the reasoning behind it. Only a PROVABLY expired refresh token blocks. Unknown does not, and
+ * that is the point: the previous guard blocked on `!likelyValid`, which lumped "cannot read this"
+ * in with "this is dead" and refused perfectly good sessions.
+ */
+export function webSessionLaunchBlocker(): string | null {
+  const health = webSessionHealth();
+  return health.present && health.expired ? health.hint : null;
+}
+
+/* ------------- keeping the CLI's copy and the browser's copy on one generation ------------- */
+
+/** Why an alignment did or did not happen. Reported, never thrown — this must not fail a refresh. */
+export type CredentialAlignment =
+  | "aligned"
+  | "already-current"
+  | "no-session"
+  | "unreadable"
+  | "different-generation"
+  | "binding-mismatch";
+
+/** The `ses`/`dvc` pair a token is bound to, or null when it cannot be read. */
+function tokenBinding(token: string): { ses: unknown; dvc: unknown } | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+    const data = (claims.data ?? claims) as Record<string, unknown>;
+    if (data.ses === undefined && data.dvc === undefined) return null;
+    return { ses: data.ses, dvc: data.dvc };
+  } catch {
+    return null;
+  }
+}
+
+function sameBinding(before: string, after: string): boolean {
+  const a = tokenBinding(before);
+  const b = tokenBinding(after);
+  // Unreadable on either side is not evidence of a mismatch. Refusing to align on an unparseable
+  // claim would reinstate the bug for anyone whose tokens stop being JWTs.
+  if (!a || !b) return true;
+  return a.ses === b.ses && a.dvc === b.dvc;
+}
+
+/**
+ * Write a rotated token into one slot of the cookie, preserving the shape that slot arrived in.
+ *
+ * The cookie has been seen carrying a bare JWT string AND an object with `token`/`expired_at`.
+ * Rewriting one shape as the other would parse cleanly here and confuse the web app, so the incoming
+ * shape decides the outgoing one.
+ */
+function writeSlot(state: Record<string, unknown>, key: "access" | "refresh", token: string, expiresAt?: number): void {
+  const existing = state[key];
+  if (looksLikeJwt(existing)) {
+    state[key] = token;
+    return;
+  }
+  state[key] = {
+    ...(typeof existing === "object" && existing !== null ? existing : {}),
+    token,
+    // A rotation with no readable expiry keeps the old deadline rather than inventing one.
+    // Overstating it would hide a dead session behind a confident-looking date.
+    ...(expiresAt === undefined ? {} : { expired_at: new Date(expiresAt * 1000).toISOString() }),
+  };
+}
+
+/**
+ * Carry a rotation the CLI just performed across to the browser's copy of the same credential.
+ *
+ * Called after a successful `main` refresh, with the refresh token that was SPENT. Two guards decide
+ * whether anything is written, and both must pass:
+ *
+ *  1. The cookie must hold the exact refresh token that was spent. That is what proves this cookie is
+ *     the generation the refresh retired — already dead, so replacing it risks nothing. Any other
+ *     value belongs to a generation this process did not retire and must be left alone.
+ *  2. The new pair must carry the same `ses` and `dvc` as the old one. Rotation inherits the device
+ *     binding; minting does not. If that ever stops holding, the tokens would be useless to the
+ *     browser and writing them would destroy a session instead of extending it.
+ *
+ * Never throws: a failure to align must not turn a working refresh into a failed request.
+ */
+export function alignStoredCredential(
+  spentRefreshToken: string,
+  next: { access: string; accessExpiresAt: number; refresh?: string; refreshExpiresAt?: number },
+): CredentialAlignment {
+  try {
+    const session = loadWebSession();
+    if (!session) return "no-session";
+    const parsed = parseCredentialCookie(session);
+    if (!parsed) return "unreadable";
+
+    const state = (parsed.payload as { state?: Record<string, unknown> } | null)?.state;
+    if (!state || typeof state !== "object") return "unreadable";
+
+    const heldRefresh = slotToken(state.refresh);
+    const heldAccess = slotToken(state.access);
+    if (!heldRefresh) return "unreadable";
+
+    if (heldAccess === next.access && heldRefresh === (next.refresh ?? heldRefresh)) return "already-current";
+    if (heldRefresh !== spentRefreshToken) return "different-generation";
+    if (!sameBinding(heldRefresh, next.access)) return "binding-mismatch";
+
+    writeSlot(state, "access", next.access, next.accessExpiresAt);
+    if (next.refresh) writeSlot(state, "refresh", next.refresh, next.refreshExpiresAt);
+
+    // Re-encode exactly as many times as the reader peeled, or the browser gets a value it cannot
+    // read — the same corruption in the opposite direction.
+    let value = JSON.stringify(parsed.payload);
+    for (let i = 0; i < parsed.decodes; i++) value = encodeURIComponent(value);
+
+    session.cookies[parsed.index] = { ...session.cookies[parsed.index], value };
+    // `allowOlder`: this write moves the credential FORWARD by construction, but it is doing so
+    // through the same monotonicity guard that exists to stop stale captures. The guard compares
+    // against what is on disk, which is what this is replacing.
+    saveWebSession(session, { allowOlder: true });
+    return "aligned";
+  } catch {
+    return "unreadable";
+  }
+}
+
+/**
+ * The browser's access token, when it is live enough to use — the read half of the same alignment.
+ *
+ * The browser can rotate without this process knowing: the SPA may spend its refresh token on boot,
+ * and the chart driver captures whatever it finds on the way out. When the cookie ends up AHEAD of
+ * the CLI, the CLI must follow it rather than refresh past it — refreshing past it would retire the
+ * generation the chart is using, the same failure as the write side from the other direction.
+ *
+ * `resync.ts` already does this for the REFRESH token. This is the access token, which is what a
+ * request actually presents, and following it is what makes a refresh unnecessary rather than merely
+ * recoverable.
+ */
+export function browserAccessToken(skewSeconds = 0): { token: string; expiresAt: number } | null {
+  const session = loadWebSession();
+  if (!session) return null;
+  const access = readSessionAccessToken(session);
+  if (!access) return null;
+  const now = Math.floor(Date.now() / 1000);
+  return access.expiresAt - now > skewSeconds ? access : null;
 }

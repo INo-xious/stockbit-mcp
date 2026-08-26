@@ -26,7 +26,7 @@
 import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { ChartbitSession, type ChartTab } from "./session.js";
-import { captureWebSession, saveWebSession, webSessionHealth } from "../auth/websession.js";
+import { captureWebSession, saveWebSession, webSessionLaunchBlocker } from "../auth/websession.js";
 import { syncStoreFromBrowser } from "../auth/resync.js";
 import { evaluateInPage } from "./evaluate.js";
 import {
@@ -102,18 +102,26 @@ async function withChart<T>(
 ): Promise<T> {
   // Catch an aged-out website session BEFORE launching anything.
   //
-  // Stockbit's website session lasts about a day and cannot be renewed from this side — only a real
-  // login mints one. Without this check the first sign of expiry is a browser launch, a 45-second
-  // readiness wait, and a page that renders nothing, which is a slow and confusing way to learn that
-  // a login is due.
+  // Fail fast ONLY on a session that is provably dead. Without any check, the first sign of expiry
+  // is a browser launch, a 45-second readiness wait, and a page that renders nothing — a slow and
+  // confusing way to learn that a login is due.
   //
-  // Only an aged-out STORED session fails fast. A missing store is deliberately allowed through: the
-  // browser profile may well be signed in on its own — that is the normal state right after a login
-  // whose capture did not land — and refusing to open a chart that would have worked is the worse
-  // error of the two.
-  const health = webSessionHealth();
-  if (health.present && !health.likelyValid) {
-    throw new StockbitError("auth", health.hint);
+  // This used to block on `!likelyValid`, and that was the daily-login bug. `likelyValid` was
+  // age-based against a 24h constant, so every session older than a day was refused here — including
+  // the overwhelming majority that were perfectly alive, because 24h is the ACCESS token's life and
+  // the refresh token beside it runs about a week. The comment that stood here even asserted the
+  // session "cannot be renewed from this side", which is what made the pessimism look principled.
+  //
+  // `webSessionLaunchBlocker` returns a reason only when the refresh token's expiry has been READ
+  // and has PASSED. Three states, and only one of them stops a launch:
+  //   - provably dead  -> block, and name the fix
+  //   - provably alive -> open
+  //   - unreadable     -> open anyway, and let the page's own logged-out detection answer
+  // A missing store stays allowed through for the same reason it always was: the browser profile
+  // may be signed in on its own, and refusing a chart that would have worked is the worse error.
+  const blocked = webSessionLaunchBlocker();
+  if (blocked) {
+    throw new StockbitError("auth", blocked);
   }
 
   const { session, tab } = await ChartbitSession.open({ symbol: options.symbol, headless: options.headless });

@@ -31,6 +31,7 @@ import { StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
 import { logStderr, redact } from "../redact.js";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscache.js";
+import { alignStoredCredential, browserAccessToken } from "./websession.js";
 import { recordRefreshFailure, recordRefreshOk } from "./health.js";
 import { tokenFingerprint } from "./fingerprint.js";
 
@@ -629,6 +630,35 @@ async function refreshOnce(domain: TokenDomain, attempt = 0, locked = false): Pr
   // that has just been retired.
   recordRefreshOk(spec.slot, newRefresh ?? refreshToken);
 
+  // ...and carry the rotation to the BROWSER, which holds a copy of the very pair this call retired.
+  //
+  // This is the other half of the daily-login bug, and the half that survives fixing the health
+  // verdict. The CLI and the browser hold the SAME token strings, so they lapse at the same instant —
+  // about 24 hours after each login. The next request refreshes, the refresh retires the pair the
+  // browser is still holding, and the chart renders a zero-height body that reads as "logged out" on
+  // a session with six days left on its refresh token.
+  //
+  // Only `main` has a browser side; `securities` and `eipo` are API-only chains with no cookie to
+  // fall out of step with. Best-effort by construction: `alignStoredCredential` reports rather than
+  // throws, and writes only when the cookie provably holds the retired generation. A refresh that
+  // succeeded must never be turned into a failure by a bookkeeping step — which is the same reason
+  // the access token is cached first, above.
+  if (domain === "main") {
+    try {
+      const alignment = alignStoredCredential(refreshToken, {
+        access,
+        accessExpiresAt: expiresAt,
+        refresh: newRefresh,
+        refreshExpiresAt: newRefresh ? expFromJwt(newRefresh, 7 * 24 * 3600) : undefined,
+      });
+      if (process.env.STOCKBIT_DEBUG === "1") {
+        logStderr(`[auth:debug] web session alignment after main refresh: ${alignment}`);
+      }
+    } catch {
+      // Loading or running the alignment must not cost a refresh that already worked.
+    }
+  }
+
   return token;
 }
 
@@ -683,6 +713,32 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
     return cached.token;
   }
 
+  // Level three: the BROWSER's copy of this same pair, before spending a rotation on a new one.
+  //
+  // `resync.ts` already follows the browser's REFRESH token. This follows its ACCESS token, which is
+  // what a request actually presents — and following it makes a refresh unnecessary rather than
+  // merely recoverable. The SPA re-mints on boot and the chart driver captures the result, so the
+  // cookie is routinely ahead of this process; refreshing past it would retire the generation the
+  // chart is drawing under.
+  //
+  // Skipped during a forced refresh: that runs because a token was REJECTED, and the cookie may well
+  // hold the same rejected token. `forceRefresh` does its own browser check, where it still knows
+  // which token failed and can compare against it.
+  if (domain === "main" && slotState.forcedRefreshes === 0) {
+    const fromBrowser = browserAccessToken(AUTH.expirySkewSeconds);
+    if (fromBrowser) {
+      const adopted: AccessToken = {
+        token: fromBrowser.token,
+        expiresAt: fromBrowser.expiresAt,
+        // Bound to the refresh token currently in the store: this access token belongs to the same
+        // family, and binding it to anything else would make `mintedFromCurrentCredential` drop it.
+        from: tokenFingerprint(currentRefreshToken("main") ?? fromBrowser.token),
+      };
+      slotState.current = adopted;
+      return adopted.token;
+    }
+  }
+
   // Coalesce concurrent refreshes of the same domain into one in-flight request.
   if (!slotState.inFlight) {
     slotState.inFlight = doRefresh(domain).finally(() => {
@@ -694,7 +750,32 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
 
 /** Force a refresh of one domain (used by the HTTP client on a 401). */
 export async function forceRefresh(domain: TokenDomain = "main"): Promise<string> {
+  const rejected = state[domain].current?.token ?? null;
   state[domain].current = null;
+
+  // Before spending a rotation, ask the BROWSER whether it has already moved on.
+  //
+  // A 401 has two very different causes and they need opposite responses. The session may be dead —
+  // then a refresh is right. Or this process is simply BEHIND: the SPA rotated on boot, the chart
+  // driver captured the new pair, and the token in hand was retired by that rotation rather than by
+  // any expiry. Refreshing in the second case retires the generation the chart is using and turns
+  // "you were behind" into "you are both logged out".
+  //
+  // Anything the cookie holds that is not the token that just failed is newer by definition — the
+  // two sides only ever hold one pair — so the comparison against `rejected` is the whole guard.
+  if (domain === "main") {
+    const fromBrowser = browserAccessToken(AUTH.expirySkewSeconds);
+    if (fromBrowser && fromBrowser.token !== rejected) {
+      const adopted: AccessToken = {
+        token: fromBrowser.token,
+        expiresAt: fromBrowser.expiresAt,
+        from: tokenFingerprint(currentRefreshToken("main") ?? fromBrowser.token),
+      };
+      state[domain].current = adopted;
+      writeAccessCache(domain, adopted.token, adopted.expiresAt, currentRefreshToken("main") ?? adopted.token);
+      return adopted.token;
+    }
+  }
   // The single most important line in the access cache. `forceRefresh` runs because the token in
   // hand was rejected — and that same token is on disk, shared with every other process. Without
   // this, the very next `ensureFresh` re-hydrates the dead token from the cache and the session

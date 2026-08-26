@@ -35,7 +35,7 @@ import {
   slotHealthState,
   type SlotHealthState,
 } from "./auth/health.js";
-import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
+import { webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
 import { decodeJwt, forceRefresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
@@ -117,7 +117,8 @@ export interface StatusReport {
    *
    * Reported separately because conflating them is what made this confusing to diagnose: `auth.main`
    * could be healthy and refreshing cleanly while the website was logged out, and nothing in the
-   * output said those were different things. Age-based and side-effect free; see `webSessionHealth`.
+   * output said those were different things. Judged on the refresh token's expiry and side-effect
+   * free; see `webSessionHealth`.
    */
   webSession: WebSessionHealth;
   store: {
@@ -581,6 +582,47 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   };
 }
 
+/**
+ * One line describing the website session, from the verdict rather than from the clock.
+ *
+ * This line used to be computed independently of the structured report, against a 24-hour constant.
+ * Once `webSessionHealth` started judging the refresh token, the two disagreed: the report would say
+ * a session was good for six more days while this printed `AGED OUT — a fresh login is needed`, and
+ * past 24 hours it printed a NEGATIVE hours-remaining. The verdict already carries the reason it
+ * reached it; this line's only job is to say it out loud.
+ *
+ * Age is still shown because it is useful context, but it is never the basis for the verdict.
+ */
+function describeWebSession(web: WebSessionHealth): string {
+  if (!web.present) return "not stored — chart drawing needs a login";
+
+  const age = web.ageHours === null ? "age unknown" : `captured ${web.ageHours.toFixed(1)}h ago`;
+
+  if (web.basis === "unknown") {
+    // Unknown is not dead. Demanding a login here is the same pessimism that cost a daily one.
+    return `stored, ${age} — validity unreadable, the chart will settle it`;
+  }
+  if (web.expired) {
+    return `EXPIRED — its refresh token lapsed${
+      web.refreshExpiresAt ? ` at ${web.refreshExpiresAt}` : ""
+    }; run \`stockbit-auth login\``;
+  }
+
+  const left =
+    web.refreshHoursLeft === null
+      ? ""
+      : web.refreshHoursLeft > 48
+        ? `, ~${(web.refreshHoursLeft / 24).toFixed(1)}d left`
+        : `, ~${web.refreshHoursLeft.toFixed(1)}h left`;
+  // A lapsed access token is the normal overnight state and says nothing about the session, so it
+  // is reported as a note rather than folded into the verdict.
+  const access =
+    web.accessHoursLeft !== null && web.accessHoursLeft < 0
+      ? " (access token lapsed; renews on next page load)"
+      : "";
+  return `stored, ${age}${left}${access}`;
+}
+
 /** A few lines for a terminal, from the same report the tool returns. */
 export function formatStatus(report: StatusReport): string {
   const slot = (name: string, s: SlotStatus): string => {
@@ -609,16 +651,7 @@ export function formatStatus(report: StatusReport): string {
     `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${report.store.browserPinned ?? "not pinned"}`,
-    `Website session  ${
-      !report.webSession.present
-        ? "not stored — chart drawing needs a login"
-        : report.webSession.ageHours === null
-          ? "stored, age unknown — treat as needing a login"
-          : `${report.webSession.likelyValid ? "stored" : "AGED OUT"}, ${report.webSession.ageHours.toFixed(1)}h old` +
-            (report.webSession.likelyValid
-              ? `, ~${(WEB_SESSION_LIFETIME_HOURS - report.webSession.ageHours).toFixed(1)}h left`
-              : " — a fresh login is needed")
-    }`,
+    `Website session  ${describeWebSession(report.webSession)}`,
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),

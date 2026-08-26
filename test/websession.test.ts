@@ -30,7 +30,9 @@ import {
   saveWebSession,
   sessionAgeHours,
   webSessionHealth,
-  WEB_SESSION_LIFETIME_HOURS,
+  webSessionLaunchBlocker,
+  readSessionAccessToken,
+  alignStoredCredential,
   type StoredCookie,
   type WebSession,
 } from "../src/auth/websession.ts";
@@ -183,24 +185,128 @@ test("session age is reported, and an unreadable timestamp is null rather than a
   assert.equal(sessionAgeHours(session([cookie("v")], "not a date")), null);
 });
 
-test("health is age-based, and says so at both boundaries", () => {
-  clearWebSession();
-  assert.equal(webSessionHealth().present, false, "no stored session is reported as absent");
+/* ---------------------- health: the refresh token, not the clock ---------------------- */
 
-  saveWebSession(session([cookie("v", { name: "SESSIONID" })], new Date(Date.now() - 3_600_000).toISOString()));
-  const young = webSessionHealth();
-  assert.equal(young.present, true);
-  assert.equal(young.likelyValid, true);
-  assert.match(young.hint, /can still end sooner/, "likelyValid is a floor, never a promise");
+/**
+ * The bug these replace.
+ *
+ * `webSessionHealth` used to answer "is the stored session younger than 24 hours", and `withChart`
+ * refused to launch a browser whenever it said no. But 24 hours is the ACCESS token's life; the
+ * REFRESH token in the same cookie runs about a week and the SPA spends it on boot. So every session
+ * older than a day was reported as aged out and the user was sent back to a login on a credential
+ * with days left — daily, indefinitely.
+ *
+ * The test that stood here asserted exactly that behaviour ("health is age-based, and says so at
+ * both boundaries"), which is why the defect survived four rounds of adversarial review: it was
+ * pinned in place by a passing test. These pin the three states instead, and the property that
+ * matters most — **unknown must never block.**
+ */
 
-  const past = WEB_SESSION_LIFETIME_HOURS + 1;
-  saveWebSession(
-    session([cookie("v", { name: "SESSIONID" })], new Date(Date.now() - past * 3_600_000).toISOString()),
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+/** A cookie carrying a token pair with explicit expiries, the shape the live site uses. */
+function pairCookie(accessMsFromNow: number, refreshMsFromNow: number, encodings = 1): StoredCookie {
+  return cookie(
+    credentialStorage(
+      {
+        access: { token: jwt({ exp: Math.floor((Date.now() + accessMsFromNow) / 1000) }), expired_at: new Date(Date.now() + accessMsFromNow).toISOString() },
+        refresh: { token: jwt({ exp: Math.floor((Date.now() + refreshMsFromNow) / 1000) }), expired_at: new Date(Date.now() + refreshMsFromNow).toISOString() },
+        user: { id: 1, username: "tester" },
+      },
+      encodings,
+    ),
   );
-  const old = webSessionHealth();
-  assert.equal(old.present, true);
-  assert.equal(old.likelyValid, false);
-  assert.match(old.hint, /fresh login/);
+}
+
+test("a 25-hour-old session with 6 days left on its refresh token is usable", () => {
+  // THE regression. Under the old age-vs-24h rule this returned likelyValid:false and the chart
+  // refused to open on a session that would have worked and renewed itself.
+  clearWebSession();
+  saveWebSession(session([pairCookie(HOUR, 6 * DAY)], new Date(Date.now() - 25 * HOUR).toISOString()));
+
+  const health = webSessionHealth();
+  assert.equal(health.present, true);
+  assert.equal(health.likelyValid, true, "a live refresh token means usable, regardless of age");
+  assert.equal(health.expired, false);
+  assert.equal(health.basis, "refresh-token");
+  assert.equal(webSessionLaunchBlocker(), null, "nothing may stop the browser launching");
+  assert.ok(health.refreshHoursLeft !== null && health.refreshHoursLeft > 5 * 24);
+  assert.doesNotMatch(health.hint, /aged out/i);
+  assert.doesNotMatch(health.hint, /fresh login/i, "a usable session must not demand a login");
+});
+
+test("an expired access token is reported but is not fatal", () => {
+  // Normal after any night: access lapsed, refresh alive. The page re-mints on load.
+  clearWebSession();
+  saveWebSession(session([pairCookie(-6 * HOUR, 5 * DAY)], new Date(Date.now() - 30 * HOUR).toISOString()));
+
+  const health = webSessionHealth();
+  assert.equal(health.likelyValid, true);
+  assert.equal(webSessionLaunchBlocker(), null);
+  assert.ok(health.accessHoursLeft !== null && health.accessHoursLeft < 0, "access is expired");
+  assert.match(health.hint, /access token/i, "the lapsed access token should be explained, not hidden");
+});
+
+test("a session whose REFRESH token has expired is the one thing that blocks a launch", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(-7 * DAY, -1 * DAY)], new Date(Date.now() - 8 * DAY).toISOString()));
+
+  const health = webSessionHealth();
+  assert.equal(health.expired, true);
+  assert.equal(health.likelyValid, false);
+
+  const blocker = webSessionLaunchBlocker();
+  assert.ok(blocker, "a provably dead session must fail fast rather than burn a readiness wait");
+  assert.match(blocker, /stockbit-auth login/, "the message must name the fix");
+  assert.match(blocker, /separate credential|unaffected/i, "and must not imply the REST tools are broken");
+});
+
+test("an unreadable credential is UNKNOWN, and unknown never blocks", () => {
+  // The inversion that gave the original bug away: a MISSING store was allowed through while a
+  // readable old one was refused. Unknown must behave like missing — go and look.
+  clearWebSession();
+  saveWebSession(session([cookie("not-json-at-all")], new Date(Date.now() - 100 * HOUR).toISOString()));
+
+  const health = webSessionHealth();
+  assert.equal(health.present, true);
+  assert.equal(health.expired, false, "unreadable is not dead");
+  assert.equal(health.likelyValid, false, "nor is it provably alive");
+  assert.equal(health.basis, "unknown");
+  assert.equal(webSessionLaunchBlocker(), null, "unknown must not stop a launch");
+});
+
+test("no stored session at all: absent, and still no blocker", () => {
+  clearWebSession();
+  const health = webSessionHealth();
+  assert.equal(health.present, false);
+  assert.equal(health.basis, "absent");
+  assert.equal(webSessionLaunchBlocker(), null, "the profile may be signed in on its own");
+});
+
+test("a bare-JWT cookie is judged from the token's own exp", () => {
+  // The shape this module's header documents. Both shapes must reach a verdict.
+  clearWebSession();
+  saveWebSession(
+    session([
+      cookie(
+        credentialStorage({
+          access: jwt({ exp: Math.floor((Date.now() + HOUR) / 1000) }),
+          refresh: jwt({ exp: Math.floor((Date.now() + 5 * DAY) / 1000) }),
+        }),
+      ),
+    ]),
+  );
+  const health = webSessionHealth();
+  assert.equal(health.basis, "refresh-token");
+  assert.equal(health.likelyValid, true);
+});
+
+test("the health report never carries a token", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(HOUR, 6 * DAY)]));
+  const serialised = JSON.stringify(webSessionHealth());
+  assert.equal(/eyJ|\.c2ln/.test(serialised), false, "a token leaked into the report");
 });
 
 test("health never throws, whatever is on disk", () => {
@@ -208,19 +314,147 @@ test("health never throws, whatever is on disk", () => {
   assert.doesNotThrow(() => webSessionHealth());
 });
 
-/* -------------------------- the DO-NOT block stands -------------------------- */
+/* -------------------- propagating a rotation, and refusing to mint one -------------------- */
 
-test("nothing in this module writes CLI tokens back into credentialStorage", async () => {
-  // Built, measured, rejected: the site's own JWTs carry a dvc/ses device binding the CLI cannot
-  // reproduce, so planting CLI tokens overwrites a working profile with credentials the site
-  // refuses. The record of that lives in a comment, and comments do not fail builds — this does.
-  const { readFileSync } = await import("node:fs");
-  const { fileURLToPath } = await import("node:url");
-  const source = readFileSync(fileURLToPath(new URL("../src/auth/websession.ts", import.meta.url)), "utf8");
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-  assert.equal(
-    /setCookies[\s\S]{0,200}credentialStorage/.test(code),
-    false,
-    "writing the CLI's tokens into credentialStorage logs the browser profile out",
+/**
+ * The prohibition this replaces was a source grep asserting nothing writes into the cookie at all.
+ *
+ * That rule was drawn from an experiment that planted CLI tokens into a CLEAN Chrome profile — which
+ * varies the tokens and every device cookie at once, and so cannot tell a rejected token from an
+ * unrecognised browser. Measured since: the CLI and the browser hold THE SAME token strings, and a
+ * rotated pair inherits the retired pair's `ses`/`dvc`, so propagating a rotation is not minting.
+ *
+ * A grep cannot express the difference. These do: the write happens ONLY when the cookie holds the
+ * pair that was just retired, and only when the binding is inherited. Both negatives are what keep
+ * a live session safe, so they matter more than the positive case.
+ */
+
+const BOUND = { ses: "session-abc", dvc: "device-xyz" };
+const OLD_REFRESH = jwt({ data: BOUND, jti: "gen-1" });
+const OLD_ACCESS = jwt({ data: BOUND, jti: "gen-1", exp: Math.floor((Date.now() + HOUR) / 1000) });
+const NEW_REFRESH = jwt({ data: BOUND, jti: "gen-2" });
+const NEW_ACCESS = jwt({ data: BOUND, jti: "gen-2", exp: Math.floor((Date.now() + DAY) / 1000) });
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+function storeHolding(access: string, refresh: string, encodings = 1): void {
+  clearWebSession();
+  saveWebSession(
+    session([
+      cookie(
+        credentialStorage(
+          {
+            access: { token: access, expired_at: new Date(Date.now() + HOUR).toISOString() },
+            refresh: { token: refresh, expired_at: new Date(Date.now() + 6 * DAY).toISOString() },
+          },
+          encodings,
+        ),
+      ),
+      cookie("keep-me", { name: "gen-websocket" }),
+    ]),
   );
+}
+
+test("a rotation is carried into the cookie when the cookie holds the pair that was retired", () => {
+  storeHolding(OLD_ACCESS, OLD_REFRESH);
+
+  const result = alignStoredCredential(OLD_REFRESH, {
+    access: NEW_ACCESS,
+    accessExpiresAt: nowSec() + 24 * 3600,
+    refresh: NEW_REFRESH,
+    refreshExpiresAt: nowSec() + 7 * 24 * 3600,
+  });
+
+  assert.equal(result, "aligned");
+  assert.equal(readCredentialStorage(loadWebSession()!), NEW_REFRESH, "the browser must end up on the new pair");
+  assert.equal(readSessionAccessToken(loadWebSession()!)?.token, NEW_ACCESS);
+});
+
+test("a cookie on a DIFFERENT generation is left alone — this process did not retire it", () => {
+  // The dangerous case, and the one the old prohibition was really about. The browser rotated on its
+  // own; overwriting here would destroy a live session rather than repair a dead one.
+  const someoneElses = jwt({ data: BOUND, jti: "gen-99" });
+  storeHolding(someoneElses, someoneElses);
+
+  const result = alignStoredCredential(OLD_REFRESH, { access: NEW_ACCESS, accessExpiresAt: nowSec() + 3600 });
+
+  assert.equal(result, "different-generation");
+  assert.equal(readCredentialStorage(loadWebSession()!), someoneElses, "the cookie must still hold its own pair");
+});
+
+test("a new pair that lost the device binding is refused — that would be minting, not rotating", () => {
+  storeHolding(OLD_ACCESS, OLD_REFRESH);
+  const foreign = jwt({ data: { ses: "other", dvc: "other" }, jti: "gen-2" });
+
+  const result = alignStoredCredential(OLD_REFRESH, { access: foreign, accessExpiresAt: nowSec() + 3600 });
+
+  assert.equal(result, "binding-mismatch");
+  assert.equal(readSessionAccessToken(loadWebSession()!)?.token, OLD_ACCESS, "nothing may be written");
+});
+
+test("the rest of the session survives the write — it is one cookie, not a replacement", () => {
+  storeHolding(OLD_ACCESS, OLD_REFRESH);
+  alignStoredCredential(OLD_REFRESH, { access: NEW_ACCESS, accessExpiresAt: nowSec() + 3600, refresh: NEW_REFRESH });
+
+  const after = loadWebSession()!;
+  assert.equal(after.cookies.length, 2, "no cookie may be dropped");
+  assert.equal(after.cookies.find((c) => c.name === "gen-websocket")?.value, "keep-me");
+});
+
+test("the cookie is re-encoded as many times as it was decoded", () => {
+  // Writing single-encoded JSON over a double-encoded value parses here and not in the browser.
+  storeHolding(OLD_ACCESS, OLD_REFRESH, 2);
+  assert.equal(
+    alignStoredCredential(OLD_REFRESH, { access: NEW_ACCESS, accessExpiresAt: nowSec() + 3600, refresh: NEW_REFRESH }),
+    "aligned",
+  );
+  assert.equal(readCredentialStorage(loadWebSession()!), NEW_REFRESH, "a double-encoded cookie must round-trip");
+});
+
+test("alignment never throws, whatever it is handed", () => {
+  clearWebSession();
+  assert.equal(alignStoredCredential("anything", { access: "x", accessExpiresAt: 0 }), "no-session");
+
+  clearWebSession();
+  saveWebSession(session([cookie("not-json")]));
+  assert.equal(alignStoredCredential("anything", { access: "x", accessExpiresAt: 0 }), "unreadable");
+});
+
+/* ------------------- the store must not move backwards ------------------- */
+
+test("a capture carrying an OLDER credential is dropped — it would undo a rotation", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(20 * HOUR, 6 * DAY)]));
+  const current = readSessionAccessToken(loadWebSession()!)?.token;
+
+  saveWebSession(session([pairCookie(2 * HOUR, 6 * DAY)]));
+
+  assert.equal(readSessionAccessToken(loadWebSession()!)?.token, current, "the newer credential must survive");
+});
+
+test("a capture with NO credential is dropped rather than blanking a good session", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(20 * HOUR, 6 * DAY)]));
+  const current = readSessionAccessToken(loadWebSession()!)?.token;
+
+  saveWebSession(session([cookie("x", { name: "SESSIONID" })]));
+
+  assert.equal(readSessionAccessToken(loadWebSession()!)?.token, current);
+});
+
+test("a newer credential is accepted — the guard must not freeze the session", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(2 * HOUR, 6 * DAY)]));
+  saveWebSession(session([pairCookie(24 * HOUR, 7 * DAY)]));
+
+  const left = webSessionHealth().accessHoursLeft;
+  assert.ok(left !== null && left > 20, "the newer credential must win");
+});
+
+test("allowOlder is the explicit escape hatch, so nothing is permanently stuck", () => {
+  clearWebSession();
+  saveWebSession(session([pairCookie(20 * HOUR, 6 * DAY)]));
+  saveWebSession(session([pairCookie(1 * HOUR, 6 * DAY)]), { allowOlder: true });
+
+  const left = webSessionHealth().accessHoursLeft;
+  assert.ok(left !== null && left < 2, "an explicit older write must land");
 });
