@@ -198,6 +198,21 @@ export class ChartbitSession {
     return [...this.warnings];
   }
 
+  /**
+   * Add a note. Use this, never `session.notes.push(...)`.
+   *
+   * `notes` hands out a COPY, so pushing through the getter compiles, runs, and silently does
+   * nothing. That is exactly what happened to the "applied the stored web session" note: it was
+   * written, it never once reached a caller, and it is precisely the line that would have shown —
+   * during a week of chasing a session bug — whether the stored session was being applied at all
+   * and how old it was.
+   *
+   * The getter is right to copy; writing through it was the mistake.
+   */
+  addNote(note: string): void {
+    this.warnings.push(note);
+  }
+
   static async open(options: OpenOptions): Promise<{ session: ChartbitSession; tab: ChartTab }> {
     const settings = loadSettings();
     const headless = options.headless ?? settings.chartbit.headless;
@@ -245,7 +260,7 @@ export class ChartbitSession {
         const seeded = await seedWebSession(session.cdp);
         if (seeded.seeded && seeded.cookies > 0) {
           const age = seeded.ageHours === null ? "unknown age" : `${Math.round(seeded.ageHours)}h old`;
-          session.notes.push(`Applied the stored Stockbit web session (${seeded.cookies} cookies, ${age}).`);
+          session.addNote(`Applied the stored Stockbit web session (${seeded.cookies} cookies, ${age}).`);
         }
       } catch {
         // A profile that is already signed in does not need this at all.

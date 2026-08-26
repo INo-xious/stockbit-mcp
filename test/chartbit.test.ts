@@ -768,3 +768,28 @@ test("a negative channel offset still builds — direction is not an error", () 
   assert.equal(request.points.length, 3);
   assert.equal(request.points[2].price, 170, "the parallel sits at toPrice + offset");
 });
+
+test("nothing writes a note through the `notes` getter, which hands out a copy", () => {
+  // `get notes()` returns `[...this.warnings]`, so `session.notes.push(...)` compiles, runs, and
+  // silently does nothing. It shipped that way: the "applied the stored web session" note — the one
+  // line that says whether the stored session was used at all and how old it was — never reached a
+  // caller, during exactly the period a session bug was being chased. Use `addNote()`.
+  //
+  // A grep rather than a behavioural assertion because the failure has no behaviour: the wrong call
+  // and the right one are indistinguishable at runtime except by the note not being there.
+  const offenders: string[] = [];
+  for (const file of chartbitFiles()) {
+    const code = stripComments(readFileSync(file, "utf8"));
+    if (/\.notes\s*\.\s*(push|pop|splice|shift|unshift)\s*\(/.test(code)) {
+      offenders.push(file.slice(SRC.length + 1));
+    }
+  }
+  assert.deepEqual(offenders, [], "mutating `notes` is a no-op — call addNote() instead");
+});
+
+test("that guard is not vacuous (negative control)", () => {
+  const bad = 'session.notes.push("x");';
+  assert.ok(/\.notes\s*\.\s*(push|pop|splice|shift|unshift)\s*\(/.test(stripComments(bad)));
+  const good = 'session.addNote("x");';
+  assert.equal(/\.notes\s*\.\s*(push|pop|splice|shift|unshift)\s*\(/.test(stripComments(good)), false);
+});
