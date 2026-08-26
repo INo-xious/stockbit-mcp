@@ -222,7 +222,7 @@ Reading and drawing on the user's real chart, in their own browser.
 | `chartbit_open` | read | Open a symbol's Chartbit page in the user's own logged-in browser, and optionally set the timeframe or chart type. | Observed | symbol*, resolution, chart_type, headless |
 | `chartbit_draw` | write | Draw levels, zones, trend lines, channels and markers on the user's REAL Stockbit chart. | Observed | symbol*, annotations*, anchor_date*, replace, headless |
 | `chartbit_clear` | write, destructive | Remove drawings from the user's real chart. | Observed | symbol*, scope*, confirm, headless |
-| `chartbit_shapes` | read | Every drawing currently on the user's chart, with the ones this server created marked `ours`. | Observed | symbol*, headless |
+| `chartbit_shapes` | read | Every drawing currently on the user's chart, with the ones this server created marked `ours`. | Observed | symbol*, kind, ours_only, headless |
 | `chartbit_screenshot` | read | A PNG of the user's chart exactly as it looks right now, including their own drawings, studies and theme. | Observed | symbol*, headless |
 | `chartbit_save` | write | Ask Stockbit to persist the chart now, rather than waiting for its autosave, then check over the API that it did. | Observed | symbol*, layout_id, chart_id, headless |
 | `chartbit_study` | write | Add an indicator to the user's real chart. | Observed | symbol*, study*, headless |

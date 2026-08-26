@@ -391,11 +391,49 @@ export interface ShapeRecord {
 }
 
 /** Every shape on the chart, with ours marked. The live view, not the saved one. */
+/**
+ * TradingView shape names for each annotation kind this server draws, so `listShapes` can be
+ * filtered by the vocabulary a caller already uses.
+ *
+ * Kept beside the reader rather than in `shapes.ts` because it is the INVERSE of the mapping there:
+ * that file turns a kind into one shape name, this turns a kind back into the names it may appear
+ * under. `marker` is one-to-many — an arrow when it has a price, a text label when it does not — and
+ * a filter that knew only one of them would hide half a caller's own markers.
+ */
+const SHAPE_NAMES_BY_KIND: Record<string, readonly string[]> = {
+  level: ["horizontal_line"],
+  zone: ["rectangle"],
+  trend: ["trend_line"],
+  fib: ["fib_retracement"],
+  channel: ["parallel_channel"],
+  vline: ["vertical_line"],
+  marker: ["arrow_up", "arrow_down", "text"],
+};
+
 export async function listShapes(options: {
   symbol: string;
   headless?: boolean;
-}): Promise<{ symbol: string; shapes: ShapeRecord[]; notes: string[] }> {
+  /** Annotation kind, or a raw TradingView shape name. Omitted means everything. */
+  kind?: string;
+  /** Only the drawings this server made. */
+  oursOnly?: boolean;
+}): Promise<{ symbol: string; shapes: ShapeRecord[]; notes: string[]; filtered?: string }> {
   const symbol = normalizeSymbol(options.symbol);
+
+  // Refuse an unrecognised filter rather than returning everything. A filter that silently does
+  // nothing is worse than no filter: the caller reads the full list as though it were the subset,
+  // which is exactly how a single zone was reported as present among six unrelated shapes.
+  const requested = options.kind?.trim().toLowerCase();
+  const names = requested ? SHAPE_NAMES_BY_KIND[requested] : undefined;
+  if (requested && !names && !Object.values(SHAPE_NAMES_BY_KIND).flat().includes(requested)) {
+    throw new StockbitError(
+      "invalid_param",
+      `Unknown drawing kind ${JSON.stringify(options.kind)}. Use one of: ` +
+        `${Object.keys(SHAPE_NAMES_BY_KIND).join(", ")} — or a TradingView shape name directly.`,
+    );
+  }
+  const wanted = names ?? (requested ? [requested] : null);
+
   return withChart({ symbol, headless: options.headless }, async (tab, session) => {
     const result = await evaluateInPage<PageResult & { shapes: Array<Omit<ShapeRecord, "ours">> }>(
       tab.cdp,
@@ -404,10 +442,21 @@ export async function listShapes(options: {
     );
     const ready = requireReady(result, "listing drawings");
     const ourIds = new Set(loadOurDrawings(symbol).map((d) => d.tvEntityId));
+    let shapes = (ready.shapes ?? []).map((shape) => ({
+      ...shape,
+      id: String(shape.id),
+      ours: ourIds.has(String(shape.id)),
+    }));
+    if (wanted) shapes = shapes.filter((shape) => wanted.includes(String(shape.name).toLowerCase()));
+    if (options.oursOnly) shapes = shapes.filter((shape) => shape.ours);
     return {
       symbol,
-      shapes: (ready.shapes ?? []).map((shape) => ({ ...shape, id: String(shape.id), ours: ourIds.has(String(shape.id)) })),
+      shapes,
       notes: session.notes,
+      // Stated back, so a short list reads as "filtered to this" rather than "the chart is nearly empty".
+      ...(wanted || options.oursOnly
+        ? { filtered: [wanted ? `kind=${requested}` : null, options.oursOnly ? "ours only" : null].filter(Boolean).join(", ") }
+        : {}),
     };
   });
 }

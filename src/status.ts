@@ -27,6 +27,8 @@
  * the payload changes. `live: true` settles it by actually refreshing once — one request — and is
  * off by default because `status` is the thing you call when you suspect the network.
  */
+import { statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
 import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
 import {
@@ -436,12 +438,19 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   } catch {
     browserPinned = null;
   }
-  if (web.present && !web.likelyValid) {
+  if (web.present && web.expired) {
+    // `expired`, NOT `!likelyValid`. Under the three-state verdict those are different things:
+    // `!likelyValid` is also true for "unknown", where the credential simply could not be read and
+    // nothing is claimed either way. Warning on unknown would put "your website session is in
+    // trouble" in front of a user whose session is fine — a quieter version of the same conflation
+    // that produced a login prompt every day.
+    //
     // Distinct from the token slots on purpose: this is the credential Chartbit needs, and it can be
-    // dead while every slot above is perfectly healthy. That combination is exactly what made the
+    // dead while every slot above is perfectly healthy. That combination is what made the original
     // failure so hard to read.
     checks.push({ name: "website session", status: "warn", detail: web.hint });
   }
+  checks.push(runningCodeCheck());
   if (!browserPinned) {
     checks.push({
       name: "browser profile",
@@ -593,6 +602,40 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
  *
  * Age is still shown because it is useful context, but it is never the basis for the verdict.
  */
+/**
+ * Is this process running the code that is currently on disk?
+ *
+ * A long-lived server loads its modules once. Rebuild underneath it and it keeps serving the old
+ * ones, indefinitely and without a hint — and a stale server is not merely out of date here, it is
+ * actively harmful: one that predates the session fixes still rotates the token family without
+ * carrying the rotation to the browser, so it logs the chart out while a freshly built copy of the
+ * same code, tested from a terminal, passes every check.
+ *
+ * That produced a wrong diagnosis twice in one day. Comparing this module's mtime against the
+ * process start time costs one `stat` and turns an invisible failure into a line of output.
+ */
+function runningCodeCheck(): StatusCheck {
+  try {
+    const builtAtMs = statSync(fileURLToPath(import.meta.url)).mtimeMs;
+    const startedAtMs = Date.now() - process.uptime() * 1000;
+    if (builtAtMs > startedAtMs) {
+      const behindMin = (builtAtMs - startedAtMs) / 60_000;
+      return {
+        name: "running code",
+        status: "warn",
+        detail:
+          `This server started ${behindMin.toFixed(0)} minute(s) before the code on disk was built, so it is ` +
+          "running the OLDER build. Restart it before trusting anything above — a stale server can rotate " +
+          "the session out from under the browser even when the code on disk no longer would.",
+      };
+    }
+    return { name: "running code", status: "ok", detail: "This process is running the build that is on disk." };
+  } catch {
+    // Bundled, packed, or a read-only mount: unknowable, and not worth a scary warning.
+    return { name: "running code", status: "warn", detail: "Could not tell whether this build is current." };
+  }
+}
+
 function describeWebSession(web: WebSessionHealth): string {
   if (!web.present) return "not stored — chart drawing needs a login";
 

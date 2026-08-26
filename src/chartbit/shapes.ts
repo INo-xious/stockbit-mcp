@@ -135,26 +135,28 @@ function timeOf(date: string, field: string): number {
 }
 
 /**
- * A fib coordinate, or a refusal.
+ * A coordinate, or a refusal.
  *
- * Dates are already checked — `timeOf` runs them through `epochSeconds`, which throws on anything
- * unparseable. Prices are not, anywhere in this file, and an `undefined` price travels all the way
- * to the widget, which anchors the shape at whatever it likes. Observed on a real chart with a
- * different tool: a zone sent with the wrong field names became a zero-size rectangle at the day's
- * high, reported back as `drawn: 1` with an empty `failed`. The caller is told it drew something,
- * the user sees nothing, and the two never reconcile — worse than an error.
+ * Dates were already checked — `timeOf` runs them through `epochSeconds`, which throws on anything
+ * unparseable. Prices were not, and `undefined` travelled all the way to the widget, which anchored
+ * the shape at whatever it felt like. Observed on a real chart: a zone sent with the wrong field
+ * names became a zero-size rectangle at the day's high, reported back as `drawn: 1` with no entry in
+ * `failed`. The caller is told it drew something; the user sees nothing; the two never reconcile.
  *
- * Applied here because a retracement is defined ENTIRELY by its two prices: get one wrong and every
- * level below it is wrong too, quietly and plausibly. The other annotation kinds in this file are
- * still unguarded; that is a separate change.
+ * That is worse than an error, so a missing coordinate is now an error. The message names the field,
+ * because the mistake that produced it was passing `price` and `price2` to a tool whose contract says
+ * `from` and `to`.
+ *
+ * Zero stays valid — the obvious falsiness check would reject it — and a marker's price stays
+ * genuinely optional.
  */
-function fibPrice(value: unknown, field: string): number {
+function requireNumber(value: unknown, field: string, kind: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new StockbitError(
       "invalid_param",
-      `A fib annotation needs a finite numeric \`${field}\`, got ${JSON.stringify(value)}. Nothing was ` +
-        "drawn for it — a coordinate that arrives undefined becomes a shape at an arbitrary price " +
-        "rather than a visible failure.",
+      `A ${kind} annotation needs a finite numeric \`${field}\`, got ${JSON.stringify(value)}. ` +
+        `Nothing was drawn for it. Check the field names for \`kind:"${kind}"\` — a coordinate that ` +
+        "arrives undefined becomes a shape at an arbitrary price rather than a visible failure.",
     );
   }
   return value;
@@ -175,7 +177,7 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
       const color = annotation.color ?? style.neutral;
       return {
         shape: "horizontal_line",
-        points: [{ time: anchor, price: annotation.price }],
+        points: [{ time: anchor, price: requireNumber(annotation.price, "price", "level") }],
         options: {
           shape: "horizontal_line",
           disableSelection: false,
@@ -194,14 +196,24 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
 
     case "zone": {
       const color = annotation.color ?? style.zone;
-      // A rectangle needs two corners: the same anchor time for both, with the two prices. A zone
-      // has no time extent of its own, and inventing one would place a band over a date range the
-      // caller never described.
+      // Both corners sit at the anchor time and the rectangle is EXTENDED in both directions, which
+      // is what makes it visible at all.
+      //
+      // This used to stop at the two corners, on the reasoning that a zone has no time extent of its
+      // own and inventing one would claim a date range the caller never described. The reasoning is
+      // sound and the result was a rectangle of zero width, which TradingView renders as nothing.
+      // Confirmed on a real chart: correct prices in `points`, `drawn: 1`, an empty `failed`, and an
+      // invisible drawing — every report agreeing except the chart.
+      //
+      // The project had already settled what a zone means. `render/candles.ts` draws one as
+      // `x=PAD_L, width=plotW` — the full plot width, a horizontal price band. So extending is not
+      // inventing a range; it is matching the definition the SVG renderer has always used, which is
+      // also why the two share a palette. A band drawn here now looks like a band drawn there.
       return {
         shape: "rectangle",
         points: [
-          { time: anchor, price: annotation.from },
-          { time: anchor, price: annotation.to },
+          { time: anchor, price: requireNumber(annotation.from, "from", "zone") },
+          { time: anchor, price: requireNumber(annotation.to, "to", "zone") },
         ],
         options: {
           shape: "rectangle",
@@ -212,6 +224,11 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
             fillBackground: true,
             transparency: 80,
             linewidth: 1,
+            extendLeft: true,
+            extendRight: true,
+            // The label is the only thing naming the band; without this the zone is anonymous.
+            showLabel: Boolean(annotation.label),
+            textColor: color,
           },
         },
         ours: { kind: "zone", label: annotation.label },
@@ -223,8 +240,8 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
       return {
         shape: "trend_line",
         points: [
-          { time: timeOf(annotation.fromDate, "trend start date"), price: annotation.fromPrice },
-          { time: timeOf(annotation.toDate, "trend end date"), price: annotation.toPrice },
+          { time: timeOf(annotation.fromDate, "trend start date"), price: requireNumber(annotation.fromPrice, "fromPrice", "trend") },
+          { time: timeOf(annotation.toDate, "trend end date"), price: requireNumber(annotation.toPrice, "toPrice", "trend") },
         ],
         options: {
           shape: "trend_line",
@@ -247,7 +264,14 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
       const shape = annotation.price === undefined ? "text" : annotation.above ? "arrow_down" : "arrow_up";
       return {
         shape,
-        points: [{ time: timeOf(annotation.date, "marker date"), ...(annotation.price === undefined ? {} : { price: annotation.price }) }],
+        // A marker's price is genuinely optional — without one it is a text label pinned to a date.
+        // But a price that was MEANT to be there and arrived as a non-number must not pass as "absent".
+        points: [
+          {
+            time: timeOf(annotation.date, "marker date"),
+            ...(annotation.price === undefined ? {} : { price: requireNumber(annotation.price, "price", "marker") }),
+          },
+        ],
         options: {
           shape,
           text: annotation.label,
@@ -261,14 +285,19 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
       const color = annotation.color ?? style.neutral;
       const from = timeOf(annotation.fromDate, "channel start date");
       const to = timeOf(annotation.toDate, "channel end date");
+      const fromPrice = requireNumber(annotation.fromPrice, "fromPrice", "channel");
+      const toPrice = requireNumber(annotation.toPrice, "toPrice", "channel");
+      // The offset is what makes the second line PARALLEL rather than coincident; undefined here
+      // would silently draw the channel as a single line.
+      const offset = requireNumber(annotation.offset, "offset", "channel");
       // A parallel channel takes THREE points: the two ends of the first line, then one point on the
       // parallel. The third is the offset applied to the second end.
       return {
         shape: "parallel_channel",
         points: [
-          { time: from, price: annotation.fromPrice },
-          { time: to, price: annotation.toPrice },
-          { time: to, price: annotation.toPrice + annotation.offset },
+          { time: from, price: fromPrice },
+          { time: to, price: toPrice },
+          { time: to, price: toPrice + offset },
         ],
         options: {
           shape: "parallel_channel",
@@ -286,8 +315,8 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
       return {
         shape: "fib_retracement",
         points: [
-          { time: timeOf(annotation.fromDate, "fib start date"), price: fibPrice(annotation.fromPrice, "fromPrice") },
-          { time: timeOf(annotation.toDate, "fib end date"), price: fibPrice(annotation.toPrice, "toPrice") },
+          { time: timeOf(annotation.fromDate, "fib start date"), price: requireNumber(annotation.fromPrice, "fromPrice", "fib") },
+          { time: timeOf(annotation.toDate, "fib end date"), price: requireNumber(annotation.toPrice, "toPrice", "fib") },
         ],
         options: {
           shape: "fib_retracement",

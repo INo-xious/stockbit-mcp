@@ -683,3 +683,88 @@ test("a fib with an unparseable date is refused", () => {
     toShapeRequest({ kind: "fib", fromDate: "not-a-date", fromPrice: 1, toDate: "2026-08-21", toPrice: 2 }, CONTEXT),
   );
 });
+
+/* ---------------- a zone that can actually be seen ---------------- */
+
+/**
+ * The defect: a rectangle whose two corners share one timestamp has zero width, and TradingView
+ * renders zero width as nothing. Observed on a real chart — correct prices in `points`, a cheerful
+ * `drawn: 1`, an empty `failed`, and an invisible drawing. Every report agreed except the chart.
+ *
+ * `render/candles.ts` had already decided what a zone is: `x=PAD_L, width=plotW`, a band across the
+ * whole plot. These pin the Chartbit side to the same meaning.
+ */
+
+test("a zone extends across the chart, because a zero-width rectangle draws nothing", () => {
+  const request = toShapeRequest({ kind: "zone", from: 825, to: 860 }, CONTEXT);
+  assert.equal(request.shape, "rectangle");
+  assert.equal(request.options.overrides.extendLeft, true, "without this the band has no width");
+  assert.equal(request.options.overrides.extendRight, true);
+});
+
+test("a zone keeps the prices it was given, in the order it was given them", () => {
+  const request = toShapeRequest({ kind: "zone", from: 825, to: 860 }, CONTEXT);
+  assert.deepEqual(
+    request.points.map((p) => p.price),
+    [825, 860],
+  );
+});
+
+test("a labelled zone shows its label; an unlabelled one does not claim to", () => {
+  const labelled = toShapeRequest({ kind: "zone", from: 1, to: 2, label: "decision zone" }, CONTEXT);
+  assert.equal(labelled.options.text, "decision zone");
+  assert.equal(labelled.options.overrides.showLabel, true);
+  assert.equal(toShapeRequest({ kind: "zone", from: 1, to: 2 }, CONTEXT).options.overrides.showLabel, false);
+});
+
+/* ---------------- a missing coordinate is an error, not a shape ---------------- */
+
+/**
+ * What actually happened: a zone was sent with `price`/`price2` instead of `from`/`to`. Both
+ * coordinates arrived `undefined`, travelled to the widget untouched, and became a zero-size
+ * rectangle anchored at the day's high — reported as drawn. A caller cannot detect that; only a
+ * human looking at the chart can, and only if they know what should be there.
+ */
+
+for (const [name, annotation] of [
+  ["level without a price", { kind: "level" }],
+  ["level with a string price", { kind: "level", price: "100" }],
+  ["zone sent price/price2 instead of from/to", { kind: "zone", price: 825, price2: 860 }],
+  ["zone missing `to`", { kind: "zone", from: 825 }],
+  ["trend without prices", { kind: "trend", fromDate: "2026-01-02", toDate: "2026-08-24" }],
+  ["trend with a NaN price", { kind: "trend", fromDate: "2026-01-02", fromPrice: NaN, toDate: "2026-08-24", toPrice: 2 }],
+  [
+    "channel without an offset — it would draw as a single line",
+    { kind: "channel", fromDate: "2026-01-02", fromPrice: 1, toDate: "2026-08-24", toPrice: 2 },
+  ],
+  ["marker with a non-numeric price", { kind: "marker", date: "2026-08-24", price: "10", label: "x" }],
+] as Array<[string, unknown]>) {
+  test(`refuses to draw: ${name}`, () => {
+    assert.throws(
+      () => toShapeRequest(annotation as Parameters<typeof toShapeRequest>[0], CONTEXT),
+      /numeric/i,
+      `${name} must fail loudly rather than draw at an arbitrary price`,
+    );
+  });
+}
+
+test("zero is a legitimate coordinate and must not be mistaken for missing", () => {
+  // The obvious way to write this check is falsiness, and it would reject 0.
+  assert.doesNotThrow(() => toShapeRequest({ kind: "level", price: 0 }, CONTEXT));
+  assert.equal(toShapeRequest({ kind: "level", price: 0 }, CONTEXT).points[0].price, 0);
+});
+
+test("a marker with no price at all is still valid — it is a text label on a date", () => {
+  const request = toShapeRequest({ kind: "marker", date: "2026-08-24", label: "earnings" }, CONTEXT);
+  assert.equal(request.shape, "text");
+  assert.equal(request.points[0].price, undefined);
+});
+
+test("a negative channel offset still builds — direction is not an error", () => {
+  const request = toShapeRequest(
+    { kind: "channel", fromDate: "2026-01-02", fromPrice: 100, toDate: "2026-08-24", toPrice: 200, offset: -30 },
+    CONTEXT,
+  );
+  assert.equal(request.points.length, 3);
+  assert.equal(request.points[2].price, 170, "the parallel sits at toPrice + offset");
+});

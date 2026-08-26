@@ -305,10 +305,28 @@ export function registerChartbitTools(define: Definer): void {
     "chartbit_shapes",
     "Every drawing currently on the user's chart, with the ones this server created marked `ours`.\n" +
       "The LIVE view, read out of the chart widget — `chartbit_drawings` reads what is SAVED. If they " +
-      "differ, the chart has unsaved changes.",
-    { symbol: z.string().describe("IDX ticker"), headless: z.boolean().optional() },
+      "differ, the chart has unsaved changes.\n" +
+      "`kind` narrows to one annotation kind and `ours_only` to this server's drawings; a chart with " +
+      "many shapes otherwise returns a very long list. An unrecognised `kind` is an error rather than " +
+      "a filter that quietly matches everything.",
+    {
+      symbol: z.string().describe("IDX ticker"),
+      kind: z
+        .string()
+        .optional()
+        .describe("Only this kind: level | zone | trend | fib | channel | vline | marker. Omit for all."),
+      ours_only: z.boolean().optional().describe("Only the drawings this server made"),
+      headless: z.boolean().optional(),
+    },
     async (a) =>
-      runTool(() => driver.listShapes({ symbol: a.symbol as string, headless: a.headless as boolean | undefined })),
+      runTool(() =>
+        driver.listShapes({
+          symbol: a.symbol as string,
+          kind: a.kind as string | undefined,
+          oursOnly: a.ours_only as boolean | undefined,
+          headless: a.headless as boolean | undefined,
+        }),
+      ),
   );
 
   define.read(
