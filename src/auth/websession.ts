@@ -184,14 +184,30 @@ async function attachToStockbitPage(cdp: CDP): Promise<{ sessionId: string; url:
  * so that turning capture on never widens what any component can see beyond cookies it is explicitly
  * asking for.
  */
-export async function captureWebSession(cdp: CDP): Promise<WebSession | null> {
+export interface CaptureOptions {
+  /**
+   * Which cookie hosts belong to the session being captured. Defaults to Stockbit's.
+   *
+   * A test seam, and the same one `captureViaBrowserLogin`'s `isTokenUrl` sets: proving this
+   * function works end to end means driving a real browser against a local fixture, and a fixture
+   * on 127.0.0.1 is dropped by the real predicate. Overriding it here is how the capture path gets
+   * exercised without Stockbit being involved at all.
+   */
+  hostFilter?: (domain: string) => boolean;
+}
+
+export async function captureWebSession(
+  cdp: CDP,
+  options: CaptureOptions = {},
+): Promise<WebSession | null> {
+  const hostFilter = options.hostFilter ?? isStockbitCookieHost;
   let cookies: StoredCookie[] = [];
   try {
     const res = (await cdp.send("Storage.getCookies", {}, undefined, 8_000)) as {
       cookies?: Array<Record<string, unknown>>;
     };
     cookies = (res.cookies ?? [])
-      .filter((c) => isStockbitCookieHost(String(c.domain ?? "")))
+      .filter((c) => hostFilter(String(c.domain ?? "")))
       .map((c) => ({
         name: String(c.name ?? ""),
         value: String(c.value ?? ""),
@@ -397,10 +413,12 @@ export const CREDENTIAL_COOKIE = "credentialStorage";
  * in principle find a `refresh`-keyed value somewhere else in it. The explicit path says which field
  * this project means; the fallback survives the envelope moving, which it has done before.
  */
-export function readCredentialStorage(session: WebSession): string | null {
-  const cookie = session.cookies.find(
-    (c) => c.name === CREDENTIAL_COOKIE && isStockbitCookieHost(c.domain),
-  );
+export function readCredentialStorage(
+  session: WebSession,
+  options: CaptureOptions = {},
+): string | null {
+  const hostFilter = options.hostFilter ?? isStockbitCookieHost;
+  const cookie = session.cookies.find((c) => c.name === CREDENTIAL_COOKIE && hostFilter(c.domain));
   if (!cookie?.value) return null;
 
   let text = cookie.value;

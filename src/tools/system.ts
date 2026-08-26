@@ -108,9 +108,16 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "progress.\n" +
       "The captured token goes straight to the keychain (or the encrypted file store off macOS). It " +
       "is never returned here and never shown to you.\n" +
+      "If the browser is ALREADY signed in to Stockbit, it no longer waits fifteen minutes for a " +
+      "form that will never appear: it reads the credential out of the browser's own session and " +
+      "finishes in seconds, and if there is nothing usable there it signs that profile out and " +
+      "re-opens the login page.\n" +
+      "`switch_account: true` is for signing in as a DIFFERENT account — it clears the browser's " +
+      "Stockbit session first and never reuses what was there. Ask the user before using it; it " +
+      "signs them out of Stockbit in that browser profile.\n" +
       "Refuses when STOCKBIT_NO_BROWSER is set (to anything but 0/false/no/off), and names the "
       + "terminal command instead. It also refuses " +
-      "if a session is already stored, unless `force: true`.\n" +
+      "if a session is already stored, unless `force: true` (which `switch_account` implies).\n" +
       "This does NOT log in to the trading account: that needs a 6-digit PIN typed at the user's own " +
       "terminal via `stockbit-auth trading-login`, and no tool here accepts a PIN.",
     {
@@ -119,9 +126,28 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       fresh_profile: z
         .boolean()
         .optional()
-        .describe("Use a throwaway browser profile instead of the saved one. For a stuck login."),
+        .describe(
+          "Use a throwaway browser profile instead of the saved one — nothing carried over, so the " +
+            "user re-enters password and OTP. For a profile that is corrupt or held open by another " +
+            "process. To sign in as a different account, use switch_account instead.",
+        ),
+      switch_account: z
+        .boolean()
+        .optional()
+        .describe(
+          "Sign the current Stockbit account OUT of the browser profile first, then show a real " +
+            "login form. For logging in as someone else. Implies force.",
+        ),
     },
-    async (a) => startLogin(define, { confirm: a.confirm === true, force: a.force === true, fresh: a.fresh_profile === true }),
+    async (a) =>
+      startLogin(define, {
+        confirm: a.confirm === true,
+        // switch_account is an instruction to replace the stored session, so it cannot be blocked
+        // by "a session is already stored" — that refusal is the whole thing it is asking to undo.
+        force: a.force === true || a.switch_account === true,
+        fresh: a.fresh_profile === true,
+        switchAccount: a.switch_account === true,
+      }),
     { destructiveHint: false, idempotentHint: true, evidence: "observed" },
   );
 
@@ -163,6 +189,8 @@ interface LoginRequest {
   confirm: boolean;
   force: boolean;
   fresh: boolean;
+  /** Clear the browser's Stockbit session first, and never reuse what was there. */
+  switchAccount: boolean;
 }
 
 /** A refusal is a normal answer here, not an exception: it always says what to do instead. */
@@ -250,6 +278,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     quiet: true,
     slot: "main",
     timeoutMs,
+    switchAccount: request.switchAccount,
     ...(request.fresh ? { profileDir: "fresh" as const } : {}),
   })
     .then((result) => {
@@ -267,6 +296,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     started: true,
     browser: pinned?.browserName ?? browser,
     freshProfile: request.fresh,
+    switchedAccount: request.switchAccount,
     elicitation: elicited,
     timeoutMinutes: Math.round(timeoutMs / 60_000),
     message:

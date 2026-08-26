@@ -123,6 +123,7 @@ async function cmdLogin(argv: string[]): Promise<void> {
   logStderr("Opening a browser for a one-time Stockbit login…");
   const result = await captureViaBrowserLogin({
     profileDir: argv.includes("--fresh-profile") ? "fresh" : undefined,
+    switchAccount: argv.includes("--switch-account"),
   });
   if (!result.captured) {
     logStderr("No session captured. You can retry, or use `stockbit-auth bootstrap`.");
@@ -566,7 +567,8 @@ async function main(): Promise<void> {
           "trading-login|trading-status|trading-enable|trading-disable|trading-logout|paper-reset>",
       );
       logStderr("  login       one-time browser login, auto-captures your session (recommended)");
-      logStderr("              --fresh-profile  use a throwaway browser profile");
+      logStderr("              --fresh-profile   use a throwaway browser profile");
+      logStderr("              --switch-account  sign the current account out first, then show a real form");
       logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");

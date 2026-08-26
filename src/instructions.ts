@@ -43,6 +43,20 @@ It reports the version, which sessions exist (never the tokens), the trading mod
 clock in WIB, and the next command to run if something is missing. It answers with no session at
 all, which is the state every new user is in.
 
+LOGGING IN WHEN THE BROWSER IS ALREADY SIGNED IN
+This is the common case and it used to look like a hang. If the user is already signed in to
+Stockbit in that browser profile, the login page lands in the app rather than on a form, so there is
+no login response to capture. login now reads the credential out of the browser's own session and
+finishes in seconds; if there is nothing usable there it signs that profile out and re-opens the
+form. Neither needs anything from you.
+Two arguments, and they are not interchangeable:
+- switch_account: true signs the CURRENT account out and shows a real form. This is the one for
+  "log me in as my other account". Ask the user first — it signs them out of Stockbit in that
+  browser.
+- fresh_profile: true throws the browser profile away and starts clean, so they re-enter password
+  and OTP from scratch. This is for a profile that is broken or held open, NOT for switching
+  accounts.
+
 TRADING IS OFF UNTIL THE USER TURNS IT ON
 Call trading_status to see whether it is on, and what to say if it is not. The user enables it
 themselves at a terminal with "stockbit-auth trading-enable"; nothing you can do turns it on. The

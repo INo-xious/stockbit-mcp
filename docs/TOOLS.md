@@ -37,7 +37,7 @@ Is this working, and what do I run — plus logging in and out.
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
 | `status` | read | Is this server working, and what do I run if it is not? Call this FIRST whenever anything looks wrong, and call it after logging in to confirm it took. | Observed | live |
-| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile |
+| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile, switch_account |
 | `logout` | write, destructive | Clear stored Stockbit credentials from this machine. | Observed | confirm*, scope, remove_browser_profile |
 
 ## market

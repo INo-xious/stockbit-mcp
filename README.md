@@ -412,7 +412,7 @@ Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user
 | Command | |
 |---|---|
 | `stockbit-mcp` | The MCP server. Speaks stdio; your client launches it. |
-| `stockbit-auth login [--fresh-profile]` | One-time browser login. |
+| `stockbit-auth login [--fresh-profile] [--switch-account]` | One-time browser login. `--switch-account` signs the current account out of the browser profile first, so you get a real form instead of the app. |
 | `stockbit-auth import-har` | Import a login captured in any browser. |
 | `stockbit-auth doctor` | Diagnose browsers, the token store and the capture path. |
 | `stockbit-auth bootstrap` | Paste a refresh token by hand. |

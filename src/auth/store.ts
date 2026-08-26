@@ -99,12 +99,14 @@ export function keychainWriteArgs(slot: StoreSlot = "main"): string[] {
 /**
  * The legacy form, kept only as a fallback — the token IS in `argv` here.
  *
- * Retained because `security` reads a prompted value through `readpassphrase`, which prefers
- * `/dev/tty` over stdin. Whether it falls back to the pipe depends on whether the process has a
- * controlling terminal, and that differs between an MCP server spawned by a client and the same
- * command typed at a shell. Rather than guess, `keychainWrite` tries the safe form, **reads the
- * value back to confirm it landed**, and only then keeps it — falling back here if it did not. So
- * this path is exercised when it is genuinely needed and never merely assumed.
+ * Retained because nothing here can promise how `security` reads a prompted value on a machine
+ * nobody has run this on. It reads through `readpassphrase`, and the observed behaviour on macOS 26
+ * is that it takes the value from the pipe and asks for it TWICE — but a build that instead insists
+ * on `/dev/tty` would hang, and this is the credential store, not a place to be clever and hope.
+ *
+ * So `keychainWrite` tries the safe form under a timeout, **reads the value back to confirm it
+ * landed**, and only then keeps it. This path runs when that fails, and `doctor` reports which one
+ * ran, so the answer is measured on the user's machine rather than assumed on ours.
  */
 export function keychainWriteArgsWithToken(token: string, slot: StoreSlot = "main"): string[] {
   return [...keychainWriteArgs(slot), token];
@@ -144,7 +146,11 @@ function keychainRead(slot: StoreSlot): { status: number | null; value: string |
  */
 function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
   const prompted = spawnSync("security", keychainWriteArgs(slot), {
-    input: `${token}\n`,
+    // TWICE. `security` prompts for the value and then for a retype, and it reads both from the
+    // pipe. Sending it once exits 0 and stores an EMPTY string — measured, and the single most
+    // dangerous outcome available here, because everything downstream then believes the credential
+    // was saved. It is also the reason the read-back below is not optional.
+    input: `${token}\n${token}\n`,
     stdio: ["pipe", "ignore", "ignore"],
     timeout: KEYCHAIN_WRITE_TIMEOUT_MS,
   });
@@ -184,7 +190,7 @@ export function probeKeychainWrite(): { available: boolean; method: KeychainWrit
 
   try {
     const prompted = spawnSync("security", args, {
-      input: `${value}\n`,
+      input: `${value}\n${value}\n`,
       stdio: ["pipe", "ignore", "ignore"],
       timeout: KEYCHAIN_WRITE_TIMEOUT_MS,
     });
