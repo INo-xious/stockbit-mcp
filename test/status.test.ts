@@ -12,7 +12,7 @@
  *   3. **`nextStep` is one instruction, and it is the right one.** A list of things you could try
  *      is what the error messages already were.
  */
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,7 @@ import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { collectStatus, formatStatus, loginStarted, loginFinished, resetLoginStatus } from "../src/status.ts";
 import { getStore, resetStoreCache } from "../src/auth/store.ts";
+import { settingsPath } from "../src/settings.ts";
 import { clearSessionHealth, recordRefreshFailure, recordRefreshOk } from "../src/auth/health.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
@@ -213,6 +214,45 @@ test("a token that last refreshed successfully reports ok, and stays quiet about
     clearSessionHealth();
     clearAllSlots();
   }
+});
+
+test("trading on with no trading tools registered is called out, and nextStep names the fix", async () => {
+  // The trap the default profile creates. `core` has no order-entry tools, so a user who went to
+  // the trouble of running `trading-enable --live` at their own terminal finds no order tool and
+  // NOTHING anywhere saying why — trading reports "on", the tools are simply absent, and the
+  // natural conclusion is that order entry is broken.
+  clearAllSlots();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
+  // The settings FILE, not the environment: STOCKBIT_TRADING can only lower the mode, never raise
+  // it (ADR-0008), so `paper` on an `off` file stays off.
+  writeFileSync(settingsPath(), JSON.stringify({ version: 2, trading: { mode: "paper" } }), "utf8");
+  try {
+    const report = await collectStatus({
+      profileLabel: "core",
+      profileIsDefault: true,
+      missingFamilies: ["trading", "pine", "eipo"],
+    });
+    assert.equal(report.trading.enabled, true, "trading really is on");
+    assert.ok(
+      report.checks.some((c) => c.name === "trading tools" && c.status === "warn"),
+      "and the absence of the tools must be a check of its own",
+    );
+    assert.match(report.nextStep, /STOCKBIT_TOOLS=core,trading/, "nextStep must give the exact value to set");
+  } finally {
+    rmSync(settingsPath(), { force: true });
+    clearAllSlots();
+  }
+});
+
+test("trading off with no trading tools registered is not worth mentioning", async () => {
+  // Nothing is wrong: order entry is off, and the tools for it are absent. Warning here would train
+  // people to ignore the warning that matters.
+  clearAllSlots();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400));
+  const report = await collectStatus({ profileLabel: "core", profileIsDefault: true, missingFamilies: ["trading"] });
+  assert.equal(report.trading.mode, "off");
+  assert.equal(report.checks.some((c) => c.name === "trading tools"), false);
+  clearAllSlots();
 });
 
 test("an expired token says so rather than reporting a negative countdown as health", async () => {

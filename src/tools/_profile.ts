@@ -158,3 +158,35 @@ export function parseToolProfile(raw: string | undefined, knownTools?: ReadonlyS
   if (!families.size && !tools.size) return ALL;
   return new NamedProfile(value, families, tools);
 }
+
+/**
+ * What this server registers when `STOCKBIT_TOOLS` says nothing.
+ *
+ * `core` rather than `all`, and the reason is measured. Startup was never the problem — a built
+ * server boots, registers everything and answers `status` in about 200 ms. The cost is per TURN:
+ * `tools/list` for the full surface is 217,794 bytes, roughly 54,400 tokens, in the model's context
+ * on every single message. `core` is 69,105 bytes, roughly 17,300. That is the same server costing
+ * a third as much to talk to, for 40 tools chosen to be the questions people actually ask.
+ *
+ * This also aligns the code with the docs: the README has been telling people to put
+ * `"STOCKBIT_TOOLS": "core"` in the snippet they copy for as long as the profile has existed.
+ */
+export const DEFAULT_TOOL_PROFILE = "core";
+
+/**
+ * Resolve the profile for a server, and say whether the DEFAULT was used.
+ *
+ * `parseToolProfile` stays pure — `toolsdoc.ts` still asks it for `"all"` and means it, and
+ * `test/profile.test.ts` still tests "what does this string mean" without a default in the way.
+ * The `isDefault` flag exists because the two cases need different words: a note saying
+ * "STOCKBIT_TOOLS=core is set" when nobody set it sends a reader looking for a variable that is not
+ * there, in a config file they may not even own.
+ */
+export function resolveToolProfile(
+  raw: string | undefined,
+  knownTools?: ReadonlySet<string>,
+): { profile: ToolProfile; isDefault: boolean } {
+  const value = (raw ?? "").trim();
+  if (!value) return { profile: parseToolProfile(DEFAULT_TOOL_PROFILE, knownTools), isDefault: true };
+  return { profile: parseToolProfile(value, knownTools), isDefault: false };
+}

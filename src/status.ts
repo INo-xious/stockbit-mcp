@@ -28,6 +28,7 @@
  * off by default because `status` is the thing you call when you suspect the network.
  */
 import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
+import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
 import {
   lastEventFor,
   readHealthJournal,
@@ -138,6 +139,10 @@ export interface CollectStatusOptions {
   toolCount?: number;
   /** What the active tool profile is called. */
   profileLabel?: string;
+  /** Whether that profile is the default rather than something the user asked for. */
+  profileIsDefault?: boolean;
+  /** Families this profile kept out entirely, so `status` can explain a missing tool. */
+  missingFamilies?: string[];
 }
 
 /* ------------------------------- login progress ------------------------------- */
@@ -286,7 +291,14 @@ function formatTime(iso: string): string {
 }
 
 /** The one thing to do next, chosen from the state rather than listed as options. */
-function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport["trading"]): string {
+function nextStepFor(
+  auth: Record<StoreSlot, SlotStatus>,
+  trading: StatusReport["trading"],
+  surface: { tradingToolsMissing: boolean; profileLabel: string } = {
+    tradingToolsMissing: false,
+    profileLabel: DEFAULT_TOOL_PROFILE,
+  },
+): string {
   // Before anything else: if the store would not answer, every branch below is reasoning from a
   // fact nobody established. "Log in again" is the one piece of advice that must not be given here.
   if (auth.main.unreadable) return auth.main.hint!;
@@ -304,6 +316,17 @@ function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport[
     return (
       'Say "log me into Stockbit" (a browser window opens — sign in there), or run ' +
       "`npx -y -p stockbit-mcp stockbit-auth login` in a terminal. Then call status again."
+    );
+  }
+  // Above the securities branch on purpose. If this server has no order tools, then telling the
+  // user to run `trading-login` is advice that leads nowhere: they would complete it and still have
+  // nothing to place an order with. The contradiction is the more urgent fact, and it is the one
+  // nothing else anywhere reports.
+  if (surface.tradingToolsMissing) {
+    return (
+      `Trading is ${trading.mode}, but this server registered no order tools — the ` +
+      `\`${surface.profileLabel}\` tool profile does not include the \`trading\` family. Set ` +
+      `STOCKBIT_TOOLS=${surface.profileLabel},trading in the client's config and restart it.`
     );
   }
   if (!auth.securities.stored) {
@@ -412,6 +435,27 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       : "Not stored. Nothing can be read until you log in.",
   });
 
+  // The trap the default profile creates, and the reason it is worth a check of its own.
+  //
+  // `core` deliberately contains no order-entry tools. So a user who went to the trouble of running
+  // `trading-enable --live` at their own terminal — a deliberate, two-step, opt-in act — finds no
+  // order tool in the server and NOTHING anywhere saying why. Trading reports "on", the tools are
+  // simply absent, and the natural conclusion is that order entry is broken.
+  const missingFamilies = new Set(options.missingFamilies ?? []);
+  const tradingToolsMissing = trading.enabled && missingFamilies.has("trading");
+  if (tradingToolsMissing) {
+    const label = options.profileLabel ?? DEFAULT_TOOL_PROFILE;
+    checks.push({
+      name: "trading tools",
+      status: "warn",
+      detail:
+        `Trading is ${trading.mode}, but the \`trading\` family is not registered, so this server ` +
+        `has no order tools at all. The \`${label}\` profile does not include them` +
+        `${options.profileIsDefault ? " and it is the default" : ""}. Set ` +
+        `STOCKBIT_TOOLS=${label},trading and restart the client.`,
+    });
+  }
+
   if (options.live) {
     try {
       await ensureFresh("main");
@@ -446,7 +490,9 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       version: VERSION,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
-      toolProfile: options.profileLabel ?? "all",
+      // `core`, not `all`: that is what a server started with no STOCKBIT_TOOLS registers. The CLI
+      // reaches here without a server at all, so this is the honest answer to "what would run".
+      toolProfile: options.profileLabel ?? DEFAULT_TOOL_PROFILE,
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
     },
     auth,
@@ -456,7 +502,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     webSession: web,
     store: { dir, backend: auth.main.backend, browserPinned },
     checks,
-    nextStep: nextStepFor(auth, trading),
+    nextStep: nextStepFor(auth, trading, { tradingToolsMissing, profileLabel: options.profileLabel ?? DEFAULT_TOOL_PROFILE }),
   };
 }
 

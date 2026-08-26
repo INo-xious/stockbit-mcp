@@ -1,21 +1,28 @@
 #!/usr/bin/env node
 /**
- * Start the built server the way a client starts it, and check that it answers.
+ * Start the BUILT binary over stdio and ask it what it registered.
  *
- * The unit tests exercise every module in isolation; none of them proves that `dist/bin/
- * stockbit-mcp.js` boots, speaks MCP over stdio, and registers the tools it is supposed to. That
- * gap is exactly where a packaging mistake lands — a bad `bin` path, a missing file in `files`, an
- * import that only resolves under `tsx` — and it is invisible until someone runs `npx stockbit-mcp`.
+ * This is the only check that runs the thing a user actually runs: the compiled entry point, over a
+ * real transport, in a child process with a throwaway store. Everything else in the suite imports
+ * TypeScript directly and would not notice a broken build, a missing `dist/` file, or an entry point
+ * that cannot start.
  *
- * Everything runs against a throwaway store: no keychain, no browser, no network. A server with no
- * session must still start and answer, because that is the state every new user is in.
+ * ## Two children, and that is the point
  *
- * Usage:
- *   node scripts/smoke.mjs [--expect-tools N] [--expect-prompts N]
+ * The server registers the `core` profile when `STOCKBIT_TOOLS` says nothing. That is the
+ * configuration almost every user gets, and until this script ran it, the only surface ever smoke
+ * -tested was `all` — the one almost nobody has. So:
  *
- * The expected counts come from `--expect-*` first, then from the header of `docs/TOOLS.md` once
- * that file is generated, then from the constants below. Guessing is not one of the options: an
- * unknown expectation is reported as unknown rather than passed.
+ *   1. **unset** — the default path. Counts come from the "default tools / default prompts" line in
+ *      `docs/TOOLS.md`, which `src/toolsdoc.ts` COMPUTES from the surface.
+ *   2. **STOCKBIT_TOOLS=all** — the full surface, from the header line of the same file.
+ *
+ * Neither count is written down here. A number in this file is a number that goes stale, and a
+ * smoke test that has to be updated by hand is one that gets updated to whatever makes it pass.
+ *
+ * Setting `STOCKBIT_TOOLS` in the environment overrides both runs with a single explicit one, so a
+ * developer can smoke a profile the way a user would configure it — but then `--expect-tools` is
+ * required, because nothing can know what an arbitrary profile should register.
  */
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,10 +33,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** What the surface is expected to hold when nothing else says otherwise. Update with each phase. */
-const FALLBACK_TOOLS = 138;
-const FALLBACK_PROMPTS = 8;
-
 function flag(name) {
   const i = process.argv.indexOf(name);
   if (i === -1) return undefined;
@@ -39,46 +42,47 @@ function flag(name) {
   return n;
 }
 
-/** `**138 tools** (114 read, 24 write) in 17 families, 8 prompts` — the generated header. */
+/**
+ * Read both sets of expected counts out of the generated reference.
+ *
+ * Anchored patterns, not loose ones. The previous `/(\d+) prompts?\b/` matched the first such string
+ * anywhere in 4 KB of prose, so any sentence mentioning a number of prompts would have silently
+ * become the expectation. These match the two sentences `toolsdoc.ts` writes, and nothing else:
+ *
+ *   **138 tools** (114 read, 24 write) in 17 families, 8 prompts.
+ *   Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**.
+ */
 function fromToolsDoc() {
   const path = join(ROOT, "docs", "TOOLS.md");
   if (!existsSync(path)) return {};
   const head = readFileSync(path, "utf8").slice(0, 4096);
-  const tools = head.match(/\*\*(\d+) tools\*\*/);
-  const prompts = head.match(/(\d+) prompts?\b/);
+  const all = head.match(/\*\*(\d+) tools\*\* \(\d+ read, \d+ write\) in \d+ families, (\d+) prompts?\./);
+  const dflt = head.match(/\*\*(\d+) default tools\*\* and \*\*(\d+) default prompts\*\*/);
   return {
-    tools: tools ? Number(tools[1]) : undefined,
-    prompts: prompts ? Number(prompts[1]) : undefined,
+    allTools: all ? Number(all[1]) : undefined,
+    allPrompts: all ? Number(all[2]) : undefined,
+    defaultTools: dflt ? Number(dflt[1]) : undefined,
+    defaultPrompts: dflt ? Number(dflt[2]) : undefined,
   };
 }
 
-const failures = [];
-function check(ok, message) {
-  if (!ok) failures.push(message);
-  return ok;
-}
-
-async function main() {
-  const doc = fromToolsDoc();
-  // A profile changes the count, and `docs/TOOLS.md` only ever describes the full surface, so an
-  // explicit --expect-tools is required once STOCKBIT_TOOLS is set to anything but `all`.
-  const profile = (process.env.STOCKBIT_TOOLS ?? "").trim().toLowerCase();
-  const profiled = profile !== "" && profile !== "all";
-  const explicit = flag("--expect-tools");
-  if (profiled && explicit === undefined) {
-    console.error(
-      `smoke FAILED — STOCKBIT_TOOLS=${process.env.STOCKBIT_TOOLS} filters the surface, so pass ` +
-        "--expect-tools N with the count that profile should register.",
-    );
-    process.exit(1);
-  }
-  const expectTools = explicit ?? doc.tools ?? FALLBACK_TOOLS;
-  const expectPrompts = flag("--expect-prompts") ?? doc.prompts ?? FALLBACK_PROMPTS;
+/**
+ * Start the built server with `env`, and check what it registered.
+ *
+ * Returns the failures it found, prefixed with which run they came from — two runs producing the
+ * same bare message is exactly the case where a prefix is the difference between a diagnosis and a
+ * second guess.
+ */
+async function runOnce({ label, profileEnv, expectTools, expectPrompts }) {
+  const failures = [];
+  const check = (ok, message) => {
+    if (!ok) failures.push(`[${label}] ${message}`);
+    return ok;
+  };
 
   const entry = join(ROOT, "dist", "bin", "stockbit-mcp.js");
   if (!existsSync(entry)) {
-    console.error(`smoke FAILED — ${entry} is missing. Run \`npm run build\` first.`);
-    process.exit(1);
+    return { failures: [`[${label}] ${entry} is missing. Run \`npm run build\` first.`], toolNames: [], promptNames: [] };
   }
 
   const store = mkdtempSync(join(tmpdir(), "stockbit-smoke-"));
@@ -92,9 +96,7 @@ async function main() {
       STOCKBIT_FORCE_FILE_STORE: "1",
       STOCKBIT_STORE_DIR: store,
       STOCKBIT_NO_BROWSER: "1",
-      // Forwarded so a profile can be smoke-tested the way a user would configure it:
-      //   STOCKBIT_TOOLS=core npm run smoke -- --expect-tools 39
-      ...(process.env.STOCKBIT_TOOLS ? { STOCKBIT_TOOLS: process.env.STOCKBIT_TOOLS } : {}),
+      ...(profileEnv === undefined ? {} : { STOCKBIT_TOOLS: profileEnv }),
       ...(process.env.STOCKBIT_TRADING ? { STOCKBIT_TRADING: process.env.STOCKBIT_TRADING } : {}),
     },
     stderr: "pipe",
@@ -116,24 +118,19 @@ async function main() {
 
     const { tools } = await client.listTools();
     toolNames = tools.map((t) => t.name).sort();
-    check(
-      tools.length === expectTools,
-      `tools/list returned ${tools.length}, expected ${expectTools}`,
-    );
+    check(tools.length === expectTools, `tools/list returned ${tools.length}, expected ${expectTools}`);
 
     // `prompts/list` is an error, not an empty list, until the server declares the capability.
     if (client.getServerCapabilities()?.prompts) {
       const { prompts } = await client.listPrompts();
       promptNames = prompts.map((p) => p.name).sort();
-      check(
-        prompts.length === expectPrompts,
-        `prompts/list returned ${prompts.length}, expected ${expectPrompts}`,
-      );
+      check(prompts.length === expectPrompts, `prompts/list returned ${prompts.length}, expected ${expectPrompts}`);
     } else {
       check(expectPrompts === 0, `expected ${expectPrompts} prompts but the server declares no prompt capability`);
     }
 
     // The one call every new user makes. It must answer with an empty store and say what to run.
+    // `status` is in every profile — the `system` family is never filtered — so this runs on both.
     if (toolNames.includes("status")) {
       const res = await client.callTool({ name: "status", arguments: {} });
       check(res.isError !== true, `status returned isError — ${JSON.stringify(res.content).slice(0, 400)}`);
@@ -146,22 +143,72 @@ async function main() {
         "status did not name `stockbit-auth login` as the next step on an empty store",
       );
       check(!/\beyJ[A-Za-z0-9_-]{10,}/.test(text), "status leaked something JWT-shaped");
+    } else {
+      check(false, "status was not registered — the system family must never be filtered out");
     }
   } catch (err) {
-    failures.push(`transport or protocol error: ${err?.message ?? err}`);
+    failures.push(`[${label}] transport or protocol error: ${err?.message ?? err}`);
   } finally {
     await client.close().catch(() => {});
     rmSync(store, { recursive: true, force: true });
   }
 
+  return { failures, toolNames, promptNames };
+}
+
+async function main() {
+  const doc = fromToolsDoc();
+
+  // An explicit STOCKBIT_TOOLS in the environment means "smoke exactly this", and nothing can know
+  // what an arbitrary profile should register — so the count has to be supplied.
+  const override = (process.env.STOCKBIT_TOOLS ?? "").trim();
+  let runs;
+  if (override) {
+    const expectTools = flag("--expect-tools");
+    if (expectTools === undefined) {
+      console.error(
+        `smoke FAILED — STOCKBIT_TOOLS=${override} filters the surface, so pass --expect-tools N ` +
+          "with the count that profile should register.",
+      );
+      process.exit(1);
+    }
+    runs = [
+      {
+        label: override,
+        profileEnv: override,
+        expectTools,
+        expectPrompts: flag("--expect-prompts") ?? 0,
+      },
+    ];
+  } else {
+    if (doc.defaultTools === undefined || doc.allTools === undefined) {
+      console.error(
+        "smoke FAILED — could not read the expected counts out of docs/TOOLS.md. " +
+          "Run `npm run docs:tools` first.",
+      );
+      process.exit(1);
+    }
+    runs = [
+      // The default FIRST: it is the configuration almost every user gets, and a failure there
+      // matters more than a failure in the one almost nobody has.
+      { label: "default", profileEnv: undefined, expectTools: doc.defaultTools, expectPrompts: doc.defaultPrompts ?? 0 },
+      { label: "all", profileEnv: "all", expectTools: doc.allTools, expectPrompts: doc.allPrompts ?? 0 },
+    ];
+  }
+
+  const failures = [];
+  const summary = [];
+  for (const run of runs) {
+    const result = await runOnce(run);
+    failures.push(...result.failures);
+    summary.push(`${run.label}: ${result.toolNames.length} tools, ${result.promptNames.length} prompts`);
+  }
+
   if (failures.length) {
-    console.error("smoke FAILED\n" + failures.map((f) => `  ${f}`).join("\n"));
+    console.error(`smoke FAILED\n${failures.map((f) => `  ${f}`).join("\n")}`);
     process.exit(1);
   }
-  console.log(
-    `smoke OK — ${toolNames.length} tools, ${promptNames.length} prompts, ` +
-      `initialize and ${toolNames.includes("status") ? "status" : "tools/list"} answered on an empty store.`,
-  );
+  console.log(`smoke OK — ${summary.join(" · ")}; initialize and status answered on an empty store.`);
 }
 
 main().catch((err) => {

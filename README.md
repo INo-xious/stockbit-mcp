@@ -174,18 +174,17 @@ On Windows, npx needs a shell:
 **Claude Desktop Extension** — download `stockbit-mcp-1.0.0.mcpb` from
 [Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
-**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools, so use the `core` profile:
+**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools; the default `core` profile is exactly
+40, so nothing extra is needed:
 
 ```json
-{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"],
-  "env": { "STOCKBIT_TOOLS": "core" } } } }
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
 ```
 
-**VS Code** — `.vscode/mcp.json`. Its cap is 128 and there are 138 tools:
+**VS Code** — `.vscode/mcp.json`. Its cap is 128; the default fits with room to spare:
 
 ```json
-{ "servers": { "stockbit": { "type": "stdio", "command": "npx", "args": ["-y", "stockbit-mcp"],
-  "env": { "STOCKBIT_TOOLS": "core" } } } }
+{ "servers": { "stockbit": { "type": "stdio", "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
 ```
 
 **Windsurf** — `~/.codeium/windsurf/mcp_config.json`, same shape as Claude Desktop.
@@ -370,13 +369,16 @@ not backtest against it and believe the number.
 
 ## Tool profiles and context management
 
-Every client pays for the whole tool list in the model's context on every turn. `STOCKBIT_TOOLS`
-trims it:
+Every client pays for the whole tool list in the model's context on every turn — and that is a
+**per-turn** cost, not a startup one. The full surface is 217,794 bytes of `tools/list`, roughly
+54,400 tokens, on every single message; `core` is 69,105 bytes, roughly 17,300.
+
+**`core` is the default.** `STOCKBIT_TOOLS` changes it:
 
 | Value | Effect |
 |---|---|
-| unset or `all` | All 138. |
-| `core` | 40 tools — the questions people actually ask. Fits Cursor's cap. No order writes. |
+| unset — **the default** | `core`: 40 tools and 6 prompts. The questions people actually ask. Fits Cursor's cap. No order writes. |
+| `all` | All 138. Roughly 54,400 tokens of tool schemas per turn, against ~17,300 for `core`. |
 | `market,bandarmology` | Those families only. |
 | `core,trading` | Core plus order entry. |
 | `quote,analyze` | Individual tools, mixed freely with families. |
@@ -450,7 +452,7 @@ is written outside it.
 
 | Variable | Effect |
 |---|---|
-| `STOCKBIT_TOOLS` | `all` (default), `core`, or a comma-separated list of families and tool names. |
+| `STOCKBIT_TOOLS` | `core` (**the default**), `all`, or a comma-separated list of families and tool names. |
 | `STOCKBIT_STORE_DIR` | Where everything on disk lives. Default `~/.stockbit`. |
 | `STOCKBIT_TRADING` | `off` forces off; `paper` lowers `live` to paper. It can only lower the mode. |
 | `STOCKBIT_BROWSER` | Absolute path to the Chromium binary used for login. |
@@ -474,7 +476,7 @@ is written outside it.
 | A blank white Chartbit page | You are signed out in that browser. |
 | `broker_distribution` errors | Stockbit's Rp 10,000,000 balance gate. |
 | Empty movers | Weekend or a holiday. Check `market_session`. |
-| VS Code or Cursor: "too many tools" | Set `STOCKBIT_TOOLS=core`. |
+| VS Code or Cursor: "too many tools" | You have set `STOCKBIT_TOOLS=all`. Remove it — the default is `core`, which is 40. |
 | Windows: `npx` ENOENT | Use `"command": "cmd", "args": ["/c", "npx", …]`. |
 | Something else | `stockbit-auth doctor`, then `stockbit-auth status --json` — both are safe to paste. |
 

@@ -25,7 +25,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BUILTIN_WORKFLOWS } from "./workflows/builtin.js";
 import type { Workflow } from "./workflows/run.js";
-import type { ToolProfile } from "./tools/_define.js";
+import type { Surface } from "./tools/surface.js";
 
 /**
  * How to read each workflow's output back to a person.
@@ -87,15 +87,38 @@ export function promptText(workflow: Workflow, args: Record<string, string | und
 }
 
 /**
- * Register one prompt per built-in workflow.
+/**
+ * The built-in workflows a given surface can actually run, in order.
  *
- * Skipped entirely when a profile has filtered out the `workflows` family: a prompt whose first
- * instruction is to call a tool that is not registered would be a menu entry that always fails.
+ * Two reasons a prompt is left out, and they are the same reason twice:
+ *
+ *   - `workflow_run` itself is filtered out, so the prompt's FIRST instruction names a tool that is
+ *     not registered;
+ *   - the recipe names a tool that is filtered out, so the prompt half-runs and then fails partway.
+ *
+ * The second one bites under the default profile: `workflow_run` is in `core`, but `pine_script` is
+ * not — so `pine_handoff` and `strategy_check` would appear in every client's prompt menu and
+ * always fail at their last step. The code already made this argument about `workflow_run`; a
+ * recipe's own steps deserve it too.
+ *
+ * Exported so `toolsdoc.ts` can state the default profile's prompt count from the same computation
+ * rather than from a number someone remembered to update.
  */
-export function registerWorkflowPrompts(server: McpServer, profile?: ToolProfile): number {
-  if (profile && !profile.allows("workflows", "workflow_run")) return 0;
+export function promptsForSurface(surface: Surface): Workflow[] {
+  const skipped = new Set(surface.skipped);
+  if (skipped.has("workflow_run")) return [];
+  return BUILTIN_WORKFLOWS.filter((w) => !w.steps.some((step) => skipped.has(step.tool)));
+}
 
-  for (const workflow of BUILTIN_WORKFLOWS) {
+/**
+ * Register one prompt per built-in workflow the surface can actually run.
+ *
+ * Returns how many were registered — which is no longer always `BUILTIN_WORKFLOWS.length`.
+ */
+export function registerWorkflowPrompts(server: McpServer, surface: Surface): number {
+  const workflows = promptsForSurface(surface);
+
+  for (const workflow of workflows) {
     const message = (args: Record<string, string | undefined>) => ({
       messages: [
         {
@@ -133,7 +156,7 @@ export function registerWorkflowPrompts(server: McpServer, profile?: ToolProfile
     );
   }
 
-  return BUILTIN_WORKFLOWS.length;
+  return workflows.length;
 }
 
 /** `deep_dive` reads as a slug in a menu; "Deep dive" reads as a thing to click. */

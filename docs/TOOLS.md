@@ -4,6 +4,8 @@
 
 **138 tools** (114 read, 24 write) in 17 families, 8 prompts.
 
+Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**. Everything listed below needs `STOCKBIT_TOOLS=all`.
+
 Every tool carries an **evidence** word — Observed, Read-back or Projected. They are defined in [`CONTEXT.md`](../CONTEXT.md) and the current state of each family is in [`VERIFICATION.md`](VERIFICATION.md). *Projected* does not mean broken; it means nobody has checked it, and the code is written so an unchecked guess fails loudly rather than quietly.
 
 `*` marks a required argument. Descriptions here are the first sentence only — the full one, with the caveats that matter at call time, is what the model reads.

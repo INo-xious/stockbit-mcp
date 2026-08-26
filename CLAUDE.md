@@ -5,7 +5,8 @@ Notes for an AI assistant working on this repository. Human contributors want
 
 ## What this is
 
-An MCP server over Stockbit's private JSON API — the Indonesian exchange. 138 tools in 17 families,
+An MCP server over Stockbit's private JSON API — the Indonesian exchange. 138 tools in 17 families
+(40 of them registered by default — `STOCKBIT_TOOLS` defaults to `core`),
 three token domains, and, behind switches the account owner turns on themselves, order entry against
 a real brokerage account.
 

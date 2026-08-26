@@ -67,6 +67,8 @@ export interface SystemToolOptions {
   toolCount?: number;
   /** What the active tool profile is called. */
   profileLabel?: string;
+  /** Whether that profile is the default rather than something the user asked for. */
+  profileIsDefault?: boolean;
 }
 
 export function registerSystemTools(define: Definer, options: SystemToolOptions = {}): void {
@@ -104,6 +106,12 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
           live: a.live === true,
           toolCount: options.toolCount,
           profileLabel: options.profileLabel,
+          profileIsDefault: options.profileIsDefault,
+          // Which families this profile kept out — read at CALL time, when registration is complete.
+          // `status` needs it for the trap the default profile creates: `core` has no order tools,
+          // so a user who deliberately ran `trading-enable --live` finds nothing to place an order
+          // with and no explanation anywhere.
+          missingFamilies: [...new Set(define.skipped().map((entry) => entry.family))],
         }),
       ),
   );

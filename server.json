@@ -19,7 +19,7 @@
       "environmentVariables": [
         {
           "name": "STOCKBIT_TOOLS",
-          "description": "all (default) | core | a comma-separated list of families or tool names",
+          "description": "core (the default) | all | a comma-separated list of families or tool names",
           "isRequired": false,
           "isSecret": false
         },

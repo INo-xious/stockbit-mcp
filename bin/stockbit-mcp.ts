@@ -4,13 +4,17 @@
  *
  * The only thing this decides is which tools to register. `STOCKBIT_TOOLS` is parsed here rather
  * than inside the server so a bad value can **stop the process**: a typo that quietly fell back to
- * registering all 138 tools would blow a client's tool cap and look like a bug in the client. A
+ * registering every tool would blow a client's tool cap and look like a bug in the client. A
  * server that refuses to start with a message naming every valid family is the kinder failure.
+ *
+ * Unset means `core`, not everything — see `DEFAULT_TOOL_PROFILE`. The full surface is not a
+ * startup cost, it is a PER-TURN one: 138 tool schemas is roughly 54,400 tokens in the model's
+ * context on every message.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "../src/server.js";
 import { describeSurface } from "../src/tools/surface.js";
-import { parseToolProfile } from "../src/tools/_profile.js";
+import { resolveToolProfile } from "../src/tools/_profile.js";
 import { logStderr } from "../src/redact.js";
 
 async function main(): Promise<void> {
@@ -18,18 +22,22 @@ async function main(): Promise<void> {
   // in a single tool name is caught the same way a typo in a family name is.
   const knownTools = new Set(describeSurface().tools.map((t) => t.name));
 
-  let profile;
+  let resolved;
   try {
-    profile = parseToolProfile(process.env.STOCKBIT_TOOLS, knownTools);
+    resolved = resolveToolProfile(process.env.STOCKBIT_TOOLS, knownTools);
   } catch (err) {
     logStderr(`stockbit-mcp: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
+  const { profile, isDefault } = resolved;
 
-  const server = createServer({ profile });
+  const server = createServer({ profile, profileIsDefault: isDefault });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logStderr(`stockbit-mcp: connected over stdio (tool profile: ${profile.label}).`);
+  logStderr(
+    `stockbit-mcp: connected over stdio (tool profile: ${profile.label}` +
+      `${isDefault ? " — the default; set STOCKBIT_TOOLS=all for every tool" : ""}).`,
+  );
 }
 
 main().catch((err) => {

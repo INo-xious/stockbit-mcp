@@ -50,6 +50,7 @@ import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
 import { makeDefiner, type Definer, type ToolHandler, type ToolProfile } from "./_define.js";
+import { DEFAULT_TOOL_PROFILE } from "./_profile.js";
 import { registerSystemTools } from "./system.js";
 import { registerStreamTools } from "./stream.js";
 import { registerCompanyTools } from "./company.js";
@@ -143,7 +144,7 @@ function foldSummary(fold: Fold) {
 
 export function registerTools(
   server: McpServer,
-  options: { profile?: ToolProfile; toolCount?: number } = {},
+  options: { profile?: ToolProfile; profileIsDefault?: boolean; toolCount?: number } = {},
 ): Definer {
   /**
    * Every read tool registered below, so `workflow_run` can call them.
@@ -180,7 +181,8 @@ export function registerTools(
   // `status`, `login`, `logout`. Registered first so they exist even when a profile has filtered
   // everything else out — they are how a user finds out why.
   registerSystemTools(define.family("system"), {
-    profileLabel: options.profile?.label ?? "all",
+    profileLabel: options.profile?.label ?? DEFAULT_TOOL_PROFILE,
+    profileIsDefault: options.profileIsDefault === true,
     ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
   });
 
@@ -1610,14 +1612,22 @@ export function registerTools(
         // Fails before running half the recipe if a step names a tool that is not registered.
         // A tool filtered out by STOCKBIT_TOOLS gets its own message: "not registered" reads like a
         // broken build, and the fix here is one environment variable rather than a bug report.
+        //
+        // Since the default profile is `core`, this message now reaches ORDINARY users who set
+        // nothing — so it must not tell them a variable they never touched is the cause. When the
+        // profile is the default it says so, and names the variable that widens it.
         const disabled = new Map(define.skipped().map((s) => [s.name, s.family]));
         const missing = workflow.steps.find((step) => disabled.has(step.tool));
         if (missing) {
+          const label = options.profile?.label ?? DEFAULT_TOOL_PROFILE;
+          const because = options.profileIsDefault
+            ? `is not in the \`${label}\` tool profile, which is the default`
+            : `is disabled by STOCKBIT_TOOLS=${label}`;
           throw new StockbitError(
             "invalid_param",
-            `Workflow ${JSON.stringify(workflow.name)} needs \`${missing.tool}\`, which is disabled by ` +
-              `STOCKBIT_TOOLS=${options.profile?.label ?? "all"} — enable the ` +
-              `\`${disabled.get(missing.tool)}\` family, or set STOCKBIT_TOOLS=all.`,
+            `Workflow ${JSON.stringify(workflow.name)} needs \`${missing.tool}\`, which ${because} — ` +
+              `set STOCKBIT_TOOLS=${label},${disabled.get(missing.tool)} to add the ` +
+              `\`${disabled.get(missing.tool)}\` family, or STOCKBIT_TOOLS=all for everything.`,
           );
         }
         validateWorkflow(workflow, new Set(handlers.keys()));
