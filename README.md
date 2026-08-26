@@ -171,7 +171,7 @@ On Windows, npx needs a shell:
 { "mcpServers": { "stockbit": { "command": "cmd", "args": ["/c", "npx", "-y", "stockbit-mcp"] } } }
 ```
 
-**Claude Desktop Extension** — download `stockbit-mcp-1.0.0.mcpb` from
+**Claude Desktop Extension** — download the latest `stockbit-mcp-*.mcpb` from
 [Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
 **Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools; the default `core` profile is exactly
