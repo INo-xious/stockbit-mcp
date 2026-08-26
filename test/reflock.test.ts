@@ -883,3 +883,51 @@ test("the warm path does not read the credential store on every request", async 
     resetSession();
   }
 });
+
+test("the warm path stays bounded when the store cannot be read at all", async () => {
+  // The same guarantee, in the branch that was exempt from it — and that branch is the expensive
+  // one, because it spends TWO subprocesses rather than one: the read that came back empty, then
+  // `readState` asking why it came back empty. Stamping the re-check only on the fingerprint match
+  // left an unreadable store re-reading on every single call, so on a Keychain that is prompting,
+  // each authenticated request blocked the event loop for two full timeouts. That is the failure
+  // the window was introduced to remove, resurrected in the branch added alongside it.
+  //
+  // The clock has to move past the window or nothing here discriminates: inside it, every call
+  // returns early whether the branch stamps or not.
+  const token = jwt(2000000000, "unreadable-warm");
+  const store = getStore();
+  store.set(token);
+  serverToken = token;
+  resetSession();
+  clearAccessCache();
+
+  await ensureFresh();
+
+  let touches = 0;
+  const realGet = store.get.bind(store);
+  const realReadState = store.readState.bind(store);
+  (store as unknown as { get: () => string | null }).get = () => {
+    touches++;
+    return null; // a locked Keychain: cannot answer
+  };
+  (store as unknown as { readState: () => string }).readState = () => {
+    touches++;
+    return "unavailable";
+  };
+  const realNow = Date.now;
+  Date.now = () => realNow.call(Date) + 31_000; // one step past CREDENTIAL_RECHECK_MS
+  try {
+    for (let i = 0; i < 20; i++) await ensureFresh();
+    assert.ok(
+      touches <= 2,
+      `twenty warm calls on an unreadable store must not mean forty store touches (saw ${touches})`,
+    );
+  } finally {
+    Date.now = realNow;
+    (store as unknown as { get: unknown }).get = realGet;
+    (store as unknown as { readState: unknown }).readState = realReadState;
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});

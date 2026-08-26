@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireDirLock } from "../src/util/dirlock.ts";
+import { acquireDirLock, releaseDecision } from "../src/util/dirlock.ts";
 
 const DIR = mkdtempSync(join(tmpdir(), "stockbit-dirlock-test-"));
 const opts = { staleMs: 30_000, timeoutMs: 300, pollMs: 20 };
@@ -119,5 +119,48 @@ test("a late release does not remove a lock whose owner file has not been writte
   a!(); // A's late release lands in that window.
   assert.equal(existsSync(path), true, "A must not delete a lock it cannot prove is not B's");
 
+  // B's own release is a no-op here too, and that is correct rather than a second bug: the test
+  // deleted B's owner file, so B is in the same position A was — holding a directory it cannot
+  // prove is still its own. Asserted so the sequence ends with a claim instead of trailing off.
   b!();
+  assert.equal(existsSync(path), true, "with its token deleted out from under it, B cannot prove ownership either");
+});
+
+test("a holder whose owner file could not be written can still release its own lock", () => {
+  // The defect the previous fix introduced, in the branch the previous fix added.
+  //
+  // Refusing to remove a directory whose owner token is unreadable is right for a LATE release —
+  // the token is missing because someone else is mid-acquisition. But it also caught the CURRENT
+  // holder, whose own `writeFileSync(owner)` can fail for ordinary reasons (ENOSPC, EROFS, a
+  // directory mode that does not permit it), and that holder is the one caller that must always be
+  // able to remove this directory. It could not, ever: the lock leaked, every other process waited
+  // out the staleness threshold, and then refreshed UNLOCKED — the double rotation this module
+  // exists to prevent.
+  //
+  // Against the decision function rather than the filesystem, because making `writeFileSync` fail
+  // portably is not possible and this suite has no skips.
+  assert.equal(
+    releaseDecision({ owner: "a", ownerWritten: false, readOwner: null, dirExists: true }),
+    true,
+    "our write failed, so the missing token is ours and we must be able to release",
+  );
+
+  // Without giving back the case that fix was for. Our token DID land and is gone now, so the
+  // directory belongs to a holder inside its own mkdir-then-write window.
+  assert.equal(
+    releaseDecision({ owner: "a", ownerWritten: true, readOwner: null, dirExists: true }),
+    false,
+    "a late release must not delete a lock another holder just legitimately acquired",
+  );
+
+  // The two ordinary cases.
+  assert.equal(releaseDecision({ owner: "a", ownerWritten: true, readOwner: "a", dirExists: true }), true);
+  assert.equal(
+    releaseDecision({ owner: "a", ownerWritten: true, readOwner: "b", dirExists: true }),
+    false,
+    "we were broken as stale; that directory belongs to whoever replaced us",
+  );
+
+  // And removing something that is not there costs nothing.
+  assert.equal(releaseDecision({ owner: "a", ownerWritten: true, readOwner: null, dirExists: false }), true);
 });

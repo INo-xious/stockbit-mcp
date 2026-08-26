@@ -7,7 +7,12 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-test-"));
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getStore, keychainWriteArgs, keychainWriteArgsWithToken } from "../src/auth/store.ts";
+import { getStore, keychainWriteArgs, keychainWriteArgsWithToken, keychainWriteDecision } from "../src/auth/store.ts";
+import {
+  refreshLockTimeoutMsForBackend,
+  staleMsForBackend,
+  worstCaseHoldMsFor,
+} from "../src/auth/reflock.ts";
 import { parseRefresh, ensureFresh, resetSession, decodeJwt } from "../src/auth/session.ts";
 import { buildUrl } from "../src/http/transport.ts";
 
@@ -234,4 +239,62 @@ test("refresh persists a ROTATED refresh token (or we lock ourselves out)", asyn
 test("decodeJwt reads the payload", () => {
   assert.equal(decodeJwt(jwt(42))["exp"], 42);
   assert.deepEqual(decodeJwt("not-a-jwt"), {});
+});
+
+
+test("a Keychain write that was KILLED never falls back to putting the token in argv", () => {
+  // The regression this exists to prevent, twice over.
+  //
+  // `keychainWriteArgsWithToken` spawns `security ... -w <the refresh token>`, where `ps` shows the
+  // credential to every process running as this user. Moving the value to stdin was the whole point
+  // of that pair of functions -- and both times the guard was written it covered one of the two
+  // spawns that can fail to answer and not the other. On a locked Keychain it is the WRITE that
+  // raises the unlock dialog first, so the read-back is never even reached; a child killed by the
+  // timeout reports `{ status: null }`, and treating that like a refusal walked straight into the
+  // fallback. It also bought nothing -- the argv spawn meets the same dialog and fails too, so the
+  // only lasting effect was the credential in `ps`.
+  assert.equal(keychainWriteDecision(null, null), "fail", "a killed write must not reach argv");
+
+  // The one case the fallback is for: `security` ran, answered, and refused -- which is what a
+  // build that insists on reading the value from /dev/tty rather than a pipe looks like.
+  assert.equal(keychainWriteDecision(1, null), "argv");
+
+  // And the read-back half of the same rule.
+  assert.equal(keychainWriteDecision(0, { matched: true, status: 0 }), "stdin");
+  assert.equal(
+    keychainWriteDecision(0, { matched: false, status: null }),
+    "stdin-unverified",
+    "a read that could not answer is not a read that said no",
+  );
+  assert.equal(keychainWriteDecision(0, { matched: false, status: 0 }), "argv", "read back a different value");
+  assert.equal(keychainWriteDecision(0, { matched: false, status: 44 }), "argv", "genuinely not there");
+});
+
+test("the Keychain lock allowance is asserted on both backends, from an offline test", () => {
+  // It was not, and the comment claiming it was made that harder to notice. Every test in this repo
+  // sets STOCKBIT_FORCE_FILE_STORE=1 before its imports -- it has to, the suite is offline -- so
+  // `getStore().backend` is never "keychain" under test and the entire Keychain branch was dead
+  // code as far as the suite was concerned. The multiplier could be doubled, or deleted, and the
+  // whole suite stayed green.
+  //
+  // Literals, deliberately. A test that recomputes the formula agrees with the constant rather than
+  // with what the lock actually holds.
+  assert.equal(staleMsForBackend("file"), 50_000);
+  assert.equal(refreshLockTimeoutMsForBackend("file"), 55_000);
+  assert.equal(staleMsForBackend("keychain"), 86_000);
+  assert.equal(refreshLockTimeoutMsForBackend("keychain"), 91_000);
+
+  // The ordering is the property; the numbers are how it is currently met. A holder must be able to
+  // finish before it is judged stale, and a waiter must outlast the staleness threshold or it can
+  // never break the lock a crashed process left behind.
+  for (const backend of ["file", "keychain"] as const) {
+    assert.ok(
+      worstCaseHoldMsFor(backend) < staleMsForBackend(backend),
+      backend + ": a healthy holder must not be broken as stale",
+    );
+    assert.ok(
+      staleMsForBackend(backend) < refreshLockTimeoutMsForBackend(backend),
+      backend + ": a waiter that gives up before the stale threshold can never break a dead lock",
+    );
+  }
 });

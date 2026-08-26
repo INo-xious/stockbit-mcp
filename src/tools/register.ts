@@ -1632,9 +1632,16 @@ export function registerTools(
           const offered = BUILTIN_WORKFLOWS.filter(
             (w) => !w.steps.some((step) => define.skippedNames().includes(step.tool)),
           );
+          // Under a profile that filters a step out of every recipe (STOCKBIT_TOOLS=workflows is
+          // the real one — all eight need tools it does not register) the list is empty, and
+          // "Available: " with nothing after it reads as a truncated message rather than an answer.
+          // `workflow_list` says so in a `note`; say it here too.
           throw new StockbitError(
             "invalid_param",
-            `No workflow named ${JSON.stringify(a.name)}. Available: ${offered.map((w) => w.name).join(", ")}`,
+            offered.length
+              ? `No workflow named ${JSON.stringify(a.name)}. Available: ${offered.map((w) => w.name).join(", ")}`
+              : `No workflow named ${JSON.stringify(a.name)}, and this server's tool profile filters out a tool ` +
+                `every built-in recipe needs, so none can run here. Setting STOCKBIT_TOOLS=all registers everything.`,
           );
         }
         // Fails before running half the recipe if a step names a tool that is not registered.

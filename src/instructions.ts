@@ -60,8 +60,11 @@ export function buildInstructions(surface: Surface): string {
         surface.profileIsDefault
           ? `This server registers the \`${surface.profileLabel}\` tool profile, which is the DEFAULT — ` +
             `nobody had to set anything. ${surface.skipped.length} tools are therefore not registered, ` +
-            "because 138 tool schemas cost roughly 54,400 tokens of context on every turn and most " +
-            "conversations need forty of them. If a tool you expect is missing, that is why: setting " +
+            // Counted, not written down. This module's whole argument is that a hand-written
+            // count is a claim with an expiry date; a literal 138 here was exactly that mistake,
+            // inside the sentence making the point.
+            `because all ${surface.tools.length + surface.skipped.length} tool schemas cost far more context on every turn than a ` +
+            `conversation needs, and this profile is ${surface.tools.length} of them. If a tool you expect is missing, that is why: setting ` +
             "STOCKBIT_TOOLS=all in the client's config registers everything, and " +
             `STOCKBIT_TOOLS=${surface.profileLabel},<family> adds one family.`
           : `This server is running with STOCKBIT_TOOLS=${surface.profileLabel}, so ${surface.skipped.length} ` +
@@ -72,12 +75,29 @@ export function buildInstructions(surface: Surface): string {
 
   // The order protocol, and the projection warning, are about tools that may not be here.
   //
-  // Under the default profile none of the four order tools exist, so the two-step protocol below
+  // Under the default profile none of the order tools exist, so the two-step protocol below
   // describes a thing the model cannot do. Leaving it in is not harmless padding: it teaches the
   // model to offer order entry, and the failure lands after the user has said yes to something.
-  const orderBlock = has("order_preview")
+  //
+  // But it is gated on the WHOLE set, not on `order_preview` alone. e-IPO subscription is order
+  // entry — `eipo_order` is on the write list fifteen lines below, and it uses this exact ticket /
+  // confirm / read-`outcome` protocol — so keying off the equities preview tool got both halves
+  // wrong at once under `STOCKBIT_TOOLS=eipo`: it suppressed the protocol for a tool that needs it,
+  // and then asserted "there is no way to place an order from here" while a tool that places one
+  // was registered. A false negative about order entry is the most expensive sentence on this page.
+  const ORDER_ENTRY_TOOLS = [
+    "order_preview",
+    "order_buy",
+    "order_sell",
+    "order_amend",
+    "order_cancel",
+    "eipo_order_preview",
+    "eipo_order",
+  ];
+  const previewTools = ["order_preview", "eipo_order_preview"].filter(has);
+  const orderBlock = ORDER_ENTRY_TOOLS.some(has)
     ? `PLACING AN ORDER IS TWO STEPS, ALWAYS
-1. order_preview builds a ticket: the price, the lots, the commission, the net, today's band, and
+1. ${previewTools.length ? previewTools.join(" / ") : "The preview tool"} builds a ticket: the price, the lots, the commission, the net, today's band, and
    every check. Relay its "summary" to the user VERBATIM and ask them, in words.
 2. Only after they agree, call the matching write tool with that ticket id and confirm: true. The
    write tools take no price and no quantity, so what reaches the exchange is exactly what the user
@@ -87,8 +107,9 @@ seen there. Anything else means the state is uncertain: relay "message" and DO N
 is how one intention becomes two orders.
 `
     : `ORDER ENTRY IS NOT REGISTERED IN THIS SERVER
-This server has no order_preview / order_buy / order_sell / order_amend / order_cancel, so there is
-no way to place, amend or cancel an order from here whatever the trading mode says. Do not offer to.
+This server has none of ${ORDER_ENTRY_TOOLS.join(" / ")}, so there is
+no way to place, amend or cancel an order — or to subscribe to an e-IPO — from here, whatever the
+trading mode says. Do not offer to.
 The trading account can still be READ if the tools above list it. Adding
 STOCKBIT_TOOLS=${surface.profileLabel},trading to the client's config and restarting it is what
 changes that, and it is the user's decision to make.

@@ -41,13 +41,19 @@ import { stockbitDir } from "../paths.js";
  */
 export type StoreState = "present" | "absent" | "unavailable";
 
+/**
+ * Which mechanism actually holds the credential. Named because `reflock.ts` sizes its timings off
+ * it and needs to reach both branches from an offline test.
+ */
+export type StoreBackend = "keychain" | "file";
+
 export interface TokenStore {
   get(): string | null;
   /** Whether a credential is there — distinguishing "no" from "could not find out". */
   readState(): StoreState;
   set(token: string): void;
   clear(): void;
-  readonly backend: "keychain" | "file";
+  readonly backend: StoreBackend;
   /** Which token this store holds. */
   readonly slot: StoreSlot;
 }
@@ -164,15 +170,62 @@ function keychainRead(slot: StoreSlot): { status: number | null; value: string |
  * With it, "did the safe form work" stops being a question anybody has to answer in the abstract:
  * it is settled per write, on the machine it matters on.
  *
- * **A read-back that could not answer is not a read-back that said no.** That distinction is the
- * whole of the second branch below, and getting it wrong is a credential leak rather than an
- * inconvenience: a Keychain prompt raised behind another window makes the read time out, and
- * falling back from there would spawn `security … -w <the refresh token>` with the credential in
- * `argv`, where `ps` shows it to every process running as this user — undoing the entire reason the
- * value moved to stdin. So the fallback fires only on a DEFINITE no: the item read back with a
- * different value, or it is genuinely not there (44). Anything else keeps the stdin result, which
- * `security` reported as successful, and says it could not be confirmed.
+ * **Nothing that merely failed to answer may send the token to `argv`.** That rule governs BOTH
+ * spawns below, and getting it wrong is a credential leak rather than an inconvenience: the argv
+ * form spawns `security … -w <the refresh token>`, where `ps` shows it to every process running as
+ * this user and the Keychain ACL is bypassed — undoing the entire reason the value moved to stdin.
+ *
+ * Two separate places can fail to answer, and an earlier version of this function only guarded one
+ * of them:
+ *
+ *   - **The read-back.** A Keychain prompt raised behind another window makes the read time out.
+ *     The fallback fires only on a DEFINITE no — the item read back with a different value, or it
+ *     is genuinely not there (44). Anything else keeps the stdin result, which `security` reported
+ *     as successful, and says it could not be confirmed.
+ *   - **The prompted write itself**, which is the one that raises the unlock dialog *first*, so on
+ *     a locked Keychain the read-back is never even reached. A killed child reports
+ *     `{ status: null, signal: "SIGTERM" }`, and treating that like a refusal fell straight through
+ *     to the argv spawn. It also bought nothing: the argv spawn meets the same dialog, is killed
+ *     the same way, and the write fails anyway — so the only lasting effect was the credential in
+ *     `ps`, twice per rotation, because `persistRotated` retries.
+ *
+ * So argv is reached only from a DEFINITE refusal: `security` ran, answered, and answered non-zero
+ * — which is what a build that insists on reading the value from `/dev/tty` rather than a pipe
+ * actually looks like, and the only case the fallback was ever for. A write that was killed, or
+ * that could not be spawned at all, throws instead. The caller retries; a lost rotation is
+ * recoverable and a leaked credential is not.
  */
+/**
+ * What to do after the prompted write, given only what the spawns reported. Pure, and exported, so
+ * the rule above is ASSERTED rather than described.
+ *
+ * That is not a stylistic preference here. The rule has now been got wrong twice — once for the
+ * read-back and once for the write — and both times the mistake was invisible to a suite that
+ * cannot spawn `security` at all (it is offline, and CI runs on Windows). A decision function that
+ * takes the two exit statuses as arguments can be checked on every platform, including the case
+ * that matters: **a killed child must never produce `argv`.**
+ *
+ * `readBack` is null when no read was attempted, which is every case where the prompted write did
+ * not exit 0.
+ */
+export function keychainWriteDecision(
+  promptedStatus: number | null,
+  readBack: { matched: boolean; status: number | null } | null,
+): "stdin" | "stdin-unverified" | "argv" | "fail" {
+  // Killed by the timeout, or never ran. NOT a refusal, and the credential does not go in `argv`
+  // on the strength of a non-answer.
+  if (promptedStatus === null) return "fail";
+  // `security` ran and refused. This is what a build that insists on /dev/tty looks like, and it
+  // is the only thing the argv fallback was ever for.
+  if (promptedStatus !== 0) return "argv";
+  if (!readBack) return "fail";
+  if (readBack.matched) return "stdin";
+  // 0 is a successful read (of a different value) and 44 is "not there". Only those two are
+  // answers; anything else is a read that could not answer, and keeps the stdin result.
+  if (readBack.status !== 0 && readBack.status !== 44) return "stdin-unverified";
+  return "argv";
+}
+
 function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
   const prompted = spawnSync("security", keychainWriteArgs(slot), {
     // TWICE. `security` prompts for the value and then for a retype, and it reads both from the
@@ -184,13 +237,13 @@ function keychainWrite(token: string, slot: StoreSlot): KeychainWriteMethod {
     timeout: KEYCHAIN_TIMEOUT_MS,
   });
 
-  if (prompted.status === 0) {
-    const back = keychainRead(slot);
-    if (back.value === token) return "stdin";
-    // `status` is 0 for a successful read, 44 for "not there", and null when the child was killed
-    // by the timeout. Only the first two are answers.
-    if (back.status !== 0 && back.status !== 44) return "stdin-unverified";
-  }
+  const back = prompted.status === 0 ? keychainRead(slot) : null;
+  const decision = keychainWriteDecision(
+    prompted.status,
+    back ? { matched: back.value === token, status: back.status } : null,
+  );
+  if (decision === "stdin" || decision === "stdin-unverified") return decision;
+  if (decision === "fail") throw new Error("Keychain write failed");
 
   const viaArgv = spawnSync("security", keychainWriteArgsWithToken(token, slot), {
     stdio: "ignore",

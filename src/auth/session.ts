@@ -307,6 +307,15 @@ const CREDENTIAL_RECHECK_MS = 30_000;
  * distinction `readState()` exists for: a locked Keychain would make this reject a valid, unexpired
  * access token this process is holding, and the user would be told "No Stockbit session stored. Run
  * login" for a session that was working a second earlier.
+ *
+ * **Every path that decides to trust the token re-arms the window, including that one.** Stamping
+ * only on the fingerprint match left the unreadable branch re-checking on EVERY call — and it is
+ * the expensive branch, because it spends two `security` subprocesses rather than one (the read
+ * that came back empty, then `readState` asking why). On a Keychain that is prompting, each of
+ * those burns the full timeout, so the cost was seconds of blocked event loop per authenticated
+ * request, unbounded: the failure the window was introduced to remove, in the branch added
+ * alongside it. Trusting the token for thirty seconds is what this branch already decided to do;
+ * the stamp only stops it paying for that decision over and over.
  */
 function mintedFromCurrentCredential(domain: TokenDomain, token: AccessToken): boolean {
   if (!token.from) return true;
@@ -316,7 +325,9 @@ function mintedFromCurrentCredential(domain: TokenDomain, token: AccessToken): b
   const refreshToken = currentRefreshToken(domain);
   if (!refreshToken) {
     // Nothing there is a mismatch; could not look is not. See the note above.
-    return getStore(DOMAINS[domain].slot).readState() === "unavailable";
+    if (getStore(DOMAINS[domain].slot).readState() !== "unavailable") return false;
+    token.checkedAt = now;
+    return true;
   }
   if (token.from !== tokenFingerprint(refreshToken)) return false;
   token.checkedAt = now;

@@ -38,7 +38,7 @@
  * restores the whole snapshot including the dead entry, whose fingerprint still matches and whose
  * expiry is still in the future. The window is milliseconds and needs a cross-domain refresh in
  * another process, but it is real. `session.ts` closes it from the side that matters:
- * `forceRefresh` refuses the next cache hit outright (`DomainState.skipCacheOnce`) rather than
+ * `forceRefresh` refuses the next cache hit outright (`DomainState.forcedRefreshes`) rather than
  * trusting the file it just cleared.
  *
  * **Every entry is bound to the refresh token it was minted from**, by fingerprint. Without that,

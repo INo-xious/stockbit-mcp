@@ -52,6 +52,41 @@ function lockAge(path: string): number | null {
  * Returns a release function, or `null` when the lock could not be taken. A null return is a fact,
  * not an error: see the module note on why the two existing callers treat it differently.
  */
+/**
+ * Whether a release may remove the lock directory. Pure, and exported, because the interesting case
+ * cannot be reached from a cross-platform test otherwise: it needs `writeFileSync` to fail, and the
+ * only portable ways to arrange that are not portable at all.
+ *
+ * Four cases, and the last two are the ones that have been got wrong:
+ *
+ *   - the token reads back as ours     -> remove; the ordinary path
+ *   - it reads back as someone else's  -> leave it; we were broken as stale and that directory
+ *                                        belongs to whoever replaced us
+ *   - no token, and OUR write landed   -> leave it. This is the window between another holder's
+ *                                        `mkdir` and its write, and removing then takes a lock that
+ *                                        was just legitimately acquired. (Unless the directory is
+ *                                        gone entirely, in which case removing costs nothing.)
+ *   - no token, and our write FAILED   -> remove. The absence is most likely our own, and we are
+ *                                        the one caller that must always be able to release this.
+ *
+ * That last line is a judgement between two unlikely things, and it is worth saying which way it
+ * goes. Answering "not ours" leaks the lock deterministically every time an owner write fails
+ * (ENOSPC, EROFS, a directory mode that does not permit it) — and a leaked lock is not free: every
+ * other process waits out the staleness threshold and then refreshes UNLOCKED, which is the double
+ * rotation this module exists to prevent. Answering "ours" can only misfire if our write failed AND
+ * we were broken as stale AND the replacement is inside its own sub-millisecond mkdir->write
+ * window. A certain fault beats a compound improbable one.
+ */
+export function releaseDecision(o: {
+  owner: string;
+  ownerWritten: boolean;
+  readOwner: string | null;
+  dirExists: boolean;
+}): boolean {
+  if (o.readOwner !== null) return o.readOwner === o.owner;
+  return o.ownerWritten ? !o.dirExists : true;
+}
+
 export async function acquireDirLock(
   path: string,
   { staleMs, timeoutMs, pollMs = 120 }: DirLockOptions,
@@ -83,34 +118,36 @@ export async function acquireDirLock(
       // A pid alone would not do: pids are reused, and two runs of the same script can share one.
       const owner = `${process.pid}.${randomBytes(8).toString("hex")}`;
       const ownerFile = join(path, "owner");
+      // Whether the token actually landed, because the release below cannot work it out afterwards
+      // and gets the opposite answer if it guesses. A write here can fail for ordinary reasons —
+      // ENOSPC, EROFS, a directory mode that does not permit it — and without this flag such a
+      // holder could never remove its own lock again.
+      let ownerWritten = false;
       try {
         writeFileSync(ownerFile, owner);
+        ownerWritten = true;
       } catch {
-        /* best effort; the release below falls back to removing only if it cannot tell */
+        /* recorded, not ignored; see `ownerWritten` in the release below */
       }
       let released = false;
       return () => {
         if (released) return;
         released = true;
         try {
-          // Three cases, and the middle one is the reason this is not a one-liner.
-          //
-          //   - the token reads back as ours          -> remove; this is the ordinary path
-          //   - it reads back as someone else's       -> leave it; we were broken as stale and that
-          //                                              directory belongs to whoever replaced us
-          //   - there is no token but the directory   -> ALSO leave it. That is the window between
-          //     is there                                 another holder's `mkdir` and its write,
-          //                                              and removing then takes a lock that was
-          //                                              just legitimately acquired.
-          //
-          // Only a directory that is gone entirely, or one we cannot stat at all, falls through to
-          // the unconditional remove — and removing something that is not there costs nothing.
-          let mine: boolean;
+          // Which of the four cases this is, and why each goes the way it does, is in
+          // `releaseDecision` above — where it can be asserted.
+          let readOwner: string | null;
           try {
-            mine = readFileSync(ownerFile, "utf8") === owner;
+            readOwner = readFileSync(ownerFile, "utf8");
           } catch {
-            mine = !existsSync(path);
+            readOwner = null;
           }
+          const mine = releaseDecision({
+            owner,
+            ownerWritten,
+            readOwner,
+            dirExists: readOwner !== null || existsSync(path),
+          });
           if (mine) rmSync(path, { recursive: true, force: true });
         } catch {
           /* a lock we cannot remove will be broken as stale */

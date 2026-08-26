@@ -38,7 +38,7 @@
 import { join } from "node:path";
 import { tmpdir, userInfo } from "node:os";
 import { acquireDirLock } from "../util/dirlock.js";
-import { fileDir, getStore, KEYCHAIN_WORST_CASE_MS } from "./store.js";
+import { fileDir, getStore, KEYCHAIN_WORST_CASE_MS, type StoreBackend } from "./store.js";
 import { RATE } from "../config.js";
 
 /**
@@ -77,9 +77,36 @@ import { RATE } from "../config.js";
  */
 const KEYCHAIN_ALLOWANCE_MS = 4 * KEYCHAIN_WORST_CASE_MS;
 
-function worstCaseHoldMs(domain: LockDomain): number {
+/**
+ * Split from `worstCaseHoldMs` so the Keychain figures can be ASSERTED.
+ *
+ * They were not. Every test in this repo sets `STOCKBIT_FORCE_FILE_STORE=1` before its imports —
+ * it has to, the suite is offline — so `getStore(...).backend` is never `"keychain"` under test and
+ * the whole Keychain branch was dead code as far as the suite was concerned. The allowance could be
+ * doubled, or deleted, and 1291 tests stayed green. A comment claiming the numbers were pinned is
+ * not the same as pinning them, and this is the second time that distinction has cost something in
+ * this file.
+ *
+ * Taking the backend as an argument rather than reading it makes both branches reachable from an
+ * offline test, against literals.
+ */
+export function worstCaseHoldMsFor(backend: StoreBackend): number {
   const network = 2 * RATE.requestTimeoutMs;
-  return getStore(domain).backend === "keychain" ? network + KEYCHAIN_ALLOWANCE_MS : network;
+  return backend === "keychain" ? network + KEYCHAIN_ALLOWANCE_MS : network;
+}
+
+/** As `staleMsFor`, by backend rather than by domain. */
+export function staleMsForBackend(backend: StoreBackend): number {
+  return worstCaseHoldMsFor(backend) + 10_000;
+}
+
+/** As `refreshLockTimeoutMsFor`, by backend rather than by domain. */
+export function refreshLockTimeoutMsForBackend(backend: StoreBackend): number {
+  return staleMsForBackend(backend) + 5_000;
+}
+
+function worstCaseHoldMs(domain: LockDomain): number {
+  return worstCaseHoldMsFor(getStore(domain).backend);
 }
 
 /**
