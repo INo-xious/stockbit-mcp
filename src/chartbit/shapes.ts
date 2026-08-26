@@ -43,6 +43,29 @@ export interface ChannelAnnotation {
   color?: string;
 }
 
+/**
+ * A Fibonacci retracement between two swing points.
+ *
+ * Two points, exactly like a trend line, and the tool derives its own levels from them — which is
+ * the reason to use TradingView's native tool rather than drawing seven horizontal lines at computed
+ * prices. The native one keeps the ratios when the user drags an endpoint, labels each level with
+ * its ratio and price, and survives a resolution change. Seven fixed lines are a photograph of a
+ * retracement; this is the retracement.
+ *
+ * `fromDate`/`fromPrice` is the START of the move being retraced and `toDate`/`toPrice` its END, so
+ * for an up-move that is the swing LOW then the swing HIGH. Reversing them flips the ratios, which
+ * is a legitimate thing to want on a down-move and a silent mistake otherwise.
+ */
+export interface FibAnnotation {
+  kind: "fib";
+  fromDate: string;
+  fromPrice: number;
+  toDate: string;
+  toPrice: number;
+  label?: string;
+  color?: string;
+}
+
 /** A vertical marker at one date — an earnings day, an ex-dividend date. */
 export interface VerticalLineAnnotation {
   kind: "vline";
@@ -52,7 +75,7 @@ export interface VerticalLineAnnotation {
 }
 
 /** Everything the driver can draw. The first four are the renderer's own union, unchanged. */
-export type DrawableAnnotation = Annotation | ChannelAnnotation | VerticalLineAnnotation;
+export type DrawableAnnotation = Annotation | ChannelAnnotation | VerticalLineAnnotation | FibAnnotation;
 
 export interface ShapePoint {
   time: number;
@@ -109,6 +132,32 @@ export interface ShapeContext {
 
 function timeOf(date: string, field: string): number {
   return epochSeconds(date, field);
+}
+
+/**
+ * A fib coordinate, or a refusal.
+ *
+ * Dates are already checked — `timeOf` runs them through `epochSeconds`, which throws on anything
+ * unparseable. Prices are not, anywhere in this file, and an `undefined` price travels all the way
+ * to the widget, which anchors the shape at whatever it likes. Observed on a real chart with a
+ * different tool: a zone sent with the wrong field names became a zero-size rectangle at the day's
+ * high, reported back as `drawn: 1` with an empty `failed`. The caller is told it drew something,
+ * the user sees nothing, and the two never reconcile — worse than an error.
+ *
+ * Applied here because a retracement is defined ENTIRELY by its two prices: get one wrong and every
+ * level below it is wrong too, quietly and plausibly. The other annotation kinds in this file are
+ * still unguarded; that is a separate change.
+ */
+function fibPrice(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new StockbitError(
+      "invalid_param",
+      `A fib annotation needs a finite numeric \`${field}\`, got ${JSON.stringify(value)}. Nothing was ` +
+        "drawn for it — a coordinate that arrives undefined becomes a shape at an arbitrary price " +
+        "rather than a visible failure.",
+    );
+  }
+  return value;
 }
 
 /**
@@ -227,6 +276,40 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
           overrides: { linecolor: color, linewidth: style.lineWidth, fillBackground: true, transparency: 90 },
         },
         ours: { kind: "channel", label: annotation.label },
+      };
+    }
+
+    case "fib": {
+      const color = annotation.color ?? style.neutral;
+      // Two points, so this goes through `createMultipointShape` — the same path as a trend line.
+      // The levels are the tool's own; nothing here computes 0.618.
+      return {
+        shape: "fib_retracement",
+        points: [
+          { time: timeOf(annotation.fromDate, "fib start date"), price: fibPrice(annotation.fromPrice, "fromPrice") },
+          { time: timeOf(annotation.toDate, "fib end date"), price: fibPrice(annotation.toPrice, "toPrice") },
+        ],
+        options: {
+          shape: "fib_retracement",
+          // NO `text`. Measured against Stockbit's TradingView v29.6 by probing the live widget:
+          // `createMultipointShape` with a `text` property on this tool throws "Value is undefined"
+          // and draws nothing, while the identical call without it succeeds. Every other tool here
+          // takes `text` happily, which is exactly why this needs saying — it looks like an omission.
+          //
+          // The label is not lost: it is kept in `ours` below, which is what `chartbit_clear
+          // scope:"ours"` matches on. And a retracement labels its own levels with ratio and price,
+          // so a title on top of that adds little.
+          overrides: {
+            linecolor: color,
+            linewidth: 1,
+            // The prices matter more than the ratios when reading a retracement against real support
+            // levels, and the tool hides them by default.
+            showCoeffs: true,
+            showPrices: true,
+            textcolor: color,
+          },
+        },
+        ours: { kind: "fib", label: annotation.label },
       };
     }
 

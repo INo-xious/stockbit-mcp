@@ -618,3 +618,68 @@ test(
 after(() => {
   // Nothing persistent to clean beyond the temp store dir, which the OS sweeps.
 });
+
+/* ---------------- Fibonacci retracement ---------------- */
+
+test("a fib retracement maps to TradingView's own tool, not to seven horizontal lines", () => {
+  // The distinction matters: the native tool derives its own ratios, keeps them when an endpoint is
+  // dragged, and labels each level with ratio and price. Seven computed lines are a photograph.
+  const request = toShapeRequest(
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: 456, toDate: "2026-08-21", toPrice: 935 },
+    CONTEXT,
+  );
+  assert.equal(request.shape, "fib_retracement");
+  assert.equal(request.points.length, 2, "two points, so it goes through createMultipointShape");
+  assert.deepEqual(
+    request.points.map((p) => p.price),
+    [456, 935],
+    "from is the START of the move and to its END; reversing them flips the ratios",
+  );
+});
+
+test("a fib carries NO text property — the tool throws on one", () => {
+  // Measured on Stockbit's TradingView v29.6 by probing the live widget: `createMultipointShape`
+  // with `text` on a fib_retracement throws "Value is undefined" and draws nothing; the identical
+  // call without it succeeds. Every other tool here takes `text`, so this asymmetry needs a test or
+  // it gets "fixed" back.
+  const request = toShapeRequest(
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: 456, toDate: "2026-08-21", toPrice: 935, label: "swing" },
+    CONTEXT,
+  );
+  assert.equal(request.options.text, undefined, "a text property makes the widget throw");
+  assert.equal(request.ours.label, "swing", "but the label must survive for `clear scope:ours`");
+});
+
+test("a fib shows its prices, because a ratio alone cannot be read against a support level", () => {
+  const request = toShapeRequest(
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: 456, toDate: "2026-08-21", toPrice: 935 },
+    CONTEXT,
+  );
+  assert.equal(request.options.overrides.showPrices, true);
+  assert.equal(request.options.overrides.showCoeffs, true);
+});
+
+test("a fib with a missing or non-finite coordinate is refused rather than drawn somewhere", () => {
+  // A retracement is defined entirely by its two prices: get one wrong and every level below it is
+  // wrong too, quietly and plausibly.
+  for (const bad of [
+    { kind: "fib", fromDate: "2026-07-02", toDate: "2026-08-21", toPrice: 935 },
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: 456, toDate: "2026-08-21" },
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: NaN, toDate: "2026-08-21", toPrice: 935 },
+    { kind: "fib", fromDate: "2026-07-02", fromPrice: "456", toDate: "2026-08-21", toPrice: 935 },
+  ]) {
+    assert.throws(() => toShapeRequest(bad as never, CONTEXT), /numeric/i, `${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("zero is a legitimate fib coordinate and must not read as missing", () => {
+  assert.doesNotThrow(() =>
+    toShapeRequest({ kind: "fib", fromDate: "2026-07-02", fromPrice: 0, toDate: "2026-08-21", toPrice: 935 }, CONTEXT),
+  );
+});
+
+test("a fib with an unparseable date is refused", () => {
+  assert.throws(() =>
+    toShapeRequest({ kind: "fib", fromDate: "not-a-date", fromPrice: 1, toDate: "2026-08-21", toPrice: 2 }, CONTEXT),
+  );
+});

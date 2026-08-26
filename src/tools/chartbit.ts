@@ -251,7 +251,10 @@ export function registerChartbitTools(define: Definer): void {
             '{kind:"trend",fromDate,fromPrice,toDate,toPrice,label?} | ' +
             '{kind:"marker",date,price?,label,above?} | ' +
             '{kind:"channel",fromDate,fromPrice,toDate,toPrice,offset,label?} | ' +
-            '{kind:"vline",date,label?}',
+            '{kind:"vline",date,label?} | ' +
+            '{kind:"fib",fromDate,fromPrice,toDate,toPrice,label?} — from/to are the START and END ' +
+            'of the move being retraced (swing low then swing high for an up-move); the tool derives ' +
+            'its own levels',
         ),
       anchor_date: z.string().describe("YYYY-MM-DD to anchor time-less tools to, normally the latest bar"),
       replace: z.boolean().optional().describe("Remove this server's previous drawings on this symbol first"),
