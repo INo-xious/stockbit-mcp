@@ -248,7 +248,9 @@ test("the file backend pays no Keychain cushion, and the Keychain backend does",
   //
   // The Keychain figure is asserted from the function rather than exercised, because the backend
   // cannot be switched inside a test process — but it is asserted, so the allowance cannot be
-  // silently dropped or doubled.
+  // silently dropped or doubled. On macOS these come out at 86_000 / 91_000: four writes' worth of
+  // `security` on top of the network, which is a documented judgement between breaking a healthy
+  // holder and making a crashed one slow to recover from.
   assert.equal(staleMsFor("main"), STALE_MS, "the file backend gets the plain figure");
   assert.equal(refreshLockTimeoutMsFor("main"), REFRESH_LOCK_TIMEOUT_MS);
 

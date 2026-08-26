@@ -58,14 +58,24 @@ import { RATE } from "../config.js";
  * about ninety seconds of *legitimate* work, and the first attempt at this allowed eighty.
  *
  * So the allowance is per backend, and the file backend goes back to exactly what it had. That
- * matters beyond tidiness: `STALE_MS` is also how long a caller waits before it may break the lock
- * a SIGKILLed process left behind, and making Linux and Windows wait out a macOS-only hazard is a
- * real cost for no benefit.
+ * matters beyond tidiness: the staleness threshold is also how long a caller waits before it may
+ * break the lock a SIGKILLed process left behind, and making Linux and Windows wait out a
+ * macOS-only hazard is a real cost for no benefit.
+ *
+ * **The size of the Keychain allowance is a judgement between two bad outcomes, and it is worth
+ * being explicit that it cannot be made to satisfy both.** Too small and a healthy holder whose
+ * Keychain is prompting gets broken as stale, and two processes rotate — a forced re-login. Too
+ * large and the first caller after a process is SIGKILLed mid-refresh waits that long before it may
+ * break the lock. Four writes' worth is the compromise: it covers the realistic path (a handful of
+ * reads and one write with its retry) rather than the pathological one where every single `security`
+ * invocation hangs for its full timeout. What it replaces is not a shorter wait — it is a lock that
+ * could never be broken at all, because the old acquisition timeout was shorter than the old
+ * staleness threshold.
  *
  * `test/reflock.test.ts` asserts these against literals, not against the same expression — a test
  * that recomputes the formula agrees with the constant rather than with what the lock holds.
  */
-const KEYCHAIN_ALLOWANCE_MS = 6 * KEYCHAIN_WORST_CASE_MS;
+const KEYCHAIN_ALLOWANCE_MS = 4 * KEYCHAIN_WORST_CASE_MS;
 
 function worstCaseHoldMs(domain: LockDomain): number {
   const network = 2 * RATE.requestTimeoutMs;

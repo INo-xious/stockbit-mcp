@@ -131,12 +131,15 @@ export type KeychainWriteMethod = "stdin" | "stdin-unverified" | "argv";
  * there, nothing answers, and an unbounded `spawnSync` wedges the process holding the credential
  * lock — which then gets broken as stale while it is still alive, and two processes rotate.
  *
- * Applied to EVERY spawn, not just the prompted write. The read-back and the argv fallback run on
- * the same code path, under the same lock, in the same call; bounding one of three and explaining
- * the bound in terms of the lock would have been the reasoning without the protection. Together
- * they are why `reflock.ts` sizes its cushion the way it does.
+ * Applied to EVERY spawn, not just the prompted write. The read-back, the argv fallback and the
+ * delete run on the same code paths, under the same lock; bounding one of them and explaining the
+ * bound in terms of the lock would have been the reasoning without the protection. Together they
+ * are why `reflock.ts` sizes its cushion the way it does — and that is also why this is three
+ * seconds rather than something more generous. `security` either answers in about ten milliseconds
+ * or it is waiting on a dialog, and no amount of waiting in-process makes a dialog answer itself;
+ * every second here is a second added to how long a crashed holder wedges the credential lock.
  */
-const KEYCHAIN_TIMEOUT_MS = 5_000;
+const KEYCHAIN_TIMEOUT_MS = 3_000;
 
 /** How long ALL Keychain work in one write may take: the prompted write, the read-back, the fallback. */
 export const KEYCHAIN_WORST_CASE_MS = 3 * KEYCHAIN_TIMEOUT_MS;
