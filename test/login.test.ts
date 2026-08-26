@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractRefresh, tokenUrlAllowed } from "../src/auth/login.ts";
+import { extractRefresh, isLoginPage, timeoutMessage, tokenUrlAllowed } from "../src/auth/login.ts";
 import { securitiesTokenUrlAllowed } from "../src/auth/capture.ts";
 
 const JWT = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjIwMDAwMDAwMDB9.sig-part";
@@ -92,4 +92,63 @@ test("securitiesTokenUrlAllowed rejects everything that is not a carina session 
   ]) {
     assert.equal(securitiesTokenUrlAllowed(url), false, url);
   }
+});
+
+/* ------------------------- the already-signed-in ladder ------------------------- */
+
+test("a Stockbit URL is recognised as the login form or as the signed-in app", () => {
+  // This one predicate decides whether the ladder fires at all, so it gets the awkward inputs.
+  assert.equal(isLoginPage("https://stockbit.com/login"), true);
+  assert.equal(isLoginPage("https://stockbit.com/login/"), true);
+  assert.equal(isLoginPage("https://stockbit.com/login?next=%2Fsymbol%2FBBRI"), true);
+  assert.equal(isLoginPage("https://stockbit.com/login#otp"), true);
+  assert.equal(isLoginPage("https://stockbit.com/LOGIN"), true, "the path is matched case-insensitively");
+
+  assert.equal(isLoginPage("https://stockbit.com/"), false);
+  assert.equal(isLoginPage("https://stockbit.com/symbol/BBRI"), false);
+  assert.equal(
+    isLoginPage("https://stockbit.com/loginhelp"),
+    false,
+    "a path that merely STARTS WITH /login is not the login form — the boundary has to be a separator",
+  );
+  assert.equal(isLoginPage("not a url"), false, "an unparsable URL is not the login form");
+});
+
+test("a login timeout names where the page actually was, and the lever that fits", () => {
+  // The old message was the same sentence for all three, which is true and useless: still on the
+  // form, already signed in, and never reached Stockbit need three different next steps.
+  const signedIn = timeoutMessage("https://stockbit.com/symbol/BBRI", 900_000);
+  assert.match(signedIn, /already signed in/);
+  assert.match(signedIn, /--switch-account/);
+  assert.match(signedIn, /stockbit\.com\/symbol\/BBRI/, "it must say where the page actually was");
+  assert.doesNotMatch(signedIn, /--fresh-profile/, "fresh-profile does not fix an already-signed-in browser");
+
+  const onForm = timeoutMessage("https://stockbit.com/login", 900_000);
+  assert.match(onForm, /--fresh-profile/);
+  assert.doesNotMatch(onForm, /--switch-account/, "switch-account does not fix a form nobody filled in");
+
+  const nowhere = timeoutMessage(null, 900_000);
+  assert.match(nowhere, /import-har/);
+  assert.match(nowhere, /No Stockbit page was open/);
+
+  for (const m of [signedIn, onForm, nowhere]) {
+    assert.match(m, /~15 minute/, "the message must say how long it actually waited");
+  }
+});
+
+test("the login ladder never enables a CDP domain to clear cookies", async () => {
+  // ADR-0005 restricts the CHARTBIT driver to Page and Runtime, and its test only greps
+  // src/chartbit/ — so this file would not trip it either way. Matching the restraint is the
+  // decision, and a decision that only lives in a comment is not one.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const source = readFileSync(fileURLToPath(new URL("../src/auth/login.ts", import.meta.url)), "utf8");
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert.equal(
+    code.includes("Network.clearBrowserCookies"),
+    false,
+    "clearing is done with Storage.clearDataForOrigin, which needs no Network domain",
+  );
+  assert.ok(code.includes("Storage.clearDataForOrigin"), "and that is the call it uses");
+  assert.ok(code.includes("Storage.clearCookies"), "with a browser-wide fallback for builds without it");
 });

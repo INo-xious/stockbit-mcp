@@ -4,6 +4,14 @@
 
 **138 tools** (114 read, 24 write) in 17 families, 8 prompts.
 
+Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
+
+<details><summary>The <code>core</code> profile, by name</summary>
+
+`status`, `login`, `logout`, `broker_summary`, `broker_distribution`, `alert_create`, `alert_list`, `alert_delete`, `alert_check`, `technicals`, `price_chart`, `quote`, `top_movers`, `orderbook`, `keystats`, `ratios`, `financials`, `backtest`, `strategy_compare`, `patterns`, `timeframe_alignment`, `scan`, `price_bands`, `watchlist`, `screener`, `analyze`, `position_size`, `stream`, `news`, `seasonality`, `market_session`, `broker_activity`, `bandar_detector`, `portfolio`, `position`, `cash_balance`, `orders`, `trading_status`, `workflow_list`, `workflow_run`
+
+</details>
+
 Every tool carries an **evidence** word — Observed, Read-back or Projected. They are defined in [`CONTEXT.md`](../CONTEXT.md) and the current state of each family is in [`VERIFICATION.md`](VERIFICATION.md). *Projected* does not mean broken; it means nobody has checked it, and the code is written so an unchecked guess fails loudly rather than quietly.
 
 `*` marks a required argument. Descriptions here are the first sentence only — the full one, with the caveats that matter at call time, is what the model reads.
@@ -37,7 +45,7 @@ Is this working, and what do I run — plus logging in and out.
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
 | `status` | read | Is this server working, and what do I run if it is not? Call this FIRST whenever anything looks wrong, and call it after logging in to confirm it took. | Observed | live |
-| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile |
+| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile, switch_account |
 | `logout` | write, destructive | Clear stored Stockbit credentials from this machine. | Observed | confirm*, scope, remove_browser_profile |
 
 ## market

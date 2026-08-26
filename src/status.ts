@@ -27,8 +27,16 @@
  * the payload changes. `live: true` settles it by actually refreshing once — one request — and is
  * off by default because `status` is the thing you call when you suspect the network.
  */
-import { getStore, type StoreSlot } from "./auth/store.js";
-import { decodeJwt, ensureFresh } from "./auth/session.js";
+import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
+import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
+import {
+  lastEventFor,
+  readHealthJournal,
+  slotHealthState,
+  type SlotHealthState,
+} from "./auth/health.js";
+import { WEB_SESSION_LIFETIME_HOURS, webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
+import { decodeJwt, forceRefresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
@@ -38,10 +46,29 @@ import { VERSION } from "./version.js";
 export interface SlotStatus {
   stored: boolean;
   backend: "keychain" | "file" | "unknown";
+  /**
+   * True when the store could not say whether a credential is there — a locked Keychain, or a
+   * declined access prompt. Distinct from `stored: false`, which means it looked and found nothing.
+   * Advice built on the two must differ: one says "log in", the other says "unlock your Keychain",
+   * and giving the first answer to the second situation destroys a credential that was fine.
+   */
+  unreadable?: boolean;
   /** Days until the stored token's `exp`. Absent when there is no token or no `exp`. */
   expiresInDays?: number;
   /** True when `exp` is already in the past. */
   expired?: boolean;
+  /**
+   * What is known about whether this credential still WORKS, as opposed to whether it has expired.
+   *
+   * An expiry is a claim about time. A token can be revoked, or superseded by another login, and
+   * not one byte of its payload changes — so `expiresInDays` has always been able to report health
+   * on a token that 401s on its first use. This is derived from what actually happened the last
+   * time a refresh was made, which costs nothing and is the only way to say `failing` at zero
+   * requests. See `src/auth/health.ts`.
+   */
+  health?: SlotHealthState;
+  /** When the last recorded refresh happened, and whether it worked. Never a token. */
+  lastRefresh?: { at: string; ok: boolean; status?: number };
   /** What to do about this slot, when there is something to do. */
   hint?: string;
 }
@@ -85,6 +112,14 @@ export interface StatusReport {
     corrupt?: true;
   };
   market: SessionClock;
+  /**
+   * The BROWSER's Stockbit website session — a different credential from every slot in `auth`.
+   *
+   * Reported separately because conflating them is what made this confusing to diagnose: `auth.main`
+   * could be healthy and refreshing cleanly while the website was logged out, and nothing in the
+   * output said those were different things. Age-based and side-effect free; see `webSessionHealth`.
+   */
+  webSession: WebSessionHealth;
   store: {
     dir: string;
     backend: "keychain" | "file" | "unknown";
@@ -104,6 +139,26 @@ export interface CollectStatusOptions {
   toolCount?: number;
   /** What the active tool profile is called. */
   profileLabel?: string;
+  /** Whether that profile is the default rather than something the user asked for. */
+  profileIsDefault?: boolean;
+  /**
+   * Why `STOCKBIT_TOOLS` could not be parsed, when it could not be.
+   *
+   * This is the state `status` exists for. An unparsable value makes `stockbit-mcp` refuse to start,
+   * so the user is looking at a client that says "server failed" and running this command to find
+   * out why — and reporting a `toolProfile` as though a server were running would be answering a
+   * question nobody asked with a fact that is not true.
+   */
+  profileError?: string;
+  /**
+   * Tool NAMES this profile kept out, so `status` can explain a missing tool.
+   *
+   * Names, not families. A family with one skipped tool is not a family that is absent, and
+   * `STOCKBIT_TOOLS=core,order_preview,order_buy,…` registers every order tool while leaving
+   * `order_history` and friends behind — which at family granularity read as "no order tools at
+   * all" and hijacked `nextStep` away from the advice the user actually needed.
+   */
+  missingTools?: string[];
 }
 
 /* ------------------------------- login progress ------------------------------- */
@@ -151,10 +206,12 @@ const SLOT_HINTS: Record<StoreSlot, string> = {
 function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
   let token: string | null = null;
   let backend: SlotStatus["backend"] = "unknown";
+  let state: StoreState = "absent";
   try {
     const store = getStore(slot);
     backend = store.backend;
-    token = store.get();
+    state = store.readState();
+    token = state === "present" ? store.get() : null;
   } catch (err) {
     checks.push({
       name: `credential store (${slot})`,
@@ -162,6 +219,27 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
       detail: `Could not be read: ${err instanceof Error ? err.message : String(err)}`,
     });
     return { stored: false, backend, hint: SLOT_HINTS[slot] };
+  }
+
+  // "I could not find out" is not "there is nothing here". Saying the second when the first is true
+  // is how a user with a locked Keychain gets told to log in again — which means throwing away a
+  // credential that was never in doubt.
+  if (state === "unavailable") {
+    checks.push({
+      name: `credential store (${slot})`,
+      status: "warn",
+      detail:
+        "The Keychain would not answer — it is locked, or an access prompt was declined. Whether " +
+        "a session is stored is unknown; this is NOT the same as having none.",
+    });
+    return {
+      stored: false,
+      unreadable: true,
+      backend,
+      hint:
+        "Unlock your login Keychain (open Keychain Access, or run any command that prompts) and " +
+        "ask again. Do not log in again yet — the stored credential may be perfectly good.",
+    };
   }
 
   if (!token) return { stored: false, backend, hint: SLOT_HINTS[slot] };
@@ -184,15 +262,95 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
       });
     }
   }
+
+  // What is RECORDED about this token, which is a different question from what its payload claims.
+  // Wrapped because this function must never throw: a corrupt journal is a diagnostic that is
+  // missing, never a status report that fails.
+  try {
+    const journal = readHealthJournal();
+    result.health = slotHealthState(slot, token, result.expired === true, journal);
+    const event = lastEventFor(slot, journal);
+    if (event) {
+      result.lastRefresh = {
+        at: event.at,
+        ok: event.reason === undefined,
+        ...(event.status === undefined ? {} : { status: event.status }),
+      };
+    }
+    if (result.health === "failing") {
+      checks.push({
+        name: `${slot} session`,
+        status: "fail",
+        detail:
+          `Stockbit REJECTED this token at ${event ? formatTime(event.at) : "an unrecorded time"}` +
+          `${event?.status ? ` (HTTP ${event.status})` : ""}. It is present and unexpired, so an ` +
+          "expiry check cannot see this — it has been revoked, or superseded by another login.",
+      });
+      result.hint =
+        slot === "main"
+          ? "Log in again — this token is present and unexpired but Stockbit no longer accepts it."
+          : `${SLOT_HINTS[slot]} The stored one was rejected.`;
+    }
+  } catch {
+    /* the journal is diagnostics; its absence is not a status failure */
+  }
+
   return result;
 }
 
+/** `HH:MM` in local time, or the raw string if it will not parse. Never throws. */
+function formatTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 /** The one thing to do next, chosen from the state rather than listed as options. */
-function nextStepFor(auth: Record<StoreSlot, SlotStatus>, trading: StatusReport["trading"]): string {
+function nextStepFor(
+  auth: Record<StoreSlot, SlotStatus>,
+  trading: StatusReport["trading"],
+  surface: { tradingToolsMissing: boolean; profileLabel: string; profileError?: string } = {
+    tradingToolsMissing: false,
+    profileLabel: DEFAULT_TOOL_PROFILE,
+  },
+): string {
+  // Before anything else: if the store would not answer, every branch below is reasoning from a
+  // fact nobody established. "Log in again" is the one piece of advice that must not be given here.
+  // Before anything about credentials: if the server cannot start, no advice about sessions is
+  // actionable, because there is nothing to use them.
+  if (surface.profileError) {
+    return (
+      `Fix STOCKBIT_TOOLS in the client's config — the server refuses to start with it: ` +
+      `${surface.profileError} Removing it entirely is also valid and gives the default profile.`
+    );
+  }
+  if (auth.main.unreadable) return auth.main.hint!;
+  // The branch that was missing. Present, unexpired, and rejected — which every expiry-based check
+  // reports as healthy, and which is what a revoked or superseded session actually looks like.
+  if (auth.main.health === "failing") {
+    const when = auth.main.lastRefresh ? ` at ${formatTime(auth.main.lastRefresh.at)}` : "";
+    return (
+      `The stored market-data token is present and unexpired, but Stockbit rejected it${when} — ` +
+      "revoked, or superseded by another login. Log in again: say \"log me into Stockbit\", or run " +
+      "`npx -y -p stockbit-mcp stockbit-auth login`."
+    );
+  }
   if (!auth.main.stored || auth.main.expired) {
     return (
       'Say "log me into Stockbit" (a browser window opens — sign in there), or run ' +
       "`npx -y -p stockbit-mcp stockbit-auth login` in a terminal. Then call status again."
+    );
+  }
+  // Above the securities branch on purpose. If this server has no order tools, then telling the
+  // user to run `trading-login` is advice that leads nowhere: they would complete it and still have
+  // nothing to place an order with. The contradiction is the more urgent fact, and it is the one
+  // nothing else anywhere reports.
+  if (surface.tradingToolsMissing) {
+    return (
+      `Trading is ${trading.mode}, but this server did not register the order-entry tools — the ` +
+      `\`${surface.profileLabel}\` tool profile does not include them. Set ` +
+      `STOCKBIT_TOOLS=${surface.profileLabel},trading in the client's config and restart it.`
     );
   }
   if (!auth.securities.stored) {
@@ -269,12 +427,19 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
+  const web = webSessionHealth();
   let browserPinned: string | null = null;
   try {
     const pinned = readBrowserProfile();
     browserPinned = pinned ? `${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""}` : null;
   } catch {
     browserPinned = null;
+  }
+  if (web.present && !web.likelyValid) {
+    // Distinct from the token slots on purpose: this is the credential Chartbit needs, and it can be
+    // dead while every slot above is perfectly healthy. That combination is exactly what made the
+    // failure so hard to read.
+    checks.push({ name: "website session", status: "warn", detail: web.hint });
   }
   if (!browserPinned) {
     checks.push({
@@ -294,9 +459,72 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       : "Not stored. Nothing can be read until you log in.",
   });
 
+  if (options.profileError) {
+    checks.push({
+      name: "tool profile",
+      status: "fail",
+      detail:
+        `STOCKBIT_TOOLS cannot be parsed, so the server will not start: ${options.profileError} ` +
+        "Nothing else in this report describes a running server.",
+    });
+  }
+
+  // The trap the default profile creates, and the reason it is worth a check of its own.
+  //
+  // `core` deliberately contains no order-entry tools. So a user who went to the trouble of running
+  // `trading-enable --live` at their own terminal — a deliberate, two-step, opt-in act — finds no
+  // order tool in the server and NOTHING anywhere saying why. Trading reports "on", the tools are
+  // simply absent, and the natural conclusion is that order entry is broken.
+  // By NAME, and with two different lists on purpose.
+  //
+  // `ORDER_ENTRY_CORE` is what "place an order" means, and is what TRIGGERS the warning — amend
+  // without preview and buy is not a coherent thing to warn about separately, and a profile that
+  // registers all four correctly produces no warning. But the sentence "it has no order-entry tools
+  // AT ALL" has to be measured against every order-entry tool including `order_amend`, or the
+  // report asserts something false about a registered, destructive write that changes a live order
+  // on the exchange.
+  //
+  // `eipo_order` is one of those tools and was missing from this list. It is a `destructiveHint`
+  // write that commits real money out of the RDN, it is gated on the same `policy.enabled`, and
+  // `instructions.ts` counts it as order entry — so under `STOCKBIT_TOOLS=eipo` this report said
+  // "no order-entry tools at all" on the same server whose instructions page said "PLACING AN ORDER
+  // IS TWO STEPS, ALWAYS: eipo_order_preview…". Whichever of the two the user believed, one of them
+  // was lying to them about a live money write.
+  const missing = new Set(options.missingTools ?? []);
+  const ORDER_ENTRY_CORE = ["order_preview", "order_buy", "order_sell", "order_cancel"];
+  const ORDER_ENTRY_ALL = [
+    ...ORDER_ENTRY_CORE,
+    "order_amend",
+    "eipo_order_preview",
+    "eipo_order",
+  ];
+  const absentOrderTools = ORDER_ENTRY_CORE.filter((name) => missing.has(name));
+  const noOrderToolsAtAll = ORDER_ENTRY_ALL.every((name) => missing.has(name));
+  const tradingToolsMissing = trading.enabled && absentOrderTools.length > 0;
+  if (tradingToolsMissing) {
+    const label = options.profileLabel ?? DEFAULT_TOOL_PROFILE;
+    checks.push({
+      name: "trading tools",
+      status: "warn",
+      detail:
+        `Trading is ${trading.mode}, but this server did not register ${absentOrderTools.join(", ")}` +
+        `${noOrderToolsAtAll ? " — it has no order-entry tools at all" : ""}. ` +
+        `The \`${label}\` profile does not include them` +
+        `${options.profileIsDefault ? ", and it is the default" : ""}. Set ` +
+        `STOCKBIT_TOOLS=${label},trading and restart the client.`,
+    });
+  }
+
   if (options.live) {
     try {
-      await ensureFresh("main");
+      // `forceRefresh`, NOT `ensureFresh`. `ensureFresh` consults the shared access cache before it
+      // ever reaches the wire, so on a warm cache this check made ZERO requests and still reported
+      // "the stored token refreshed against Stockbit" — for a token that may have been revoked an
+      // hour earlier. That is the precise failure this whole release was written to remove, and it
+      // would have been reported as a proof. `forceRefresh` drops the in-memory copy, clears the
+      // cache and refuses the next cache hit, so the request the description promises is the
+      // request that happens.
+      await forceRefresh("main");
       checks.push({ name: "live check", status: "ok", detail: "The stored token refreshed against Stockbit." });
     } catch (err) {
       checks.push({
@@ -311,7 +539,10 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     checks.push({
       name: "live check",
       status: "warn",
-      detail: "Not run. Pass live: true to prove the stored token still works (one request).",
+      detail:
+        "Not run, and it is not free: proving the token means refreshing it, which ROTATES the " +
+        "token family and ends the website session the chart tools run on. The `health` on each " +
+        "session above answers the same question from what actually happened last time, for nothing.",
     });
   }
 
@@ -328,22 +559,32 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       version: VERSION,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
-      toolProfile: options.profileLabel ?? "all",
+      // `all`, because no label means no profile was applied and nothing was filtered. Callers that
+      // know better say so: the `status` tool passes the server's real label, and the CLI passes what
+      // its own environment would produce. Defaulting to `core` here made `createServer()` with no
+      // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
+      toolProfile: options.profileError ? "unparsable" : (options.profileLabel ?? "all"),
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
     },
     auth,
     login: loginStatus(),
     trading,
     market: sessionClock(options.now),
+    webSession: web,
     store: { dir, backend: auth.main.backend, browserPinned },
     checks,
-    nextStep: nextStepFor(auth, trading),
+    nextStep: nextStepFor(auth, trading, {
+      tradingToolsMissing,
+      profileLabel: options.profileLabel ?? DEFAULT_TOOL_PROFILE,
+      ...(options.profileError === undefined ? {} : { profileError: options.profileError }),
+    }),
   };
 }
 
 /** A few lines for a terminal, from the same report the tool returns. */
 export function formatStatus(report: StatusReport): string {
   const slot = (name: string, s: SlotStatus): string => {
+    if (s.unreadable) return `${name.padEnd(16)} UNREADABLE${s.hint ? ` — ${s.hint}` : ""}`;
     if (!s.stored) return `${name.padEnd(16)} not set${s.hint ? ` — ${s.hint}` : ""}`;
     const expiry =
       s.expiresInDays === undefined
@@ -351,13 +592,33 @@ export function formatStatus(report: StatusReport): string {
         : s.expired
           ? `EXPIRED ${Math.abs(s.expiresInDays)} day(s) ago`
           : `expires in ~${s.expiresInDays} day(s)`;
-    return `${name.padEnd(16)} stored (${s.backend}), ${expiry}`;
+    // `health` is rendered whenever it says something an expiry cannot, and stays silent when it
+    // says nothing. `unknown` is the ordinary state before this credential has ever been used, and
+    // printing "unknown" beside a healthy-looking line reads as a fault rather than as an absence.
+    const when = s.lastRefresh ? ` at ${formatTime(s.lastRefresh.at)}` : "";
+    const health =
+      s.health === "failing"
+        ? `, REJECTED by Stockbit${when}`
+        : s.health === "ok"
+          ? `, last refresh OK${when}`
+          : "";
+    return `${name.padEnd(16)} stored (${s.backend}), ${expiry}${health}`;
   };
 
   const lines = [
     `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${report.store.browserPinned ?? "not pinned"}`,
+    `Website session  ${
+      !report.webSession.present
+        ? "not stored — chart drawing needs a login"
+        : report.webSession.ageHours === null
+          ? "stored, age unknown — treat as needing a login"
+          : `${report.webSession.likelyValid ? "stored" : "AGED OUT"}, ${report.webSession.ageHours.toFixed(1)}h old` +
+            (report.webSession.likelyValid
+              ? `, ~${(WEB_SESSION_LIFETIME_HOURS - report.webSession.ageHours).toFixed(1)}h left`
+              : " — a fresh login is needed")
+    }`,
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),

@@ -45,6 +45,11 @@ import { clearBrowserProfile, readBrowserProfile } from "../auth/browserprofile.
 import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
 import { getStore, type StoreSlot } from "../auth/store.js";
+import { withCredentialLock } from "../auth/reflock.js";
+import { clearWebSession } from "../auth/websession.js";
+import { clearAccessCache } from "../auth/accesscache.js";
+import { clearSessionHealth } from "../auth/health.js";
+import { forgetRotated } from "../auth/session.js";
 import { hasStoredSession, resetSession } from "../auth/session.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
@@ -63,6 +68,8 @@ export interface SystemToolOptions {
   toolCount?: number;
   /** What the active tool profile is called. */
   profileLabel?: string;
+  /** Whether that profile is the default rather than something the user asked for. */
+  profileIsDefault?: boolean;
 }
 
 export function registerSystemTools(define: Definer, options: SystemToolOptions = {}): void {
@@ -75,15 +82,24 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "why, the IDX session clock in WIB, and a `nextStep` naming the single next command.\n" +
       "It answers with no session at all — that is the state every new user is in, and the answer " +
       "is the useful one.\n" +
-      "`live: true` additionally refreshes the market-data token against Stockbit (one request) to " +
-      "prove it still works. Without it, `expiresInDays` is a claim from the token's payload, not " +
-      "evidence: a revoked token keeps its expiry.\n" +
+      "Each session also carries a `health`: `ok` / `failing` / `expired` / `not-stored` / `unknown`, " +
+      "derived from what actually happened the last time that credential was used. **`failing` means " +
+      "present and unexpired but REJECTED by Stockbit** — revoked, or superseded by another login. " +
+      "That is the case an expiry check cannot see, and it costs no requests.\n" +
+      "`live: true` is NOT free and is rarely what you want. It refreshes the market-data token, " +
+      "which ROTATES the refresh-token family and therefore ENDS the user\u2019s Stockbit website " +
+      "session — the one the chart tools run on. Use `health` instead; only pass `live: true` if the " +
+      "user explicitly asks to prove the token with a real request.\n" +
       "The `market` block does not model public holidays; call `market_session` for that.",
     {
       live: z
         .boolean()
         .optional()
-        .describe("Also refresh the market-data token to prove it works. One request. Default false."),
+        .describe(
+          "Prove the market-data token with one real refresh. This ROTATES the token family and " +
+            "ends the user's Stockbit website session — ask them first. Default false; `health` " +
+            "answers the same question for free.",
+        ),
     },
     async (a) =>
       runTool(async () =>
@@ -91,6 +107,13 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
           live: a.live === true,
           toolCount: options.toolCount,
           profileLabel: options.profileLabel,
+          profileIsDefault: options.profileIsDefault,
+          // Which tool NAMES this profile kept out — read at CALL time, when registration is
+          // complete. `status` needs it for the trap the default profile creates: `core` has no
+          // order tools, so a user who deliberately ran `trading-enable --live` finds nothing to
+          // place an order with and no explanation anywhere. Names rather than families, because a
+          // family with one tool missing is not a family that is gone.
+          missingTools: define.skippedNames(),
         }),
       ),
   );
@@ -107,9 +130,16 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "progress.\n" +
       "The captured token goes straight to the keychain (or the encrypted file store off macOS). It " +
       "is never returned here and never shown to you.\n" +
+      "If the browser is ALREADY signed in to Stockbit, it no longer waits fifteen minutes for a " +
+      "form that will never appear: it reads the credential out of the browser's own session and " +
+      "finishes in seconds, and if there is nothing usable there it signs that profile out and " +
+      "re-opens the login page.\n" +
+      "`switch_account: true` is for signing in as a DIFFERENT account — it clears the browser's " +
+      "Stockbit session first and never reuses what was there. Ask the user before using it; it " +
+      "signs them out of Stockbit in that browser profile.\n" +
       "Refuses when STOCKBIT_NO_BROWSER is set (to anything but 0/false/no/off), and names the "
       + "terminal command instead. It also refuses " +
-      "if a session is already stored, unless `force: true`.\n" +
+      "if a session is already stored, unless `force: true` (which `switch_account` implies).\n" +
       "This does NOT log in to the trading account: that needs a 6-digit PIN typed at the user's own " +
       "terminal via `stockbit-auth trading-login`, and no tool here accepts a PIN.",
     {
@@ -118,9 +148,28 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       fresh_profile: z
         .boolean()
         .optional()
-        .describe("Use a throwaway browser profile instead of the saved one. For a stuck login."),
+        .describe(
+          "Use a throwaway browser profile instead of the saved one — nothing carried over, so the " +
+            "user re-enters password and OTP. For a profile that is corrupt or held open by another " +
+            "process. To sign in as a different account, use switch_account instead.",
+        ),
+      switch_account: z
+        .boolean()
+        .optional()
+        .describe(
+          "Sign the current Stockbit account OUT of the browser profile first, then show a real " +
+            "login form. For logging in as someone else. Implies force.",
+        ),
     },
-    async (a) => startLogin(define, { confirm: a.confirm === true, force: a.force === true, fresh: a.fresh_profile === true }),
+    async (a) =>
+      startLogin(define, {
+        confirm: a.confirm === true,
+        // switch_account is an instruction to replace the stored session, so it cannot be blocked
+        // by "a session is already stored" — that refusal is the whole thing it is asking to undo.
+        force: a.force === true || a.switch_account === true,
+        fresh: a.fresh_profile === true,
+        switchAccount: a.switch_account === true,
+      }),
     { destructiveHint: false, idempotentHint: true, evidence: "observed" },
   );
 
@@ -132,6 +181,9 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "a terminal).\n" +
       "`scope` picks what to clear — `main` (market data), `trading` (the securities session, which " +
       "is also ended at Stockbit's end), `eipo`, or `all` (the default).\n" +
+      "Any scope covering `main` also clears the stored WEBSITE session (the browser cookies the " +
+      "chart tools run on) and the shared access-token cache. Both are usable Stockbit credentials " +
+      "on their own, so a logout that left them would not be one.\n" +
       "`remove_browser_profile: true` also deletes the saved browser profile. That profile is a " +
       "SECOND copy of the session — it holds Stockbit cookies — so on a shared or lost machine, " +
       "clearing the token without it is not really logging out.",
@@ -162,6 +214,8 @@ interface LoginRequest {
   confirm: boolean;
   force: boolean;
   fresh: boolean;
+  /** Clear the browser's Stockbit session first, and never reuse what was there. */
+  switchAccount: boolean;
 }
 
 /** A refusal is a normal answer here, not an exception: it always says what to do instead. */
@@ -249,6 +303,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     quiet: true,
     slot: "main",
     timeoutMs,
+    switchAccount: request.switchAccount,
     ...(request.fresh ? { profileDir: "fresh" as const } : {}),
   })
     .then((result) => {
@@ -266,6 +321,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     started: true,
     browser: pinned?.browserName ?? browser,
     freshProfile: request.fresh,
+    switchedAccount: request.switchAccount,
     elicitation: elicited,
     timeoutMinutes: Math.round(timeoutMs / 60_000),
     message:
@@ -314,7 +370,7 @@ async function doLogout(request: LogoutRequest) {
       } catch (err) {
         cleared.trading = `local store cleared, remote logout failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
         try {
-          getStore("securities").clear();
+          await withCredentialLock("securities", () => getStore("securities").clear());
         } catch {
           /* already reported */
         }
@@ -325,12 +381,52 @@ async function doLogout(request: LogoutRequest) {
     const slot = SCOPE_SLOTS[scope];
     const had = hasStoredSession(slot === "securities" ? "securities" : slot);
     try {
-      getStore(slot).clear();
+      // Under the credential lock, like every other credential write — a logout that races a
+      // refresh must not be undone by the rotation landing a moment later.
+      await withCredentialLock(slot, () => getStore(slot).clear());
       cleared[scope] = had ? "cleared" : "nothing stored";
     } catch (err) {
       cleared[scope] = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
     }
     resetSession(slot === "securities" ? "securities" : slot);
+  }
+
+  // The access token and the health journal are cleared PER SLOT, for every scope.
+  //
+  // An access token is a bearer credential good for up to a day, so leaving one behind is exactly
+  // what logout exists to prevent — and `logout { scope: "trading" }` leaving a live carina token
+  // on disk is the worst version of it, because the securities session is the one with money behind
+  // it. Clearing all three on a `main` scope is the mirror-image mistake: it costs the other two
+  // domains an unnecessary rotation and drops their recorded health for no reason.
+  for (const scope of scopes) {
+    const slot = SCOPE_SLOTS[scope];
+    // A rescued refresh token this process holds but could not write is a credential too, and the
+    // one place it cannot be inferred away is here: on a locked Keychain `clear()` fails silently
+    // AND the read is unreadable, so nothing downstream would ever notice the logout happened.
+    forgetRotated(slot);
+    try {
+      clearAccessCache(slot);
+      clearSessionHealth(slot);
+    } catch {
+      // Diagnostics and a cache. Neither is worth failing a logout that has already cleared the
+      // credential itself.
+    }
+  }
+
+  // The WEBSITE session belongs to the main session alone.
+  //
+  // `doLogout` never cleared it. The CLI's `logout` has since it was added, so a logout through the
+  // MCP tool left a working, decryptable Stockbit session on disk — while this very tool's
+  // description called the browser profile "a SECOND copy of the session". A logout that leaves a
+  // usable credential is not one.
+  let webSession = "not part of this scope";
+  if (scopes.includes("main")) {
+    try {
+      clearWebSession();
+      webSession = "cleared, along with the main access token and its recorded health";
+    } catch (err) {
+      webSession = `failed: ${String(redactValue(err instanceof Error ? err.message : String(err)))}`;
+    }
   }
 
   let browserProfile = "kept — it still holds a logged-in Stockbit session";
@@ -351,6 +447,7 @@ async function doLogout(request: LogoutRequest) {
   const report = await collectStatus();
   return jsonResult({
     cleared,
+    webSession,
     browserProfile,
     auth: report.auth,
     nextStep: report.nextStep,

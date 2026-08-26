@@ -20,7 +20,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
 import { BUILTIN_WORKFLOWS } from "../src/workflows/builtin.ts";
-import { parseToolProfile } from "../src/tools/_profile.ts";
+import { DEFAULT_TOOL_PROFILE, parseToolProfile, resolveToolProfile } from "../src/tools/_profile.ts";
+import { promptsForSurface } from "../src/prompts.ts";
 import { describeSurface } from "../src/tools/surface.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
@@ -167,4 +168,72 @@ test("a profile that filters out workflows registers no prompts at all", async (
   } finally {
     await close();
   }
+});
+
+test("a prompt whose recipe names a filtered-out tool is not offered", async () => {
+  // The trap the default profile creates. `workflow_run` IS in `core`, so the old gate — which only
+  // asked whether workflow_run was registered — let every prompt through. But `pine_script` is not
+  // in core, and two recipes call it. Both prompts would have appeared in every client's menu and
+  // failed at their last step, after the user chose them. That is the same argument the code
+  // already made about workflow_run, applied one level down.
+  const { profile } = resolveToolProfile(undefined);
+  const surface = describeSurface(profile, true);
+  assert.ok(!surface.skipped.includes("workflow_run"), "workflow_run is in core, so the old gate passes");
+  assert.ok(surface.skipped.includes("pine_script"), "but pine_script is not");
+
+  const offered = promptsForSurface(surface).map((w) => w.name).sort();
+  assert.ok(!offered.includes("pine_handoff"), "pine_handoff calls pine_script and must be left out");
+  assert.ok(!offered.includes("strategy_check"), "strategy_check calls pine_script too");
+  assert.equal(offered.length, BUILTIN_WORKFLOWS.length - 2);
+
+  const { client, close } = await connect(profile);
+  try {
+    const { prompts } = await client.listPrompts();
+    assert.deepEqual(prompts.map((p) => p.name).sort(), offered, "and the server offers exactly those");
+  } finally {
+    await close();
+  }
+});
+
+test("every prompt a surface offers can actually run every step of its recipe", async () => {
+  // The property, rather than the two names that happen to break it today: adding a tool to a
+  // recipe, or removing one from CORE_TOOLS, must not silently reintroduce a half-failing prompt.
+  for (const raw of [undefined, "all", "core", "core,pine", "market,workflows"]) {
+    const { profile } = resolveToolProfile(raw);
+    const surface = describeSurface(profile, raw === undefined);
+    const registered = new Set(surface.tools.map((t) => t.name));
+    for (const workflow of promptsForSurface(surface)) {
+      for (const step of workflow.steps) {
+        assert.ok(
+          registered.has(step.tool),
+          `${String(raw)}: prompt ${workflow.name} would call ${step.tool}, which is not registered`,
+        );
+      }
+    }
+  }
+});
+
+test("the default profile is core, and resolveToolProfile says when it was not chosen", () => {
+  assert.equal(DEFAULT_TOOL_PROFILE, "core");
+
+  const unset = resolveToolProfile(undefined);
+  assert.equal(unset.profile.label, "core");
+  assert.equal(unset.isDefault, true, "nobody set anything");
+
+  const blank = resolveToolProfile("   ");
+  assert.equal(blank.profile.label, "core");
+  assert.equal(blank.isDefault, true, "an empty variable is the same as no variable");
+
+  const chosen = resolveToolProfile("core");
+  assert.equal(chosen.profile.label, "core");
+  assert.equal(chosen.isDefault, false, "the same profile, but the user asked for it");
+
+  const all = resolveToolProfile("all");
+  assert.equal(all.isDefault, false);
+  assert.equal(describeSurface(all.profile).skipped.length, 0, "`all` still means everything");
+
+  // parseToolProfile stays pure: toolsdoc asks it for "all" and means it, and an empty string there
+  // must keep meaning "no filtering" rather than quietly becoming the default.
+  assert.equal(describeSurface(parseToolProfile(undefined)).skipped.length, 0);
+  assert.equal(describeSurface(parseToolProfile("")).skipped.length, 0);
 });

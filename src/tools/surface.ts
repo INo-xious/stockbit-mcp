@@ -25,6 +25,14 @@ export interface Surface {
   skipped: string[];
   /** What to call the profile in a message. `"all"` when there is none. */
   profileLabel: string;
+  /**
+   * True when this profile is the DEFAULT rather than something the user asked for.
+   *
+   * The two need different words. Telling a reader "STOCKBIT_TOOLS=core is set, so 98 tools are
+   * missing" when nobody set it sends them looking for a variable that is not there, in a config
+   * file they may not even own.
+   */
+  profileIsDefault: boolean;
 }
 
 /** A stand-in for `McpServer` that records instead of registering. */
@@ -40,13 +48,14 @@ function recorder(): McpServer {
 }
 
 /** Describe the surface a profile would produce. Synchronous and side-effect free. */
-export function describeSurface(profile?: ToolProfile): Surface {
-  const define = registerTools(recorder(), { profile });
+export function describeSurface(profile?: ToolProfile, isDefault = false): Surface {
+  const define = registerTools(recorder(), { profile, profileIsDefault: isDefault });
   return {
     tools: define.records(),
     writes: define.writeNames(),
     skipped: define.skippedNames(),
     profileLabel: profile?.label ?? "all",
+    profileIsDefault: isDefault,
   };
 }
 

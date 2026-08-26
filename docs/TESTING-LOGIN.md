@@ -38,7 +38,9 @@ Exit code is non-zero if any check fails, so it works in CI.
 npm test
 ```
 
-68 tests, all offline. Relevant to login:
+Every test is offline and there are no skips. The count is deliberately not written down here — it
+goes stale the next time anyone adds a file, and a number in a document nobody regenerates is worse
+than no number. `npm test` prints it. Relevant to login:
 
 | File | Covers |
 |---|---|
@@ -72,6 +74,10 @@ Run with `STOCKBIT_DEBUG=1` to get the target/network trace.
 | 9 | HAR import (any browser) | `stockbit-auth import-har login.har` | token imported; warns the file still holds secrets |
 | 10 | HAR from "Copy all as HAR" | same, on a body-less export | tells you to use the Export button instead |
 | 11 | Profile already open | open a window on the profile, then `login` | tells you to close it; does not hang |
+| 12 | **Already signed in** | sign in to Stockbit in the profile, then `stockbit-auth login` | **captured in seconds** by reading the browser's own session — not fifteen minutes of nothing |
+| 13 | Signed in, nothing usable in the cookie | as 12, then delete the `credentialStorage` cookie in DevTools before running | signs the profile out and re-opens the login form by itself |
+| 14 | Switch account | `stockbit-auth login --switch-account` | a real login form, not the app; signing in as a second account stores THAT account's token |
+| 15 | **Chart, then market data** | any `chartbit_*` tool, then immediately a quote | **the quote succeeds.** This one sequence is the whole rotation bug: before the resync it 401s every time |
 
 Scenario **5** is the regression that motivated most of this work: the process used to exit `0`
 having stored nothing, which is indistinguishable from success. It must fail loudly.

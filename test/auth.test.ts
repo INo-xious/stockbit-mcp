@@ -7,7 +7,12 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-test-"));
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getStore, keychainWriteArgs } from "../src/auth/store.ts";
+import { getStore, keychainWriteArgs, keychainWriteArgsWithToken, keychainWriteDecision } from "../src/auth/store.ts";
+import {
+  refreshLockTimeoutMsForBackend,
+  staleMsForBackend,
+  worstCaseHoldMsFor,
+} from "../src/auth/reflock.ts";
 import { parseRefresh, ensureFresh, resetSession, decodeJwt } from "../src/auth/session.ts";
 import { buildUrl } from "../src/http/transport.ts";
 
@@ -78,17 +83,69 @@ test("the credential file is replaced atomically and never left world-readable",
   );
 });
 
-test("Keychain writes preserve the default trusted creator without granting broad access", () => {
-  const args = keychainWriteArgs("test-token");
+test("the Keychain write command does not carry the token in argv", () => {
+  // A process argument is visible in `ps` to every process running as the same user — and reading
+  // it there BYPASSES the Keychain ACL that would otherwise make access prompt. This project
+  // already warns about exactly that for the Telegram bot token (docs/FEATURES.md); the credential
+  // it exists to guard should not be the exception.
+  //
+  // `-w` last with no value is what `man security` calls the recommended form: "Put at end of
+  // command to be prompted."
+  const args = keychainWriteArgs();
   assert.deepEqual(args, [
+    "add-generic-password",
+    "-s", "stockbit-mcp",
+    "-a", "refresh-token",
+    "-U",
+    "-w",
+  ]);
+  assert.equal(args.at(-1), "-w", "`-w` must be last, so the value is prompted for and not an argument");
+
+  // Not "does this literal appear" — `keychainWriteArgs` takes no token, so that could never fail.
+  // The property that matters is that NOTHING in the args is credential-shaped, which would catch a
+  // future edit that put one back.
+  assert.equal(
+    args.some((a) => /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(a)),
+    false,
+    "no argument may be JWT-shaped",
+  );
+  assert.equal(args.length, 7, "seven fixed arguments and nowhere for a value to hide");
+});
+
+test("Keychain writes preserve the default trusted creator without granting broad access", () => {
+  for (const args of [keychainWriteArgs(), keychainWriteArgsWithToken("test-token")]) {
+    assert.equal(args.includes("-T"), false, "must not reset the Keychain ACL");
+    assert.equal(args.includes("-A"), false, "must not grant unrestricted application access");
+    assert.equal(args.includes("-U"), true, "must update in place rather than replacing the item");
+  }
+});
+
+test("the argv fallback is still exactly the old command, so it can be trusted when it is needed", () => {
+  // Kept deliberately: whether `security` reads a prompted value from a pipe depends on
+  // `readpassphrase` finding a controlling terminal, which differs between an MCP server spawned by
+  // a client and the same command typed at a shell. `keychainWrite` tries the safe form, reads the
+  // value back to confirm it landed, and only falls back here when it did not.
+  assert.deepEqual(keychainWriteArgsWithToken("test-token"), [
     "add-generic-password",
     "-s", "stockbit-mcp",
     "-a", "refresh-token",
     "-U",
     "-w", "test-token",
   ]);
-  assert.equal(args.includes("-T"), false, "must not reset the Keychain ACL");
-  assert.equal(args.includes("-A"), false, "must not grant unrestricted application access");
+});
+
+test("readState tells 'nothing stored' apart from 'could not find out'", () => {
+  // On the file backend there is no locked-Keychain equivalent, so this asserts the refinement that
+  // does exist: readState agrees with get(), including for a file that is present but unreadable.
+  // The Keychain branch's exit-code mapping is not reachable under STOCKBIT_FORCE_FILE_STORE=1 and
+  // is asserted by inspection in the comment there.
+  const store = getStore();
+  store.clear();
+  assert.equal(store.readState(), "absent", "a cleared store is absent, not unavailable");
+  store.set("eyJhbGciOiJub25lIn0.eyJleHAiOjJ9.sig");
+  assert.equal(store.readState(), "present");
+  store.clear();
+  assert.equal(store.readState(), "absent");
 });
 
 test("parseRefresh extracts access, expiry, and detects rotation", () => {
@@ -182,4 +239,70 @@ test("refresh persists a ROTATED refresh token (or we lock ourselves out)", asyn
 test("decodeJwt reads the payload", () => {
   assert.equal(decodeJwt(jwt(42))["exp"], 42);
   assert.deepEqual(decodeJwt("not-a-jwt"), {});
+});
+
+
+test("a Keychain write that was KILLED never falls back to putting the token in argv", () => {
+  // The regression this exists to prevent, twice over.
+  //
+  // `keychainWriteArgsWithToken` spawns `security ... -w <the refresh token>`, where `ps` shows the
+  // credential to every process running as this user. Moving the value to stdin was the whole point
+  // of that pair of functions -- and both times the guard was written it covered one of the two
+  // spawns that can fail to answer and not the other. On a locked Keychain it is the WRITE that
+  // raises the unlock dialog first, so the read-back is never even reached; a child killed by the
+  // timeout reports `{ status: null }`, and treating that like a refusal walked straight into the
+  // fallback. It also bought nothing -- the argv spawn meets the same dialog and fails too, so the
+  // only lasting effect was the credential in `ps`.
+  assert.equal(keychainWriteDecision(null, null), "fail", "a killed write must not reach argv");
+
+  // A refusal to ACT is not an answer either, and this half was missed the first time round: the
+  // read-back branch of the same function already classified 45 (the Keychain is locked and nothing
+  // may prompt) and 51 (someone clicked Deny) as non-answers, while the write branch called them
+  // definite refusals and sent the token to argv. Same function, same two codes, opposite verdicts
+  // -- and the fallback could not have helped in either case, because it meets the same lock and
+  // the same prompt.
+  assert.equal(keychainWriteDecision(45, null), "fail", "errSecInteractionNotAllowed: locked");
+  assert.equal(keychainWriteDecision(51, null), "fail", "errSecAuthFailed: the prompt was declined");
+
+  // What is left for the fallback: `security` ran and refused for some other reason.
+  assert.equal(keychainWriteDecision(1, null), "argv");
+
+  // And the read-back half of the same rule.
+  assert.equal(keychainWriteDecision(0, { matched: true, status: 0 }), "stdin");
+  assert.equal(
+    keychainWriteDecision(0, { matched: false, status: null }),
+    "stdin-unverified",
+    "a read that could not answer is not a read that said no",
+  );
+  assert.equal(keychainWriteDecision(0, { matched: false, status: 0 }), "argv", "read back a different value");
+  assert.equal(keychainWriteDecision(0, { matched: false, status: 44 }), "argv", "genuinely not there");
+});
+
+test("the Keychain lock allowance is asserted on both backends, from an offline test", () => {
+  // It was not, and the comment claiming it was made that harder to notice. Every test in this repo
+  // sets STOCKBIT_FORCE_FILE_STORE=1 before its imports -- it has to, the suite is offline -- so
+  // `getStore().backend` is never "keychain" under test and the entire Keychain branch was dead
+  // code as far as the suite was concerned. The multiplier could be doubled, or deleted, and the
+  // whole suite stayed green.
+  //
+  // Literals, deliberately. A test that recomputes the formula agrees with the constant rather than
+  // with what the lock actually holds.
+  assert.equal(staleMsForBackend("file"), 50_000);
+  assert.equal(refreshLockTimeoutMsForBackend("file"), 55_000);
+  assert.equal(staleMsForBackend("keychain"), 86_000);
+  assert.equal(refreshLockTimeoutMsForBackend("keychain"), 91_000);
+
+  // The ordering is the property; the numbers are how it is currently met. A holder must be able to
+  // finish before it is judged stale, and a waiter must outlast the staleness threshold or it can
+  // never break the lock a crashed process left behind.
+  for (const backend of ["file", "keychain"] as const) {
+    assert.ok(
+      worstCaseHoldMsFor(backend) < staleMsForBackend(backend),
+      backend + ": a healthy holder must not be broken as stale",
+    );
+    assert.ok(
+      staleMsForBackend(backend) < refreshLockTimeoutMsForBackend(backend),
+      backend + ": a waiter that gives up before the stale threshold can never break a dead lock",
+    );
+  }
 });

@@ -388,7 +388,10 @@ All of it lives in one directory — `~/.stockbit` by default, or wherever
 
 | path | what |
 |---|---|
-| `~/.stockbit/refresh.enc` | your session token, AES-256-GCM |
+| `~/.stockbit/refresh.enc` | your session token, AES-256-GCM. On macOS the token is in the Keychain instead and this file does not exist |
+| `~/.stockbit/access.enc` | the 24-hour access tokens, shared between processes so they do not each spend a rotation. AES-256-GCM, `0600`. `STOCKBIT_NO_ACCESS_CACHE=1` turns it off — see [SECURITY.md](../SECURITY.md) |
+| `~/.stockbit/websession.enc` | the browser's own Stockbit session (cookies + Local Storage), which is what the chart tools run on. AES-256-GCM |
+| `~/.stockbit/session-health.json` | what happened the last time each credential was used. **Plaintext, and holds no tokens** — only an outcome, a time, and an 8-character digest. Safe to read, and safe to paste |
 | `~/.stockbit/charts/` | rendered `.svg` charts |
 | `~/.stockbit/pine/` | generated `.pine` scripts |
 | `~/.stockbit/alerts.json` | alert rules |
@@ -409,8 +412,9 @@ All of it lives in one directory — `~/.stockbit` by default, or wherever
 | `STOCKBIT_BROWSER` | absolute path to the Chromium binary used for the one-time login capture |
 | `STOCKBIT_WEB_BROWSER` | which browser to open Stockbit in, e.g. `"Microsoft Edge"` — pin the one holding your session |
 | `STOCKBIT_NO_BROWSER=1` | never open a browser window; login refuses and names the terminal command instead |
-| `STOCKBIT_LOGIN_TIMEOUT_MS` | how long the login capture waits for you to sign in (default 5 minutes) |
-| `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only, never written to disk |
+| `STOCKBIT_LOGIN_TIMEOUT_MS` | how long the login capture waits for you to sign in (default 15 minutes) |
+| `STOCKBIT_ACCESS_TOKEN` | use this bearer token instead of the stored session. Memory only — it is never written to the access cache, because it belongs to whoever set it in *this* process |
+| `STOCKBIT_NO_ACCESS_CACHE=1` | do not share the 24-hour access token between processes via `~/.stockbit/access.enc`. Costs one refresh per process, and each refresh rotates the refresh token — see SECURITY.md |
 | `STOCKBIT_FORCE_FILE_STORE=1` | skip the macOS Keychain and use the encrypted file store (what the tests run under) |
 | `STOCKBIT_ALERT_WEBHOOK` | https endpoint for fired alerts; off unless set |
 | `STOCKBIT_TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather. Environment only — a token on the command line is visible to every user on the machine through `ps` |

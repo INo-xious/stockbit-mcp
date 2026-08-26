@@ -16,8 +16,11 @@ import { stdin, stdout } from "node:process";
 import { existsSync, rmSync } from "node:fs";
 import { bootstrap } from "../src/auth/bootstrap.js";
 import { getStore } from "../src/auth/store.js";
+import { withCredentialLock } from "../src/auth/reflock.js";
 import {
+  decodeJwt,
   forceRefresh,
+  forgetRotated,
   hasStoredSession,
   missingSessionMessage,
   resetSession,
@@ -28,11 +31,16 @@ import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/
 import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
+import { clearWebSession } from "../src/auth/websession.js";
+import { clearAccessCache } from "../src/auth/accesscache.js";
+import { clearSessionHealth } from "../src/auth/health.js";
 import { removeDirWithRetry } from "../src/auth/tempdir.js";
 import { explainMiss, scanHarFile } from "../src/auth/har.js";
 import { formatChecks, runDoctor } from "../src/auth/doctor.js";
 import { logStderr, redactValue } from "../src/redact.js";
 import { collectStatus, formatStatus } from "../src/status.js";
+import { resolveToolProfile } from "../src/tools/_profile.js";
+import { describeSurface } from "../src/tools/surface.js";
 
 async function promptSecret(question: string): Promise<string> {
   const rl = createInterface({ input: stdin, output: stdout, terminal: true });
@@ -93,9 +101,13 @@ async function cmdImportHar(argv: string[]): Promise<void> {
   }
 
   logStderr(`Found a session token in entry #${report.match.entryIndex} (${report.match.url}).`);
-  const result = await bootstrap(report.match.refresh);
+  const result = await bootstrap(report.match.refresh, { verify: argv.includes("--verify") });
   logStderr(`Stored in: ${result.backend}`);
-  logStderr(`Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — the token may already be stale"}`);
+  logStderr(
+    result.verified
+      ? `Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — the token may already be stale"}`
+      : `Stored${result.accessOk ? "" : " — but the token looks expired"}. Not verified against Stockbit: a test refresh would rotate the token and log you out of the website. Pass --verify to do it anyway.`,
+  );
 
   if (argv.includes("--shred")) {
     try {
@@ -116,53 +128,135 @@ async function cmdLogin(argv: string[]): Promise<void> {
   logStderr("Opening a browser for a one-time Stockbit login…");
   const result = await captureViaBrowserLogin({
     profileDir: argv.includes("--fresh-profile") ? "fresh" : undefined,
+    switchAccount: argv.includes("--switch-account"),
   });
   if (!result.captured) {
     logStderr("No session captured. You can retry, or use `stockbit-auth bootstrap`.");
     process.exit(1);
   }
-  // Validate by minting a fresh access token from the captured refresh token.
-  resetSession();
+  // Validate WITHOUT spending the token.
+  //
+  // This used to call `forceRefresh()`, and that one line was why a successful login left the user
+  // logged out of the website. Stockbit's refresh endpoint ROTATES: spending a refresh token
+  // invalidates the previous one, and the browser profile that was just logged in holds that
+  // previous one. So the validation step reached back and killed the session it had just validated.
+  // Measured: eight HTTP 401s from exodus.stockbit.com on the very next chart load, `/login/refresh`
+  // among them, and a page rendering a body of zero height — which the Chartbit driver then reported
+  // as "the session is not signed in", sending every diagnosis in the wrong direction.
+  //
+  // The token arrived seconds ago in a live `/auth/v1/login` response. What is worth checking is that
+  // it is a readable, unexpired JWT, and that is a local question. `--verify` keeps the round trip for
+  // anyone who wants it, and now says plainly what it costs.
+  const stored = getStore("main").get();
+  let exp: number | null = null;
   try {
-    await forceRefresh();
-    logStderr("Test refresh: OK ✓  — you're set. Run stockbit-mcp.");
-  } catch (err) {
-    logStderr("Captured a token but the test refresh failed:", String(err));
-    logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+    const claims = stored ? decodeJwt(stored) : null;
+    exp = claims && typeof claims["exp"] === "number" ? (claims["exp"] as number) : null;
+  } catch {
+    exp = null;
+  }
+  if (!stored) {
+    logStderr("Captured a session but nothing reached the store. Tell the maintainer this message.");
     process.exit(1);
+  }
+  if (exp !== null && exp - Math.floor(Date.now() / 1000) <= 0) {
+    logStderr("Captured a token that is already expired. Try logging in again.");
+    process.exit(1);
+  }
+
+  if (argv.includes("--verify")) {
+    resetSession();
+    try {
+      await forceRefresh();
+      logStderr("Test refresh: OK ✓ — note this ROTATED the token, so the browser session is now stale.");
+    } catch (err) {
+      logStderr("Captured a token but the test refresh failed:", String(err));
+      logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+      process.exit(1);
+    }
+  } else {
+    const days = exp === null ? null : Math.floor((exp - Math.floor(Date.now() / 1000)) / 86_400);
+    logStderr(`Session stored${days === null ? "" : ` (valid ~${days} day(s))`} — you're set. Run stockbit-mcp.`);
   }
 }
 
-async function cmdBootstrap(): Promise<void> {
+async function cmdBootstrap(argv: string[]): Promise<void> {
   const token = (await promptSecret("Paste refresh token (input hidden): ")).trim();
   if (!token) {
     logStderr("No token entered. Aborting.");
     process.exit(2);
   }
-  const result = await bootstrap(token);
+  const result = await bootstrap(token, { verify: argv.includes("--verify") });
   logStderr(`Stored in: ${result.backend}`);
-  logStderr(`Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — verify the token / refresh host"}`);
+  logStderr(
+    result.verified
+      ? `Test refresh: ${result.accessOk ? "OK ✓" : "FAILED — verify the token / refresh host"}`
+      : `Stored${result.accessOk ? "" : " — but the token looks expired"}. Not verified against Stockbit: a test refresh would rotate the token and log you out of the website. Pass --verify to do it anyway.`,
+  );
   if (!result.accessOk) process.exit(1);
   logStderr("Bootstrap complete. You can now run stockbit-mcp.");
 }
 
 /**
- * Report what is stored, and — unless asked not to — whether it actually works.
+ * Report what is stored, and what is known about whether it works.
  *
  * The expiry in the JWT payload is a *claim about time*, not a statement of validity. A refresh
  * token can be revoked, rotated out from under this store by another process, or invalidated
- * server-side, and none of that changes a byte of the payload. So this command used to answer
+ * server-side, and none of that changes a byte of the payload. So this command could answer
  * "present, expires in ~1.4 day(s)" for a token that 401s on its first use, which is the most
  * expensive kind of wrong answer: it sends you off to debug the thing you were about to do.
  *
- * One real refresh settles it. `--offline` keeps the old behaviour for when the network is not
- * available or a round trip is unwanted, and says plainly that it did not check.
+ * The fix used to be a live refresh, ON BY DEFAULT. That was worse than the problem. A refresh
+ * ROTATES the token family, which ends the website session the Chartbit browser is holding — so the
+ * command a confused user runs first was the one that broke the other half of their setup, and the
+ * `status` tool description told the model to call it "FIRST whenever anything looks wrong".
+ *
+ * So the default is off, and the honest answer comes from a journal instead: every refresh this
+ * project makes records its outcome, so `status` can say "Stockbit rejected this at 14:12" for free.
+ * `--verify` still spends one refresh for anyone who wants proof, and now says what that costs.
  */
 async function cmdStatus(argv: string[]): Promise<void> {
   // The same report the `status` MCP tool returns. One implementation, so a user reading the
   // terminal and a model reading the tool result cannot be told two different stories.
-  const live = !argv.includes("--offline");
-  const report = await collectStatus({ live });
+  // `--verify` opts IN. This used to default to live, which meant the command a confused user runs
+  // FIRST was the command that rotated their refresh token and ended their website session. The
+  // journal now answers "did it last work" for free, so the round trip is only worth making when
+  // somebody deliberately asks for it.
+  //
+  // `--offline` is kept as an accepted no-op because SECURITY.md tells vulnerability reporters to
+  // paste the output of `stockbit-auth status --offline --json`, and a flag error there would turn
+  // a security report into a support question.
+  const live = argv.includes("--verify");
+
+  // What a server started from THIS environment would register.
+  //
+  // Without this the report claimed a tool profile it had not computed, and the "trading is on but
+  // there are no order tools" warning was dead on the CLI path — which is precisely the terminal the
+  // user is standing in when they run `trading-enable --live`. Describing a server this process is
+  // not is the whole reason it has to be derived rather than defaulted.
+  let profileLabel: string | undefined;
+  let profileIsDefault = false;
+  let missingTools: string[] | undefined;
+  let profileError: string | undefined;
+  try {
+    const known = new Set(describeSurface().tools.map((t) => t.name));
+    const resolved = resolveToolProfile(process.env.STOCKBIT_TOOLS, known);
+    profileLabel = resolved.profile.label;
+    profileIsDefault = resolved.isDefault;
+    missingTools = describeSurface(resolved.profile, resolved.isDefault).skipped;
+  } catch (err) {
+    // An unparsable STOCKBIT_TOOLS stops `stockbit-mcp` from starting. It must not stop `status` —
+    // that is the command someone runs to find out why — but staying silent about it and reporting
+    // a profile as though a server were running would answer the wrong question with a wrong fact.
+    profileError = err instanceof Error ? err.message : String(err);
+  }
+
+  const report = await collectStatus({
+    live,
+    ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
+    ...(missingTools === undefined ? {} : { missingTools }),
+    ...(profileError === undefined ? {} : { profileError }),
+  });
 
   if (argv.includes("--json")) {
     // Redacted on the way out even though `collectStatus` never copies a token in: this output is
@@ -171,7 +265,13 @@ async function cmdStatus(argv: string[]): Promise<void> {
   } else {
     logStderr(formatStatus(report));
     if (!live) {
-      logStderr("Validity: NOT CHECKED (--offline). An expiry in the payload does not mean the token still works.");
+      logStderr(
+        "Validity: not proved by a request, and deliberately. An expiry in the payload does not mean " +
+          "a token still works — but proving it means refreshing, which ROTATES the token family and " +
+          "ends your website session. What is shown instead comes from what actually happened the " +
+          "last time each credential was used: a session that Stockbit rejected says so, and one that " +
+          "has never been used says nothing rather than guessing. Pass --verify to spend the refresh.",
+      );
     }
   }
 
@@ -183,8 +283,23 @@ async function cmdStatus(argv: string[]): Promise<void> {
 }
 
 async function cmdLogout(argv: string[]): Promise<void> {
-  getStore().clear();
+  // Under the credential lock, like every other credential write. A logout that races a refresh
+  // would otherwise be undone by the rotation landing a moment later — the user would be told they
+  // were logged out while a working token sat back on disk.
+  await withCredentialLock("main", () => getStore().clear());
   logStderr("Cleared stored refresh token.");
+
+  // A THIRD copy: the captured web session (cookies + Local Storage) that the Chartbit driver seeds
+  // its browser from. It is a working Stockbit session on its own, so a logout that left it on disk
+  // would not be a logout — the same reasoning that already removes the browser profile below.
+  clearWebSession();
+  // Per slot. `cmdLogout` clears only the MAIN credential above, so clearing all three domains'
+  // access tokens here would cost the securities and e-IPO sessions a rotation they did not ask
+  // for, and drop health this command never touched.
+  clearAccessCache("main");
+  clearSessionHealth("main");
+  forgetRotated("main");
+  logStderr("Cleared the stored browser web session and the main access token.");
 
   // The pin describes a profile that is about to stop being logged in; leaving it would send the
   // Chartbit driver at a browser with no session and no explanation.
@@ -474,7 +589,7 @@ async function main(): Promise<void> {
       await cmdLogin(argv);
       break;
     case "bootstrap":
-      await cmdBootstrap();
+      await cmdBootstrap(argv);
       break;
     case "import-har":
       await cmdImportHar(argv);
@@ -512,12 +627,14 @@ async function main(): Promise<void> {
           "trading-login|trading-status|trading-enable|trading-disable|trading-logout|paper-reset>",
       );
       logStderr("  login       one-time browser login, auto-captures your session (recommended)");
-      logStderr("              --fresh-profile  use a throwaway browser profile");
+      logStderr("              --fresh-profile   use a throwaway browser profile");
+      logStderr("              --switch-account  sign the current account out first, then show a real form");
       logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
       logStderr("  doctor      diagnose browsers, token store, and the capture path");
       logStderr("  bootstrap   paste a refresh token manually (fallback)");
       logStderr("  status      show store backend, every session, the trading mode and the IDX clock");
-      logStderr("              --offline  skip the live validity check");
+      logStderr("              --verify   spend one refresh to prove the token works — this ROTATES it");
+      logStderr("              --offline  accepted, and now the default: nothing is spent");
       logStderr("              --json     print the whole report as JSON (redacted; safe to paste)");
       logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
       logStderr("              --keep-profile  keep the browser profile (still logged in)");

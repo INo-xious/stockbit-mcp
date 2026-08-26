@@ -10,6 +10,143 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.1.0] – 2026-08-26
+
+The refresh token does not expire. It gets **spent** — and the process spending it is the browser
+this project drives itself. That is the whole of this release, plus the two things that were
+expensive about using the server day to day.
+
+See [ADR-0009](docs/adr/0009-browser-is-the-source-of-truth.md) for the decision behind it.
+
+### Changed
+
+- **`STOCKBIT_TOOLS` now defaults to `core`, not `all`.** This is the one change that may need
+  action: a server with no configuration registers **40 tools**, not 138. Startup was never the
+  problem — a built server boots and answers `status` in about 200 ms. The cost is per *turn*:
+  `tools/list` for the full surface is around 220,000 bytes, roughly 55,000 tokens, in the model's
+  context on **every message**; `core` is about a third of that. Set `STOCKBIT_TOOLS=all` to get
+  everything back, or `STOCKBIT_TOOLS=core,<family>` to add one family. It also aligns the code with
+  the docs, which have recommended `core` in the copy-paste snippet since the profile existed.
+- **`stockbit-auth status` no longer refreshes by default.** A refresh *rotates* the token family
+  and ends the website session, so the command a confused user runs first was the one that broke the
+  other half of their setup. `--verify` opts in and says what it costs; `--offline` is kept as an
+  accepted no-op because `SECURITY.md` tells vulnerability reporters to paste its output. The
+  `status` tool's `live: true` description stops calling itself "one request to prove it works".
+- **`logout` clears the website session and the access cache.** Through the MCP tool it cleared
+  neither — while its own description called the browser profile "a SECOND copy of the session". A
+  logout that leaves a working, decryptable Stockbit session on disk is not one.
+- **Prompts a profile cannot run are no longer offered.** `pine_handoff` and `strategy_check` call
+  `pine_script`, which is not in `core`, so under the new default they would have appeared in every
+  client's menu and failed at their last step. A `core` server offers 6 of the 8.
+
+### Added
+
+- **The browser's rotated refresh token is read out of `credentialStorage`.** Every Chartbit tool
+  opens a real Stockbit page; the page boots the SPA; the SPA calls `/login/refresh`; the family
+  rotates. The browser then held token N+1 while `refresh.enc` held N, and the next market-data call
+  401'd and told the user their session was gone. One user, one process, one chart was enough. The
+  rotated token was already being captured and written to disk once per chart call — nothing had
+  ever read it. New `src/auth/resync.ts` adopts it, under an ordering rule that **compares** rather
+  than assuming the browser always wins, because three in-repo paths legitimately leave the store
+  ahead.
+- **A 401 now recovers from the stored website session** before declaring the session dead. A file
+  read: no browser, no network, nothing interactive.
+- **Login recognises an already-signed-in browser.** It used to land in the app, capture nothing, and
+  report `Login timed out — no session captured.` fifteen minutes later. It now reads the credential
+  out of the browser's own session and finishes in seconds; failing that, it signs the profile out
+  and re-opens the form. `--switch-account` / `switch_account: true` clears first and never reuses
+  what was there — for signing in as a different account.
+- **A timeout that says where the page actually was**, and names the lever that fits: already signed
+  in points at `--switch-account`, still on the form points at `--fresh-profile`, no Stockbit page at
+  all points at `import-har`.
+- **The 24-hour access token is shared between processes** via `~/.stockbit/access.enc` — one file,
+  AES-256-GCM, mode `0600`, its own salt, each entry bound by fingerprint to the refresh token that
+  minted it. Because rotation makes minting expensive, N clients each minting their own retire each
+  other's credential. `STOCKBIT_NO_ACCESS_CACHE=1` opts out. **This is a real change to what is on
+  disk — see `SECURITY.md`; on macOS it is a genuine reduction.**
+- **`status` reports whether the stored token last *worked*.** You cannot prove a refresh token is
+  live without spending it, so `~/.stockbit/session-health.json` records every refresh outcome
+  instead — plaintext, `0600`, and containing **no tokens**, only an eight-hex-character digest.
+  That is what lets `status` report a revoked or superseded session at **zero requests**, which no
+  expiry check can ever do.
+- **`status` warns when trading is on but the `trading` family is not registered**, and names
+  `STOCKBIT_TOOLS=core,trading`. `core` has no order tools, so a user who deliberately ran
+  `trading-enable --live` would otherwise find nothing and no explanation.
+- **`doctor` gains three machine-checked rows**: which Keychain write mechanism works, that a
+  credential can be read back out of a browser's own cookie, and that clearing it actually clears it.
+
+### Fixed
+
+- **The refresh lock's timings defeated it.** A legitimate holder can hold for `2 ×
+  requestTimeoutMs` — one request plus the 401 retry — but the wait was 10 s and the staleness
+  threshold 30 s against a 40 s worst case. A caller queued behind a healthy refresh gave up and
+  refreshed in parallel, and a merely-slow holder had its lock broken as if it had crashed. Both are
+  now derived from `requestTimeoutMs` and asserted in a test. A second hole in the same pair: the
+  wait was shorter than the staleness threshold, so a lock left by a crashed process could never be
+  broken by anyone.
+- **Only one of nine credential-write paths took the lock.** `bootstrap`, `trading-login`,
+  `trading-logout`, the e-IPO mint and both logout paths now do. The login capture deliberately
+  stays outside it, and says so.
+- **On macOS the lock was in the wrong place.** The Keychain is machine-global while `lockPath()`
+  resolved under `$STOCKBIT_STORE_DIR`, so two clients with different store dirs took *different
+  locks over one credential*. It is now backend-aware; the file backend is unchanged.
+- **A rotated token could be lost outright.** If `store.set` threw — a locked Keychain, a denied ACL
+  prompt, EPERM from an antivirus — the exception propagated and the rotated token was gone
+  permanently, because the one it replaced was retired server-side the instant the pair was issued.
+  A transient disk error cost a forced re-login. The access token is now kept first, the write is
+  retried, and the rotated token is held in memory for this process's next refresh.
+- **The 401 retry is bounded at one.** It terminated in principle; the failure mode of being wrong
+  was unbounded recursion inside a held lock.
+- **`~/.stockbit` could be created world-listable.** `src/util/dirlock.ts` made the parent directory
+  with no mode, and on a fresh machine the lock is often the first thing written there. The files
+  were always `0600`; the directory was the part that was wrong.
+- **`login` failing to capture no longer hides the reason.** Its `flushAndCloseBrowser` window is
+  exactly SPA boot, which rotated away the token just written while `done = true` blocked
+  re-capture — so the credential could be dead before the command returned.
+
+### Security
+
+- **The Keychain token stops travelling as a process argument.** `keychainWriteArgs` returned
+  `["-w", token]`, visible in `ps` to any process running as the same user — which also *bypasses*
+  the Keychain ACL that would otherwise prompt. `man security` recommends the opposite of what the
+  old comment claimed. The value now goes in on stdin, and the write **reads it back** before
+  keeping it: `security` prompts twice, and feeding it once exits 0 while storing an empty string.
+  The `argv` form is retained as a fallback, and `doctor` reports which one ran.
+- `TokenStore.readState()` distinguishes "nothing stored" from "could not find out". A locked
+  Keychain read as `null` — the same value as "you have never logged in" — so `status` advised a
+  re-login, which on macOS means overwriting a credential that was never in doubt.
+
+### Docs
+
+- [ADR-0009](docs/adr/0009-browser-is-the-source-of-truth.md), and `docs/PENDING-VERIFICATION.md`
+  gains a section for the five things this work left unmeasured, each with the one-line experiment
+  that would settle it.
+- `src/config.ts` and `docs/stockbit-api.md` called token rotation "unverified". It is Observed, and
+  two other comments in the repo already treated it as settled — leaving the hedge in one place is
+  how the lock gets removed as defensive padding.
+- `docs/FEATURES.md` gave the login timeout as 5 minutes; the code has said 15 for some time.
+  `CONTEXT.md` described three credentials; there are four. `docs/TESTING-LOGIN.md` stops quoting a
+  test count that goes stale, and gains manual-matrix rows 12–15.
+
+## [1.0.1] – 2026-08-25
+
+Tagged and published at the time; this section is written retrospectively, because the release went
+out without one.
+
+### Fixed
+
+- **`chartbit`: the reused-tab reload race.** Every `chartbit_open` / `screenshot` / `draw` against
+  an already-open tab re-navigated it, even though the tab had been found by matching that exact
+  symbol's own URL and was already correct. Combined with a readiness check that waited only for the
+  widget object rather than for the datafeed to paint, this raced a needless reload on every call and
+  returned a chart that read as ready with zero candles on screen. Fixed by dropping the re-navigate
+  and gating readiness on the series actually having loaded bars, plus anti-throttling launch flags
+  and `Target.activateTarget` against the window being backgrounded.
+- **`chartbit`: entity ids were never awaited.** `createShape` / `createMultipointShape` /
+  `createStudy` return a Promise in this TradingView build rather than the id directly. Every stored
+  `tvEntityId` serialised to the literal string `"[object Object]"`, so `chartbit_clear`
+  `scope: "ours"` silently no-opped while reporting success and left drawings on the real chart.
+
 ## [1.0.0] – 2026-08-25
 
 The first public release. Everything below the tag was already working; this is what it took to be
@@ -539,6 +676,8 @@ intercepts at `Fetch`'s Response stage, which *pauses* the request while the bod
 > guarded a function nothing proved production called. If you add coverage here, assert the request
 > that actually goes out, and check that your test fails when the feature is deleted.
 
-[Unreleased]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/INo-xious/stockbit-mcp/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/INo-xious/stockbit-mcp/releases/tag/v1.0.0
 [0.1.0]: https://github.com/INo-xious/stockbit-mcp/commits/v1.0.0

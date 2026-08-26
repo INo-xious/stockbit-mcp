@@ -17,8 +17,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeDirWithRetry } from "./tempdir.js";
 import { browserVersion, findBrowsers, type BrowserInfo } from "./browsers.js";
-import { captureViaBrowserLogin } from "./login.js";
-import { getStore } from "./store.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { CDP } from "./cdp.js";
+import { launchDebuggableBrowser } from "./launch.js";
+import { captureViaBrowserLogin, clearBrowserSession } from "./login.js";
+import { captureWebSession, readCredentialStorage } from "./websession.js";
+import { findBrowser } from "./browsers.js";
+import { getStore, probeKeychainWrite } from "./store.js";
 import { hasStoredSession } from "./session.js";
 import { pinnedBrowserExists, readBrowserProfile } from "./browserprofile.js";
 import { tradingPolicy } from "../settings.js";
@@ -78,6 +83,117 @@ function startFixture(): Promise<{ server: Server; origin: string }> {
 }
 
 /**
+ * A page that sets a `credentialStorage` cookie in the observed shape, so the harvest half of the
+ * login ladder can be driven against a real browser without Stockbit being involved.
+ */
+function harvestFixturePage(): string {
+  const blob = JSON.stringify({ state: { access: "not-a-real-token", refresh: FIXTURE_JWT }, version: 0 });
+  return (
+    `<!doctype html><meta charset=utf-8><title>stockbit-mcp harvest self-test</title>` +
+    `<body><p>stockbit-mcp self-test — this window closes itself.</p><script>` +
+    `document.cookie = "credentialStorage=" + encodeURIComponent(${JSON.stringify(blob)}) + "; path=/";` +
+    `window.__ready = true;</script>`
+  );
+}
+
+/**
+ * Prove the OTHER half of the already-signed-in ladder: that a credential can be read out of a
+ * browser's own cookie, and that clearing it actually clears it.
+ *
+ * This turns two manual-matrix rows into machine-checked ones. It matters more than it looks:
+ * `Storage.clearDataForOrigin` answers "Internal error" when sent at browser level and succeeds on
+ * a page session, and because the fallback still clears *something*, getting that wrong is
+ * invisible from the outside. Nothing here touches the user's real profile or store — its own temp
+ * profile, its own local fixture, and a JWT that authorizes nothing.
+ */
+async function harvestSelfTest(browserPath?: string): Promise<Check[]> {
+  const bin = browserPath ?? findBrowser();
+  if (!bin) return [{ name: "Session harvest", status: "warn", detail: "no drivable browser" }];
+
+  const profile = mkdtempSync(join(tmpdir(), "stockbit-harvest-selftest-"));
+  let server: Server | undefined;
+  let launched: Awaited<ReturnType<typeof launchDebuggableBrowser>> | undefined;
+  let cdp: CDP | undefined;
+  try {
+    server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(harvestFixturePage());
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(0, "127.0.0.1", () => resolve());
+    });
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const hostFilter = (domain: string): boolean => domain.replace(/^\./, "") === "127.0.0.1";
+
+    launched = await launchDebuggableBrowser({ bin, profileDir: profile, headless: true });
+    cdp = await CDP.connect(launched.wsUrl);
+    const target = (await cdp.send("Target.createTarget", { url: `${origin}/` })) as { targetId: string };
+    const attached = (await cdp.send("Target.attachToTarget", {
+      targetId: target.targetId,
+      flatten: true,
+    })) as { sessionId?: string };
+    const sid = attached.sessionId;
+    if (!sid) return [{ name: "Session harvest", status: "fail", detail: "could not attach to the fixture page" }];
+    await cdp.send("Runtime.enable", {}, sid, 5_000).catch(() => {});
+
+    for (let i = 0; i < 40; i++) {
+      const r = (await cdp.send(
+        "Runtime.evaluate",
+        { expression: "Boolean(window.__ready)", returnByValue: true },
+        sid,
+        5_000,
+      )) as { result?: { value?: boolean } };
+      if (r.result?.value === true) break;
+      await delay(100);
+    }
+
+    const checks: Check[] = [];
+    const captured = await captureWebSession(cdp, { hostFilter });
+    const harvested = captured ? readCredentialStorage(captured, { hostFilter }) : null;
+    checks.push(
+      harvested === FIXTURE_JWT
+        ? { name: "Session harvest", status: "pass", detail: "a credential was read back out of the browser's own cookie" }
+        : {
+            name: "Session harvest",
+            status: "fail",
+            detail: "the cookie was set but nothing was read back — an already-signed-in login cannot recover",
+          },
+    );
+
+    const how = await clearBrowserSession(cdp, origin, sid);
+    const after = await captureWebSession(cdp, { hostFilter });
+    const left = after ? readCredentialStorage(after, { hostFilter }) : null;
+    checks.push(
+      left === null && how !== "failed"
+        ? {
+            name: "Browser sign-out",
+            status: how === "origin" ? "pass" : "warn",
+            detail:
+              how === "origin"
+                ? "the origin-scoped clear removed the session"
+                : "cleared, but only via the browser-wide fallback — wider than intended",
+          }
+        : {
+            name: "Browser sign-out",
+            status: "fail",
+            detail: "the session survived the clear — auto-logout would re-open the login page still signed in",
+          },
+    );
+    return checks;
+  } catch (err) {
+    return [
+      { name: "Session harvest", status: "fail", detail: err instanceof Error ? err.message : String(err) },
+    ];
+  } finally {
+    cdp?.close();
+    launched?.child.kill();
+    server?.close();
+    await removeDirWithRetry(profile);
+  }
+}
+
+/**
  * Drive the real capture path against the fixture. Nothing is persisted: `persist:false` means a
  * successful self-test cannot overwrite the user's real stored token.
  */
@@ -117,6 +233,12 @@ export async function captureSelfTest(browserPath?: string): Promise<Check[]> {
         detail: "capture returned, but not the fixture token — interception is misbehaving",
       });
     }
+
+    // The other half of the login ladder, proved the same way: read a credential out of a browser's
+    // own cookie, then clear it. Both are things only a real browser can settle — the clear in
+    // particular answers "Internal error" at browser level and works on a page session, and the
+    // difference is invisible from here because the fallback still clears something.
+    checks.push(...(await harvestSelfTest(browserPath)));
   } catch (err) {
     checks.push({
       name: "Popup capture",
@@ -198,6 +320,32 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
       status: "fail",
       detail: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  /* --------------------------- how the Keychain is written --------------------------- */
+  //
+  // Machine-checked rather than asserted in a comment. `man security` recommends putting `-w` last
+  // so the value is prompted for instead of passed in `argv`, but whether `security` will take that
+  // value from a pipe depends on `readpassphrase` finding a controlling terminal — which differs
+  // between an MCP server spawned by a client and the same command typed at a shell. The probe
+  // writes a throwaway value under its own account name, reads it back, and deletes it, so the
+  // answer comes from this machine and the real credential is never touched.
+  if (store?.backend === "keychain") {
+    try {
+      const probe = probeKeychainWrite();
+      checks.push({
+        name: "Keychain write",
+        status:
+          probe.method === "stdin" ? "pass" : probe.method === null ? "fail" : "warn",
+        detail: probe.detail,
+      });
+    } catch (err) {
+      checks.push({
+        name: "Keychain write",
+        status: "warn",
+        detail: `could not be probed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   /* ---------------------------------- token ---------------------------------- */

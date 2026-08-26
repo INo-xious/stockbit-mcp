@@ -35,6 +35,7 @@ body.txt
 plan.md
 PLAN.md
 PLAN-REVIEW-LOG.md
+progress.md
 
 # Build artefacts produced by `npm pack` and `npm run build:mcpb`
 *.tgz

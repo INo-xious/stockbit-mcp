@@ -8,18 +8,18 @@
     "url": "https://github.com/INo-xious/stockbit-mcp",
     "source": "github"
   },
-  "version": "1.0.1",
+  "version": "1.1.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "stockbit-mcp",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
           "name": "STOCKBIT_TOOLS",
-          "description": "all (default) | core | a comma-separated list of families or tool names",
+          "description": "core (the default) | all | a comma-separated list of families or tool names",
           "isRequired": false,
           "isSecret": false
         },

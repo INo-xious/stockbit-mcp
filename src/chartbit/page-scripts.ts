@@ -30,7 +30,10 @@ const PROLOGUE = `
   if (!key) return { ready: false, reason: "no-widget-key" };
   var w = bag[key];
   if (!w || typeof w.activeChart !== "function") return { ready: false, reason: "widget-not-initialised" };
-  var chart = w.activeChart();
+  var chart;
+  try {
+    chart = w.activeChart();
+  } catch (e) { return { ready: false, reason: "widget-booting" }; }
   if (!chart) return { ready: false, reason: "no-active-chart" };
 `;
 
@@ -49,9 +52,22 @@ function script(body: string): string {
 /**
  * Is the page a logged-in chart yet?
  *
- * Reports the three states separately, because they need three different messages. A signed-out
- * Stockbit chart renders an EMPTY WHITE BODY — no login wall, no text — so "blank" and "still
- * loading" are indistinguishable from a screenshot and must be distinguished here.
+ * Reports the states separately, because they need different messages. A signed-out Stockbit chart
+ * renders an EMPTY WHITE BODY — no login wall, no text — so "blank" and "still loading" are
+ * indistinguishable from a screenshot and must be distinguished here.
+ *
+ * `textContent`, NOT `innerText`. `innerText` is defined in terms of RENDERED text, so it returns ""
+ * for a document that has not been laid out — and this page reaches exactly that state. Measured: a
+ * chart page carrying 2,335 characters of server-rendered markup across 8 elements reported
+ * `innerText.length === 0`, which this script called `blank`, which the driver reported as "the
+ * session is not signed in". The session was fine. The page had simply rendered nothing because
+ * every API call behind it was being answered with 401, and a layout-dependent probe cannot tell
+ * those apart. `textContent` is layout-independent and can.
+ *
+ * `shellOnly` is that newly visible state: real markup, zero height. It means the document arrived
+ * and the app could not paint — in practice a stale browser session whose XHRs are all 401ing. It is
+ * worth its own message because the fix is "log in again", while `blank` means something never
+ * arrived at all.
  *
  * `hasChart` alone is not "ready": `activeChart()` returns a real object as soon as the widget shell
  * mounts, well before the datafeed has delivered a single bar. A screenshot or a shape taken on
@@ -63,23 +79,35 @@ function script(body: string): string {
 export const READINESS = script(`
   var path = String(location.pathname || "");
   var loggedOut = path.indexOf("login") >= 0;
-  var bodyText = (document.body && document.body.innerText ? document.body.innerText : "").trim();
+  var bodyText = (document.body && document.body.textContent ? document.body.textContent : "").trim();
+  var bodyHeight = 0;
+  try {
+    bodyHeight = document.body ? Math.round(document.body.getBoundingClientRect().height) : 0;
+  } catch (e) { bodyHeight = 0; }
   var bag = window.tvWidget;
   var key = bag ? Object.keys(bag).find(function (k) { return bag[k]; }) : undefined;
   var w = key ? bag[key] : undefined;
-  var chart = w && typeof w.activeChart === "function" ? w.activeChart() : undefined;
+  var chart;
+  try {
+    chart = w && typeof w.activeChart === "function" ? w.activeChart() : undefined;
+  } catch (e) { chart = undefined; }
   var hasBars = false;
   try {
     var series = chart && chart.getSeries ? chart.getSeries() : null;
     hasBars = Boolean(series && !series.isLoading() && series.barsCount() > 0);
   } catch (e) { hasBars = false; }
+  var sym = null;
+  try {
+    sym = chart && typeof chart.symbol === "function" ? String(chart.symbol()) : null;
+  } catch (e) { sym = null; }
   return {
     loggedOut: loggedOut,
     blank: !loggedOut && bodyText.length === 0,
+    shellOnly: !loggedOut && bodyText.length > 0 && bodyHeight === 0,
     widgetKey: key || null,
     hasChart: Boolean(chart),
     hasBars: hasBars,
-    symbol: chart && typeof chart.symbol === "function" ? String(chart.symbol()) : null,
+    symbol: sym,
     readyState: document.readyState
   };
 `);

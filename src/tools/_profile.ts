@@ -8,10 +8,11 @@
  *
  * So the same surface can be registered three ways:
  *
- *   - `all` (the default, and what an empty value means) — everything.
- *   - `core` — the 40 tools that answer the questions people actually ask, chosen to fit under
- *     Cursor's cap with room for a client's own tools. No order writes: someone who wants those
- *     asks for `core,trading` and has therefore thought about it once.
+ *   - `all` — everything. NOT the default: an unset variable means `core`, see `DEFAULT_TOOL_PROFILE`.
+ *   - `core` — the 40 tools that answer the questions people actually ask, and **the default**.
+ *     Exactly Cursor's cap of 40, which leaves no room for a second MCP server in that client;
+ *     someone running one needs a narrower list. No order writes: whoever wants those asks for
+ *     `core,trading` and has therefore thought about it once.
  *   - a comma-separated list of families and/or individual tool names — `market,bandarmology`,
  *     `core,trading`, `quote,broker_summary,analyze`.
  *
@@ -151,10 +152,48 @@ export function parseToolProfile(raw: string | undefined, knownTools?: ReadonlyS
     throw new Error(
       `STOCKBIT_TOOLS: unknown family or tool ${JSON.stringify(token)}. ` +
         `Families: ${FAMILIES.join(", ")}. Also accepted: "all", "core", or any tool name. ` +
-        "Unset the variable to register everything.",
+        // NOT "unset the variable to register everything". Unset is `core` now — 40 of 138. This
+        // message is printed as the server refuses to start, to a user who is already confused
+        // about which tools exist; sending them to the wrong remedy from there is worse than
+        // saying nothing.
+        `Set STOCKBIT_TOOLS=all to register everything, or unset it for the default (${DEFAULT_TOOL_PROFILE}).`,
     );
   }
 
   if (!families.size && !tools.size) return ALL;
   return new NamedProfile(value, families, tools);
+}
+
+/**
+ * What this server registers when `STOCKBIT_TOOLS` says nothing.
+ *
+ * `core` rather than `all`, and the reason is measured. Startup was never the problem — a built
+ * server boots, registers everything and answers `status` in about 200 ms. The cost is per TURN:
+ * `tools/list` for the full surface is about 220,000 bytes — roughly 55,000 tokens — in the model's
+ * context on every single message. `core` is about 71,000, roughly 17,700. That is the same server
+ * costing a third as much to talk to, for 40 tools chosen to be the questions people actually ask.
+ * (Figures are approximate on purpose: they move whenever a description is edited, and a number
+ * stated to the byte is a number that is quietly wrong a week later.)
+ *
+ * This also aligns the code with the docs: the README has been telling people to put
+ * `"STOCKBIT_TOOLS": "core"` in the snippet they copy for as long as the profile has existed.
+ */
+export const DEFAULT_TOOL_PROFILE = "core";
+
+/**
+ * Resolve the profile for a server, and say whether the DEFAULT was used.
+ *
+ * `parseToolProfile` stays pure — `toolsdoc.ts` still asks it for `"all"` and means it, and
+ * `test/profile.test.ts` still tests "what does this string mean" without a default in the way.
+ * The `isDefault` flag exists because the two cases need different words: a note saying
+ * "STOCKBIT_TOOLS=core is set" when nobody set it sends a reader looking for a variable that is not
+ * there, in a config file they may not even own.
+ */
+export function resolveToolProfile(
+  raw: string | undefined,
+  knownTools?: ReadonlySet<string>,
+): { profile: ToolProfile; isDefault: boolean } {
+  const value = (raw ?? "").trim();
+  if (!value) return { profile: parseToolProfile(DEFAULT_TOOL_PROFILE, knownTools), isDefault: true };
+  return { profile: parseToolProfile(value, knownTools), isDefault: false };
 }

@@ -98,8 +98,14 @@ The real-time protobuf service is named `securities.transactional.datafeed.v1.To
     natural response to "403 on a PIN login" is to retype the PIN, which is useless and is how an
     account gets locked. The optional request header `X-Force-Challenge: true` triggers one
     deliberately.
-  - **Still unverified** (needs one real refresh with a valid token): success-response field names and
-    whether the refresh token rotates. `src/auth/session.ts::parseRefresh` handles both defensively.
+  - **Rotation is OBSERVED.** Every successful `/login/refresh` mints a new refresh token and retires
+    the one presented — a token issued three minutes earlier, with seven days left on its expiry, was
+    rejected outright. This is not a detail: the Stockbit web app calls this route itself on every
+    page load, so the browser spends the CLI's credential without telling it. `src/auth/reflock.ts`
+    exists because of this.
+  - **Still unverified** (needs one real refresh with a valid token): the success-response field
+    names. `src/auth/session.ts::parseRefresh` searches the envelope structurally rather than
+    following a fixed path, so it survives a rename it has not seen.
 - **Login (JS-ONLY, reCAPTCHA-gated — do NOT automate):** `/auth/v2/login`, `/login/v3/username/browser`
   (body `{user,password,verification_token,recaptcha_version,player_id}`).
 

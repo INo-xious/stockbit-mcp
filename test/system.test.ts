@@ -34,6 +34,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { makeDefiner, type Definer } from "../src/tools/_define.ts";
 import { registerSystemTools } from "../src/tools/system.ts";
 import { getStore, resetStoreCache } from "../src/auth/store.ts";
+import { clearWebSession, loadWebSession, saveWebSession } from "../src/auth/websession.ts";
+import { clearAccessCache, readAccessCache, writeAccessCache } from "../src/auth/accesscache.ts";
 import { resetLoginStatus } from "../src/status.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
@@ -227,6 +229,103 @@ test("logout all clears every slot and reports what it found", async () => {
   } finally {
     clearAllSlots();
   }
+});
+
+test("logout clears the website session and the shared access token, not only the slot", async () => {
+  // A logout that leaves a usable credential is not one. `doLogout` cleared neither of these, while
+  // this very tool's description called the browser profile "a SECOND copy of the session" — so a
+  // logout through the MCP tool left a working, decryptable Stockbit session on disk, and an access
+  // token good for up to a day beside it.
+  clearAllSlots();
+  clearWebSession();
+  clearAccessCache();
+
+  const refresh = fakeJwt(Math.floor(Date.now() / 1000) + 86400);
+  getStore("main").set(refresh);
+  saveWebSession({
+    capturedAt: new Date().toISOString(),
+    cookies: [{ name: "SESSIONID", value: "still-live", domain: ".stockbit.com", path: "/" }],
+    origins: [],
+  });
+  writeAccessCache("main", fakeJwt(Math.floor(Date.now() / 1000) + 86400), Math.floor(Date.now() / 1000) + 86400, refresh);
+  assert.ok(loadWebSession(), "precondition: a website session is stored");
+  assert.ok(readAccessCache("main", refresh), "precondition: an access token is cached");
+
+  try {
+    const h = harness();
+    const { payload } = await h.call("logout", { confirm: true });
+    assert.equal(loadWebSession(), null, "the website session must be gone");
+    assert.equal(readAccessCache("main", refresh), null, "and so must the shared access token");
+    assert.match(String(payload.webSession), /cleared/, "and the result must say so");
+  } finally {
+    clearWebSession();
+    clearAccessCache();
+    clearAllSlots();
+  }
+});
+
+test("a scoped logout that does not include main leaves the website session alone", async () => {
+  // The website session belongs to the main session. `logout scope: "eipo"` must not end it, for
+  // the same reason a scoped logout does not touch the other token slots.
+  clearAllSlots();
+  clearWebSession();
+  getStore("eipo").set(fakeJwt(Math.floor(Date.now() / 1000) + 86400));
+  saveWebSession({
+    capturedAt: new Date().toISOString(),
+    cookies: [{ name: "SESSIONID", value: "untouched", domain: ".stockbit.com", path: "/" }],
+    origins: [],
+  });
+  try {
+    const h = harness();
+    const { payload } = await h.call("logout", { confirm: true, scope: "eipo" });
+    assert.ok(loadWebSession(), "an e-IPO logout must not end the website session");
+    assert.match(String(payload.webSession), /not part of this scope/);
+  } finally {
+    clearWebSession();
+    clearAllSlots();
+  }
+});
+
+test("switch_account implies force, so a stored session does not block it", async () => {
+  // The refusal it would otherwise hit — "a session is already stored" — is precisely the thing
+  // switch_account is asking to replace. Blocking it there would make the argument useless in the
+  // only situation anyone reaches for it.
+  clearAllSlots();
+  getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86400));
+  delete process.env.STOCKBIT_NO_BROWSER;
+  // The login lock is held, so the call stops one step AFTER the already-logged-in gate instead of
+  // launching a browser. That is exactly far enough to prove it got past the gate, and no further.
+  mkdirSync(join(STORE, "login.lock"), { recursive: true });
+  try {
+    const h = harness(async () => "accepted");
+    const blocked = await h.call("login", { confirm: true });
+    assert.equal(blocked.payload.alreadyLoggedIn, true, "precondition: an ordinary login is refused");
+
+    const { payload } = await h.call("login", { confirm: true, switch_account: true });
+    assert.notEqual(payload.alreadyLoggedIn, true, "switch_account must not be refused as a duplicate login");
+    assert.match(
+      String(payload.reason),
+      /Another login is already in progress/,
+      "it reached the lock, which is one step past the gate",
+    );
+  } finally {
+    rmSync(join(STORE, "login.lock"), { recursive: true, force: true });
+    process.env.STOCKBIT_NO_BROWSER = "1";
+    clearAllSlots();
+  }
+});
+
+test("the login tool takes switch_account, and its description tells them apart", () => {
+  // fresh_profile and switch_account are not interchangeable and were being confused: one throws the
+  // profile away, the other signs the account out. Only the second is for logging in as someone else.
+  const h = harness();
+  const login = h.define.records().find((r) => r.name === "login");
+  assert.ok(login, "the login tool is registered");
+  const inputs = login!.inputs.map((i) => i.name);
+  assert.ok(inputs.includes("switch_account"));
+  assert.ok(inputs.includes("fresh_profile"));
+  assert.match(login!.description, /switch_account/, "the description must name it");
+  assert.match(login!.description, /already signed in/i, "and explain the case it exists for");
 });
 
 /* ---------------------------------- the invariant ---------------------------------- */

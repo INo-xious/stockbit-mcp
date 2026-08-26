@@ -107,10 +107,11 @@ Di Windows, npx butuh shell:
 { "mcpServers": { "stockbit": { "command": "cmd", "args": ["/c", "npx", "-y", "stockbit-mcp"] } } }
 ```
 
-**Cursor / VS Code** — batas tool-nya 40 dan 128, sedangkan di sini ada 138. Pakai profil `core`:
+**Cursor / VS Code** — batas tool-nya 40 dan 128. Profil bawaan `core` berisi tepat 40 tool, jadi
+tidak perlu diatur apa-apa. Untuk membuka semua 138 tool:
 
 ```json
-{ "env": { "STOCKBIT_TOOLS": "core" } }
+{ "env": { "STOCKBIT_TOOLS": "all" } }
 ```
 
 Instalasi lengkap untuk setiap client, termasuk Desktop Extension dan plugin Claude Code, ada di

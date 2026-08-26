@@ -31,6 +31,7 @@
 import { getJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { getStore } from "../auth/store.js";
+import { withCredentialLock } from "../auth/reflock.js";
 import { adoptAccessToken, ensureFresh, hasStoredSession, parseRefresh } from "../auth/session.js";
 
 /** Keys that plausibly carry the webview grant, and the query parameters that plausibly hold it. */
@@ -115,7 +116,12 @@ export async function ensureEipoSession(): Promise<{ minted: boolean }> {
     );
   }
 
-  if (parsed.newRefresh) getStore("eipo").set(parsed.newRefresh);
-  adoptAccessToken("eipo", parsed.access, parsed.expiresAt);
+  // Under the credential lock, like every other credential write: the e-IPO slot rotates on the
+  // same terms as the other two, and this mint races anything else holding an e-IPO session.
+  if (parsed.newRefresh) {
+    const rotated = parsed.newRefresh;
+    await withCredentialLock("eipo", () => getStore("eipo").set(rotated));
+  }
+  adoptAccessToken("eipo", parsed.access, parsed.expiresAt, parsed.newRefresh);
   return { minted: true };
 }

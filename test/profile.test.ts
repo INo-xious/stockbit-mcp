@@ -148,5 +148,37 @@ test("workflow_run under a partial profile names the disabled tool and its famil
   const text = result.content.map((c) => c.text ?? "").join("\n");
   assert.match(text, /disabled by STOCKBIT_TOOLS=workflows,market/);
   assert.match(text, /technicals|broker_distribution/);
-  assert.match(text, /enable the `(analysis|bandarmology)` family/);
+  assert.match(text, /STOCKBIT_TOOLS=workflows,market,(analysis|bandarmology)/, "it must give the value to set");
+  assert.match(text, /`(analysis|bandarmology)` family/);
+});
+
+test("under the DEFAULT profile the same message does not blame a variable nobody set", async () => {
+  // This message now reaches ordinary users: `core` is the default, and `pine_script` is not in it,
+  // so `pine_handoff` hits this path for anyone who runs it without configuring anything. Telling
+  // them a variable is "disabling" a tool sends them looking for it in a config file they may not
+  // own — and the old text also told them to unset it, which under a default changes nothing.
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { registerTools } = await import("../src/tools/register.ts");
+
+  const handlers = new Map<string, (a: Record<string, unknown>) => Promise<{ content: { text?: string }[] }>>();
+  const server = {
+    registerTool: (
+      name: string,
+      _config: unknown,
+      cb: (a: Record<string, unknown>) => Promise<{ content: { text?: string }[] }>,
+    ) => {
+      handlers.set(name, cb);
+    },
+  } as unknown as InstanceType<typeof McpServer>;
+
+  registerTools(server, { profile: parseToolProfile("core"), profileIsDefault: true });
+  const run = handlers.get("workflow_run");
+  assert.ok(run, "workflow_run is in core, so the prompt-facing tool exists");
+
+  const result = await run({ name: "pine_handoff", input: { symbol: "BBRI" } });
+  const text = result.content.map((c) => c.text ?? "").join("\n");
+  assert.match(text, /pine_script/, "it must name the tool that is missing");
+  assert.match(text, /which is the default/, "and say the profile was not chosen by the user");
+  assert.doesNotMatch(text, /disabled by STOCKBIT_TOOLS/, "nobody set STOCKBIT_TOOLS");
+  assert.match(text, /STOCKBIT_TOOLS=core,pine/, "and it must give the exact value that fixes it");
 });

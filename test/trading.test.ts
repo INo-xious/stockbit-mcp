@@ -437,7 +437,14 @@ test("lock contention refuses instead of waiting — two orders from one intenti
   const ticket = await buyTicket();
   mkdirSync(join(process.env.STOCKBIT_STORE_DIR!, "order-BBRI.lock"), { recursive: true });
   try {
-    await refuses(() => placeBuy({ ticketId: ticket.id, confirm: true }), /Another order on BBRI is in flight/);
+    // The refusal names both causes of a null lock: a concurrent order, and a lock that could not
+    // be created at all. `acquireDirLock` gained the second when it stopped holding locks whose
+    // owner token it could not write — naming only the first would assert a cause this file did not
+    // establish. What must not change is that nothing is sent.
+    await refuses(
+      () => placeBuy({ ticketId: ticket.id, confirm: true }),
+      /Could not take the order lock for BBRI.*another order on it is in flight/s,
+    );
   } finally {
     // Left behind deliberately by the failure path; removed here so later tests can take it.
     const { rmSync } = await import("node:fs");

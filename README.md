@@ -56,8 +56,11 @@ you did not start.
 - **Three token domains, three separate stores.** `exodus` (market data), `carina` (Stockbit
   Sekuritas), `api-sekuritas` (e-IPO). Logging out of one leaves the others alone, and the route
   table decides which credential each request may carry.
-- **Access tokens are never written to disk.** Only the refresh token is stored, and it is rotated
-  on every use.
+- **The 24-hour access token is cached on disk, encrypted, and shared between processes.** Because
+  the refresh token rotates on every use, N clients each minting their own access token retire each
+  other's credential. Same AES-256-GCM and mode `0600` as the file-backend refresh token — which on
+  macOS is a genuine reduction, since there the refresh token is in the Keychain and this is not.
+  `STOCKBIT_NO_ACCESS_CACHE=1` turns it off. See [SECURITY.md](SECURITY.md).
 - **A closed route table.** 153 permitted request shapes across three hosts, enumerated in
   `src/http/routes/`. Anything not in that table cannot be requested — `test/transport.test.ts`
   asserts it, and every one of the 32 non-GET routes is admitted by a named decision record.
@@ -168,21 +171,21 @@ On Windows, npx needs a shell:
 { "mcpServers": { "stockbit": { "command": "cmd", "args": ["/c", "npx", "-y", "stockbit-mcp"] } } }
 ```
 
-**Claude Desktop Extension** — download `stockbit-mcp-1.0.0.mcpb` from
+**Claude Desktop Extension** — download the latest `stockbit-mcp-*.mcpb` from
 [Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
-**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools, so use the `core` profile:
+**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools and the default `core` profile is
+exactly 40, so nothing extra is needed — though that leaves no room for a second MCP server, and
+running one means a narrower list (`STOCKBIT_TOOLS=market,bandarmology`, say):
 
 ```json
-{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"],
-  "env": { "STOCKBIT_TOOLS": "core" } } } }
+{ "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
 ```
 
-**VS Code** — `.vscode/mcp.json`. Its cap is 128 and there are 138 tools:
+**VS Code** — `.vscode/mcp.json`. Its cap is 128; the default fits with room to spare:
 
 ```json
-{ "servers": { "stockbit": { "type": "stdio", "command": "npx", "args": ["-y", "stockbit-mcp"],
-  "env": { "STOCKBIT_TOOLS": "core" } } } }
+{ "servers": { "stockbit": { "type": "stdio", "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
 ```
 
 **Windsurf** — `~/.codeium/windsurf/mcp_config.json`, same shape as Claude Desktop.
@@ -367,13 +370,16 @@ not backtest against it and believe the number.
 
 ## Tool profiles and context management
 
-Every client pays for the whole tool list in the model's context on every turn. `STOCKBIT_TOOLS`
-trims it:
+Every client pays for the whole tool list in the model's context on every turn — and that is a
+**per-turn** cost, not a startup one. The full surface is around 220,000 bytes of `tools/list`,
+roughly 55,000 tokens, on every single message; `core` is about a third of that.
+
+**`core` is the default.** `STOCKBIT_TOOLS` changes it:
 
 | Value | Effect |
 |---|---|
-| unset or `all` | All 138. |
-| `core` | 40 tools — the questions people actually ask. Fits Cursor's cap. No order writes. |
+| unset — **the default** | `core`: 40 tools and 6 prompts. The questions people actually ask. Fits Cursor's cap. No order writes. |
+| `all` | All 138. Roughly 55,000 tokens of tool schemas per turn, against ~17,700 for `core`. |
 | `market,bandarmology` | Those families only. |
 | `core,trading` | Core plus order entry. |
 | `quote,analyze` | Individual tools, mixed freely with families. |
@@ -412,11 +418,11 @@ Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user
 | Command | |
 |---|---|
 | `stockbit-mcp` | The MCP server. Speaks stdio; your client launches it. |
-| `stockbit-auth login [--fresh-profile]` | One-time browser login. |
+| `stockbit-auth login [--fresh-profile] [--switch-account]` | One-time browser login. `--switch-account` signs the current account out of the browser profile first, so you get a real form instead of the app. |
 | `stockbit-auth import-har` | Import a login captured in any browser. |
 | `stockbit-auth doctor` | Diagnose browsers, the token store and the capture path. |
 | `stockbit-auth bootstrap` | Paste a refresh token by hand. |
-| `stockbit-auth status [--offline] [--json]` | Everything, redacted. `--json` is safe to paste into an issue. |
+| `stockbit-auth status [--verify] [--json]` | Everything, redacted. `--json` is safe to paste into an issue. `--verify` spends one refresh to prove the token — which ROTATES it and ends your website session. |
 | `stockbit-auth logout [--keep-profile]` | Clear the token and the logged-in browser profile. |
 | `stockbit-auth trading-login [--browser]` | Unlock Stockbit Sekuritas with your PIN. Never stored. |
 | `stockbit-auth trading-status [--offline]` | The trading policy, and whether the session works. |
@@ -447,7 +453,7 @@ is written outside it.
 
 | Variable | Effect |
 |---|---|
-| `STOCKBIT_TOOLS` | `all` (default), `core`, or a comma-separated list of families and tool names. |
+| `STOCKBIT_TOOLS` | `core` (**the default**), `all`, or a comma-separated list of families and tool names. |
 | `STOCKBIT_STORE_DIR` | Where everything on disk lives. Default `~/.stockbit`. |
 | `STOCKBIT_TRADING` | `off` forces off; `paper` lowers `live` to paper. It can only lower the mode. |
 | `STOCKBIT_BROWSER` | Absolute path to the Chromium binary used for login. |
@@ -471,7 +477,7 @@ is written outside it.
 | A blank white Chartbit page | You are signed out in that browser. |
 | `broker_distribution` errors | Stockbit's Rp 10,000,000 balance gate. |
 | Empty movers | Weekend or a holiday. Check `market_session`. |
-| VS Code or Cursor: "too many tools" | Set `STOCKBIT_TOOLS=core`. |
+| VS Code or Cursor: "too many tools" | You have set `STOCKBIT_TOOLS=all`. Remove it — the default is `core`, which is 40. |
 | Windows: `npx` ENOENT | Use `"command": "cmd", "args": ["/c", "npx", …]`. |
 | Something else | `stockbit-auth doctor`, then `stockbit-auth status --json` — both are safe to paste. |
 
@@ -480,7 +486,7 @@ is written outside it.
 ```bash
 npm ci
 npm run typecheck
-npm test          # ~1,160 tests, entirely offline — fetch is stubbed, no network, no skips
+npm test          # the whole suite, entirely offline — fetch is stubbed, no network, no skips
 npm run build
 npm run smoke     # starts the built binary over stdio and asks it what it registered
 npm run check:pack

@@ -50,6 +50,7 @@ import { normalizeSymbol } from "../symbol.js";
 import { BUILTIN_WORKFLOWS, findWorkflow } from "../workflows/builtin.js";
 import { runWorkflow, validateWorkflow } from "../workflows/run.js";
 import { makeDefiner, type Definer, type ToolHandler, type ToolProfile } from "./_define.js";
+import { DEFAULT_TOOL_PROFILE } from "./_profile.js";
 import { registerSystemTools } from "./system.js";
 import { registerStreamTools } from "./stream.js";
 import { registerCompanyTools } from "./company.js";
@@ -143,7 +144,7 @@ function foldSummary(fold: Fold) {
 
 export function registerTools(
   server: McpServer,
-  options: { profile?: ToolProfile; toolCount?: number } = {},
+  options: { profile?: ToolProfile; profileIsDefault?: boolean; toolCount?: number } = {},
 ): Definer {
   /**
    * Every read tool registered below, so `workflow_run` can call them.
@@ -180,7 +181,11 @@ export function registerTools(
   // `status`, `login`, `logout`. Registered first so they exist even when a profile has filtered
   // everything else out — they are how a user finds out why.
   registerSystemTools(define.family("system"), {
+    // `all` when there is no profile at all: `registerTools` with no options filters nothing, and
+    // `createServer()` (the package's own export) is exactly that case. Reporting `core` beside a
+    // toolCount of 138 is self-refuting for anyone embedding this server.
     profileLabel: options.profile?.label ?? "all",
+    profileIsDefault: options.profileIsDefault === true,
     ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
   });
 
@@ -1572,15 +1577,34 @@ export function registerTools(
       "single reading.",
     {},
     async () =>
-      runTool(async () => ({
-        count: BUILTIN_WORKFLOWS.length,
-        workflows: BUILTIN_WORKFLOWS.map((w) => ({
-          name: w.name,
-          description: w.description,
-          inputs: w.inputs,
-          steps: w.steps.map((s) => ({ id: s.id, tool: s.tool, describe: s.describe, fansOut: Boolean(s.forEach) })),
-        })),
-      })),
+      runTool(async () => {
+        // Only the ones that can actually RUN here. The prompt menu was filtered the same way and
+        // for the same reason, and this tool is the other half of it: its own description tells the
+        // model to "use `workflow_list` first to see names", so listing a recipe whose steps are
+        // not registered is an invitation to a refusal. Under the default profile that is
+        // `pine_handoff` and `strategy_check`, both of which call `pine_script`.
+        const disabled = new Set(define.skippedNames());
+        const runnable = BUILTIN_WORKFLOWS.filter((w) => !w.steps.some((step) => disabled.has(step.tool)));
+        const hidden = BUILTIN_WORKFLOWS.length - runnable.length;
+        return {
+          count: runnable.length,
+          workflows: runnable.map((w) => ({
+            name: w.name,
+            description: w.description,
+            inputs: w.inputs,
+            steps: w.steps.map((s) => ({ id: s.id, tool: s.tool, describe: s.describe, fansOut: Boolean(s.forEach) })),
+          })),
+          // Named rather than silently dropped: a count that quietly shrinks reads as a shorter
+          // menu, not as a configuration choice somebody made.
+          ...(hidden === 0
+            ? {}
+            : {
+                note:
+                  `${hidden} more workflow(s) exist but need tools this server did not register ` +
+                  `(tool profile: ${options.profile?.label ?? "all"}). Set STOCKBIT_TOOLS=all to see them.`,
+              }),
+        };
+      }),
   );
 
   defWorkflows.read(
@@ -1602,22 +1626,43 @@ export function registerTools(
       runTool(async () => {
         const workflow = findWorkflow(a.name);
         if (!workflow) {
+          // Only the ones this server can actually run. Listing all eight here re-opened the loop
+          // `workflow_list` was just fixed to close: the model takes the menu, calls the one that
+          // needs a filtered-out tool, and gets a refusal from forty lines below.
+          const offered = BUILTIN_WORKFLOWS.filter(
+            (w) => !w.steps.some((step) => define.skippedNames().includes(step.tool)),
+          );
+          // Under a profile that filters a step out of every recipe (STOCKBIT_TOOLS=workflows is
+          // the real one — all eight need tools it does not register) the list is empty, and
+          // "Available: " with nothing after it reads as a truncated message rather than an answer.
+          // `workflow_list` says so in a `note`; say it here too.
           throw new StockbitError(
             "invalid_param",
-            `No workflow named ${JSON.stringify(a.name)}. Available: ${BUILTIN_WORKFLOWS.map((w) => w.name).join(", ")}`,
+            offered.length
+              ? `No workflow named ${JSON.stringify(a.name)}. Available: ${offered.map((w) => w.name).join(", ")}`
+              : `No workflow named ${JSON.stringify(a.name)}, and this server's tool profile filters out a tool ` +
+                `every built-in recipe needs, so none can run here. Setting STOCKBIT_TOOLS=all registers everything.`,
           );
         }
         // Fails before running half the recipe if a step names a tool that is not registered.
         // A tool filtered out by STOCKBIT_TOOLS gets its own message: "not registered" reads like a
         // broken build, and the fix here is one environment variable rather than a bug report.
+        //
+        // Since the default profile is `core`, this message now reaches ORDINARY users who set
+        // nothing — so it must not tell them a variable they never touched is the cause. When the
+        // profile is the default it says so, and names the variable that widens it.
         const disabled = new Map(define.skipped().map((s) => [s.name, s.family]));
         const missing = workflow.steps.find((step) => disabled.has(step.tool));
         if (missing) {
+          const label = options.profile?.label ?? DEFAULT_TOOL_PROFILE;
+          const because = options.profileIsDefault
+            ? `is not in the \`${label}\` tool profile, which is the default`
+            : `is disabled by STOCKBIT_TOOLS=${label}`;
           throw new StockbitError(
             "invalid_param",
-            `Workflow ${JSON.stringify(workflow.name)} needs \`${missing.tool}\`, which is disabled by ` +
-              `STOCKBIT_TOOLS=${options.profile?.label ?? "all"} — enable the ` +
-              `\`${disabled.get(missing.tool)}\` family, or set STOCKBIT_TOOLS=all.`,
+            `Workflow ${JSON.stringify(workflow.name)} needs \`${missing.tool}\`, which ${because} — ` +
+              `set STOCKBIT_TOOLS=${label},${disabled.get(missing.tool)} to add the ` +
+              `\`${disabled.get(missing.tool)}\` family, or STOCKBIT_TOOLS=all for everything.`,
           );
         }
         validateWorkflow(workflow, new Set(handlers.keys()));

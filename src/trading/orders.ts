@@ -336,9 +336,16 @@ export async function submitOrder(options: SubmitOptions): Promise<OrderResult> 
   });
   if (!release) {
     logOrder({ ...base, via, outcome: "refused-lock" });
+    // What it knows is that the lock was not taken, which is USUALLY a concurrent order and is now
+    // also "the lock could not be created" — `acquireDirLock` refuses to hold one whose owner token
+    // it could not write (a full or read-only disk), rather than holding one it cannot prove is its
+    // own. Both mean the same thing here and neither sends anything, but naming only the first as
+    // fact would be this file asserting something it did not establish.
     refuse(
-      `Another order on ${ticket.symbol} is in flight in this or another process. Nothing was sent — two ` +
-        "orders from one intention is the failure this refuses to risk. Check `orders`, then preview again.",
+      `Could not take the order lock for ${ticket.symbol}: either another order on it is in flight in ` +
+        "this or another process, or the lock could not be created (a full or read-only disk). Nothing " +
+        "was sent — two orders from one intention is the failure this refuses to risk. Check `orders`, " +
+        "then preview again.",
     );
   }
 

@@ -146,3 +146,67 @@ internals (`src/core/market.ts`), the comparison and fundachart routes
 **How to settle any of them:** call the tool once against a live session and read `unmapped.sampleKeys`
 off the result. One call per route, and the projection's candidate list is the single edit.
 
+---
+
+## The auth work of 2026-08-26 (ADR-0009)
+
+Five things that pass their tests and are still not *measured*. Each says what would settle it, and
+the one-line experiment is the point — none of these needs a rewrite, they need one live call.
+
+### Whether a revoked session also kills its outstanding access tokens
+
+**Unverified, and it is why a tool was NOT built.** `status` could prove a session live by spending
+one GET on an already-cached access token — no refresh, no rotation, no cost to the website session.
+That would be strictly better than `live: true`. But it only proves anything if revoking a session
+also invalidates the access tokens minted from it, and nobody has watched that happen. A `check:
+true` built on the assumption would report "your session works" from a token that outlived the
+session it came from.
+
+**To settle it:** log in, let the access cache fill, revoke the session from Stockbit's own web UI
+("log out of all devices"), then issue one authenticated GET with the cached access token. If it
+401s, the check is sound and worth building. If it succeeds, the answer is that access tokens
+outlive revocation and `status` must keep saying so.
+
+### Whether `iat` is present on Stockbit's refresh tokens
+
+**Unverified.** `decideAdoption` in `src/auth/resync.ts` prefers `iat` when BOTH tokens carry one,
+and falls through to `exp` when they do not. It is written that way precisely because nobody has
+confirmed the claim exists — requiring it would have made the best rung unreachable, and asserting
+it would have been a guess dressed as a rule.
+
+**To settle it:** `stockbit-auth status --json` does not print claims, deliberately. Decode a stored
+refresh token by hand once and look. If `iat` is always there, the `exp` rung becomes a fallback for
+malformed tokens rather than the ordinary path.
+
+### That `exp` orders issuance
+
+**An inference, not a measurement**, and labelled as one in the code. What is Observed is that the
+refresh token carries `exp` (`status` and `doctor` read it live) and that rotation issues a *fresh*
+window (`doctor`: "it keeps sliding"). The step from "the window slides" to "a later `exp` means a
+later issue" is reasoning, and it is the rung the resync leans on most.
+
+**To settle it:** rotate twice in quick succession and compare the two tokens' `exp` values. If the
+second is strictly greater, the inference holds for the case that matters.
+
+### Whether `security` takes a prompted value from stdin everywhere
+
+**Verified on macOS 26 at every write, and deliberately not trusted beyond that.** `security
+add-generic-password -w` prompts twice — for the value and for a retype — and reads both from the
+pipe. Feeding it once exits 0 and stores an EMPTY STRING, which is why the write reads the value
+back before keeping it and falls back to the `argv` form when it does not match.
+
+The residual unknown is which macOS versions behave differently, and the answer is reported rather
+than assumed: `stockbit-auth doctor` says which mechanism ran. A "Keychain write" row reading
+*"`security` would not take the value on stdin here"* is the fallback in use, and worth an issue with
+the macOS version attached.
+
+### The refresh lock across two `$TMPDIR` values
+
+On the Keychain backend the lock now lives under `os.tmpdir()`, because the credential itself is
+machine-global and a lock under `$STOCKBIT_STORE_DIR` let two clients take different locks over one
+credential. Every client that matters inherits the user's `$TMPDIR` — but a process launched from a
+context with a different one (a system daemon, some CI runners) would take a different lock. Strictly
+narrower than the hole it replaces, and unmeasured beyond that.
+
+**To settle it:** print `os.tmpdir()` from each client that runs this server on the same machine.
+

@@ -19,7 +19,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "./server.js";
-import { parseToolProfile } from "./tools/_profile.js";
+import { DEFAULT_TOOL_PROFILE, parseToolProfile } from "./tools/_profile.js";
+import { describeSurface } from "./tools/surface.js";
+import { promptsForSurface } from "./prompts.js";
 import { FAMILIES, EVIDENCE_META_KEY, FAMILY_META_KEY, type Evidence, type Family } from "./tools/_define.js";
 
 /** One line per family, so the table of contents says what each is for. */
@@ -137,6 +139,30 @@ export async function renderToolsDoc(): Promise<string> {
     out.push(
       `**${rows.length} tools** (${reads} read, ${writes} write) in ${present.length} families, ` +
         `${prompts.length} prompts.`,
+    );
+    out.push("");
+    // The default profile's counts, COMPUTED from the surface rather than written down.
+    //
+    // `scripts/smoke.mjs` reads this line to learn what an unconfigured server should register, so
+    // that the check every user's actual configuration gets is not a number somebody remembered to
+    // update. The wording is load-bearing for that regex — see the smoke script.
+    const defaultSurface = describeSurface(parseToolProfile(DEFAULT_TOOL_PROFILE), true);
+    out.push(
+      `Unset, this server registers the **\`${DEFAULT_TOOL_PROFILE}\`** profile: ` +
+        `**${defaultSurface.tools.length} default tools** and ` +
+        `**${promptsForSurface(defaultSurface).length} default prompts**. ` +
+        "Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.",
+    );
+    out.push("");
+    // Which forty, by name. This file is the only place someone would look to find out what they
+    // actually have, and a count alone does not answer that — the previous sentence claimed
+    // everything below needed `all`, which is false for the forty listed here.
+    out.push(
+      `<details><summary>The <code>${DEFAULT_TOOL_PROFILE}</code> profile, by name</summary>\n\n` +
+        defaultSurface.tools
+          .map((t) => `\`${t.name}\``)
+          .join(", ") +
+        "\n\n</details>",
     );
     out.push("");
     out.push(

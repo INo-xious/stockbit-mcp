@@ -5,7 +5,8 @@ Notes for an AI assistant working on this repository. Human contributors want
 
 ## What this is
 
-An MCP server over Stockbit's private JSON API — the Indonesian exchange. 138 tools in 17 families,
+An MCP server over Stockbit's private JSON API — the Indonesian exchange. 138 tools in 17 families
+(40 of them registered by default — `STOCKBIT_TOOLS` defaults to `core`),
 three token domains, and, behind switches the account owner turns on themselves, order entry against
 a real brokerage account.
 
@@ -13,7 +14,7 @@ a real brokerage account.
 
 ```bash
 npm run typecheck     # src/, bin/, scripts/
-npm test              # ~1,160 tests, offline, no skips
+npm test              # the whole suite, offline, no skips
 npm run build         # cleans dist/ first
 npm run smoke         # starts the built binary over stdio and asks it what it registered
 npm run check:pack    # asserts npm publish would ship the build and nothing else

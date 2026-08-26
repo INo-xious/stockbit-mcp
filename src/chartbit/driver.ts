@@ -26,6 +26,8 @@
 import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { ChartbitSession, type ChartTab } from "./session.js";
+import { captureWebSession, saveWebSession, webSessionHealth } from "../auth/websession.js";
+import { syncStoreFromBrowser } from "../auth/resync.js";
 import { evaluateInPage } from "./evaluate.js";
 import {
   CREATE_SHAPE,
@@ -98,10 +100,57 @@ async function withChart<T>(
   options: { symbol: string; headless?: boolean },
   work: (tab: ChartTab, session: ChartbitSession) => Promise<T>,
 ): Promise<T> {
+  // Catch an aged-out website session BEFORE launching anything.
+  //
+  // Stockbit's website session lasts about a day and cannot be renewed from this side — only a real
+  // login mints one. Without this check the first sign of expiry is a browser launch, a 45-second
+  // readiness wait, and a page that renders nothing, which is a slow and confusing way to learn that
+  // a login is due.
+  //
+  // Only an aged-out STORED session fails fast. A missing store is deliberately allowed through: the
+  // browser profile may well be signed in on its own — that is the normal state right after a login
+  // whose capture did not land — and refusing to open a chart that would have worked is the worse
+  // error of the two.
+  const health = webSessionHealth();
+  if (health.present && !health.likelyValid) {
+    throw new StockbitError("auth", health.hint);
+  }
+
   const { session, tab } = await ChartbitSession.open({ symbol: options.symbol, headless: options.headless });
   try {
     return await work(tab, session);
   } finally {
+    // Re-capture the session on the way out, ALWAYS — including when the work threw.
+    //
+    // Stockbit's refresh token rotates, and simply loading the chart page spends it: the SPA calls
+    // `/login/refresh` on boot and the server hands back a new one, retiring the old. So the stored
+    // copy goes stale the moment the browser is used, and the next launch seeds a token that has
+    // already been spent — which presents as a page that renders nothing and reads as "logged out".
+    //
+    // Capturing here closes that loop: whatever the browser holds right now is what gets stored, so
+    // the store tracks the rotation instead of falling behind it. It also makes the store survive an
+    // ungraceful browser death, which is otherwise the same bug by another route — Chromium writes
+    // its cookie jar lazily, so a killed browser loses the rotated token and takes the session with it.
+    //
+    // Best-effort and silent: a capture that fails must not turn a drawing that succeeded into an error.
+    try {
+      const refreshed = await captureWebSession(tab.cdp);
+      if (refreshed) {
+        // The web session first: cheap, lockless, and the thing the next chart launch seeds from.
+        saveWebSession(refreshed);
+        // Then the API credential OUT of the same capture — this is the line that closes the loop
+        // the comment above describes. The blob already contains the rotated refresh token, in the
+        // `credentialStorage` cookie; until now nothing read it, so the store stayed one rotation
+        // behind and the very next market-data call 401'd.
+        //
+        // A short lock timeout because this is the interactive path and giving up is genuinely
+        // free: the browser still holds the token, and the next chart call offers it again. See
+        // `resync.ts` for why a null lock is a no-op here and not permission to proceed.
+        await syncStoreFromBrowser(refreshed, { lockTimeoutMs: 5_000 });
+      }
+    } catch {
+      /* the session in the profile is still whatever it was; nothing is made worse by not storing it */
+    }
     await session.close();
   }
 }
