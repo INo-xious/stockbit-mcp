@@ -255,8 +255,16 @@ test("a Keychain write that was KILLED never falls back to putting the token in 
   // only lasting effect was the credential in `ps`.
   assert.equal(keychainWriteDecision(null, null), "fail", "a killed write must not reach argv");
 
-  // The one case the fallback is for: `security` ran, answered, and refused -- which is what a
-  // build that insists on reading the value from /dev/tty rather than a pipe looks like.
+  // A refusal to ACT is not an answer either, and this half was missed the first time round: the
+  // read-back branch of the same function already classified 45 (the Keychain is locked and nothing
+  // may prompt) and 51 (someone clicked Deny) as non-answers, while the write branch called them
+  // definite refusals and sent the token to argv. Same function, same two codes, opposite verdicts
+  // -- and the fallback could not have helped in either case, because it meets the same lock and
+  // the same prompt.
+  assert.equal(keychainWriteDecision(45, null), "fail", "errSecInteractionNotAllowed: locked");
+  assert.equal(keychainWriteDecision(51, null), "fail", "errSecAuthFailed: the prompt was declined");
+
+  // What is left for the fallback: `security` ran and refused for some other reason.
   assert.equal(keychainWriteDecision(1, null), "argv");
 
   // And the read-back half of the same rule.

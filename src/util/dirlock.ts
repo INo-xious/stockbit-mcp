@@ -57,34 +57,37 @@ function lockAge(path: string): number | null {
  * cannot be reached from a cross-platform test otherwise: it needs `writeFileSync` to fail, and the
  * only portable ways to arrange that are not portable at all.
  *
- * Four cases, and the last two are the ones that have been got wrong:
+ * Three cases, and the third is the one that has been got wrong twice:
  *
  *   - the token reads back as ours     -> remove; the ordinary path
  *   - it reads back as someone else's  -> leave it; we were broken as stale and that directory
  *                                        belongs to whoever replaced us
- *   - no token, and OUR write landed   -> leave it. This is the window between another holder's
- *                                        `mkdir` and its write, and removing then takes a lock that
- *                                        was just legitimately acquired. (Unless the directory is
- *                                        gone entirely, in which case removing costs nothing.)
- *   - no token, and our write FAILED   -> remove. The absence is most likely our own, and we are
- *                                        the one caller that must always be able to release this.
+ *   - there is no token to read        -> leave it, unless the directory is gone entirely (in which
+ *                                        case removing costs nothing). A missing token means some
+ *                                        other holder is between its `mkdir` and its write, and
+ *                                        removing then takes a lock that was just legitimately
+ *                                        acquired.
  *
- * That last line is a judgement between two unlikely things, and it is worth saying which way it
- * goes. Answering "not ours" leaks the lock deterministically every time an owner write fails
- * (ENOSPC, EROFS, a directory mode that does not permit it) — and a leaked lock is not free: every
- * other process waits out the staleness threshold and then refreshes UNLOCKED, which is the double
- * rotation this module exists to prevent. Answering "ours" can only misfire if our write failed AND
- * we were broken as stale AND the replacement is inside its own sub-millisecond mkdir->write
- * window. A certain fault beats a compound improbable one.
+ * The third case USED to ask whether our own owner write had landed, and remove when it had not, on
+ * the reasoning that the missing token was probably our own. That reasoning was wrong, and wrong in
+ * the expensive direction: every cause of an owner-write failure — ENOSPC, EROFS, a directory mode
+ * that does not permit it — is a property of the directory or the filesystem, so it is not specific
+ * to one process. If our write failed, the next holder's write fails too, its token never appears,
+ * and its "sub-millisecond window" is permanent. The late release then deletes a lock somebody is
+ * actively holding, which is precisely the failure the owner token was introduced to prevent.
+ *
+ * There is no longer anything to trade off, because a holder whose owner write fails no longer
+ * becomes a holder at all: `acquireDirLock` removes the directory and returns null. So this
+ * function can go back to the only safe rule — remove nothing we cannot positively identify as
+ * ours.
  */
 export function releaseDecision(o: {
   owner: string;
-  ownerWritten: boolean;
   readOwner: string | null;
   dirExists: boolean;
 }): boolean {
   if (o.readOwner !== null) return o.readOwner === o.owner;
-  return o.ownerWritten ? !o.dirExists : true;
+  return !o.dirExists;
 }
 
 export async function acquireDirLock(
@@ -118,16 +121,31 @@ export async function acquireDirLock(
       // A pid alone would not do: pids are reused, and two runs of the same script can share one.
       const owner = `${process.pid}.${randomBytes(8).toString("hex")}`;
       const ownerFile = join(path, "owner");
-      // Whether the token actually landed, because the release below cannot work it out afterwards
-      // and gets the opposite answer if it guesses. A write here can fail for ordinary reasons —
-      // ENOSPC, EROFS, a directory mode that does not permit it — and without this flag such a
-      // holder could never remove its own lock again.
-      let ownerWritten = false;
+      // **A lock we cannot prove is ours is a lock we must not hold.**
+      //
+      // The owner write can fail for ordinary reasons — ENOSPC, EROFS, a directory mode that does
+      // not permit it — and every one of those is a property of the DIRECTORY or the FILESYSTEM,
+      // not of this process. That is what makes "just remember that our write failed and remove the
+      // directory anyway at release" wrong, and it was tried: if the cause is environmental then no
+      // holder can write a token, so the next holder's mkdir-to-write window is not a
+      // sub-millisecond race, it is permanent — and the late release then deletes a lock somebody
+      // else is actively holding. That converts a leak, which ages out at `staleMs` and costs a
+      // wait, into a THEFT, which does not age out and costs mutual exclusion: two processes
+      // rotating the refresh token, or two orders for the same symbol in flight.
+      //
+      // So the failure is taken at acquisition instead, where it is cheap and certain. Nothing can
+      // have broken us as stale in the microseconds since `mkdirSync` — `staleMs` is tens of
+      // seconds — so the directory is unambiguously ours to remove, and the caller gets the answer
+      // it already knows how to handle: the lock was not acquired.
       try {
         writeFileSync(ownerFile, owner);
-        ownerWritten = true;
       } catch {
-        /* recorded, not ignored; see `ownerWritten` in the release below */
+        try {
+          rmSync(path, { recursive: true, force: true });
+        } catch {
+          /* it will be broken as stale; better a leak here than a lock nobody can prove owns */
+        }
+        return null;
       }
       let released = false;
       return () => {
@@ -144,7 +162,6 @@ export async function acquireDirLock(
           }
           const mine = releaseDecision({
             owner,
-            ownerWritten,
             readOwner,
             dirExists: readOwner !== null || existsSync(path),
           });

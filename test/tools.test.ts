@@ -24,6 +24,7 @@ import { makeDefiner, FAMILIES, FAMILY_META_KEY, EVIDENCE_META_KEY, type ToolHan
 import { registerTools } from "../src/tools/register.ts";
 import { describeSurface } from "../src/tools/surface.ts";
 import { buildInstructions } from "../src/instructions.ts";
+import { resolveToolProfile } from "../src/tools/_profile.ts";
 
 /**
  * Every tool that can change something. Spelled out rather than derived, because deriving it from
@@ -275,4 +276,65 @@ test("describeSurface agrees with a real server, without starting one", () => {
   );
   assert.deepEqual(surface.writes, WRITES);
   assert.deepEqual(surface.skipped, []);
+});
+
+
+test("the order-entry block on the instructions page is true under every shape of profile", () => {
+  // None of this was covered. The gating was changed twice in two commits and each change traded
+  // one false claim for another, with a green suite both times — so the three states are pinned
+  // here, by rendering the real page.
+  const page = (raw: string) => {
+    const resolved = resolveToolProfile(raw, new Set(describeSurface().tools.map((t) => t.name)));
+    return buildInstructions(describeSurface(resolved.profile, resolved.isDefault));
+  };
+
+  // 1. A preview is registered -> the protocol, naming the previews that actually exist.
+  const eipo = page("eipo");
+  assert.match(eipo, /PLACING AN ORDER IS TWO STEPS/, "eipo_order places an order and needs the protocol");
+  assert.ok(eipo.includes("eipo_order_preview builds a ticket"), "and it must name the preview it has");
+  assert.doesNotMatch(
+    eipo,
+    /ORDER ENTRY IS NOT REGISTERED/,
+    "saying order entry is impossible while eipo_order is registered is a false negative about a money write",
+  );
+  // An IPO has no auto-rejection band, and its ticket carries no commission and no net. Sharing one
+  // sentence between the two previews invented all three.
+  const eipoStep = eipo.slice(eipo.indexOf("eipo_order_preview builds a ticket"));
+  const eipoLine = eipoStep.slice(0, eipoStep.indexOf("\n"));
+  for (const invented of ["commission", "band", "the net"]) {
+    assert.ok(!eipoLine.includes(invented), `the e-IPO ticket has no ${invented}: ${eipoLine}`);
+  }
+
+  // 2. A write with NO preview -> not the protocol. The write takes a ticket id and nothing else,
+  //    and only a preview mints tickets, so this server can describe the protocol perfectly and
+  //    still refuse every call.
+  const writeOnly = page("core,order_buy");
+  assert.doesNotMatch(writeOnly, /PLACING AN ORDER IS TWO STEPS/, "no preview means the protocol cannot be followed");
+  assert.match(writeOnly, /CANNOT BE USED/, "and the page has to say why rather than staying silent");
+
+  // 3. Nothing at all -> the remedy has to fix what the claim covers. The claim names e-IPO, so a
+  //    remedy of ",trading" alone sends the user to edit a config file and restart for nothing.
+  const core = page("core");
+  assert.match(core, /ORDER ENTRY IS NOT REGISTERED/);
+  const remedy = core.slice(core.indexOf("ORDER ENTRY IS NOT REGISTERED"));
+  assert.ok(remedy.includes(",trading"), "equities remedy");
+  assert.ok(remedy.includes(",eipo"), "the claim covers e-IPO subscription, so the remedy must too");
+});
+
+test("every order-entry write is in the list the instructions page measures against", () => {
+  // `ORDER_ENTRY_TOOLS` is hand-written, inside the module whose own header argues that a
+  // hand-written enumeration of a growing set is a claim with an expiry date. It cannot be derived
+  // (that would make it agree with itself), so it is pinned against WRITES instead: a new order
+  // tool added to the trading or eipo family reddens this rather than silently falling outside the
+  // page's idea of order entry.
+  const orderish = describeSurface()
+    .writes.filter((n) => /^(order_|eipo_order)/.test(n))
+    .sort();
+  // Spelled out, so a sixth one reddens this instead of being quietly absorbed by a regex.
+  assert.deepEqual(orderish, ["eipo_order", "order_amend", "order_buy", "order_cancel", "order_sell"]);
+
+  const all = buildInstructions(describeSurface());
+  for (const name of orderish) {
+    assert.ok(all.includes(name), `${name} is an order-entry write the instructions never name`);
+  }
 });

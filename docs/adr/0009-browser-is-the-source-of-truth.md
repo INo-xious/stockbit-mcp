@@ -201,3 +201,14 @@ tokens is **unverified**, so such a tool would make a claim nobody has measured.
 - The macOS Keychain write stops passing the token as a process argument, where `ps` exposes it to
   every process running as the same user and bypasses the Keychain ACL that would otherwise prompt.
   The argv form is kept as a recorded fallback, and `doctor` reports which one worked.
+
+  **Amended after review.** There is a fourth outcome: the write can *fail*, and it now does so
+  rather than falling back, whenever `security` did not answer — killed by the timeout, unable to
+  spawn, the Keychain locked (45), or the prompt declined (51). The fallback puts the credential in
+  `argv` where `ps` can read it, and in every one of those cases it would meet the same refusal and
+  fail anyway, so it was a leak that bought nothing. The cost is real and worth recording: a
+  `security` whose `readpassphrase` blocks on `/dev/tty` rather than erroring is *killed*, so the
+  machine the fallback was originally written for no longer gets it, and no credential is written at
+  all. `doctor` must therefore report that state as a failure rather than as a fallback in use,
+  which is why `probeKeychainWrite` shares `keychainWriteDecision` instead of carrying a second copy
+  of the rule — it carried one, and the copies disagreed the moment the rule changed.

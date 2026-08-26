@@ -283,9 +283,34 @@ test("the 'no order tools at all' claim is measured against every order tool, am
     assert.ok(row, "the warning still fires — you cannot place an order");
     assert.doesNotMatch(row!.detail, /at all/, "but order_amend IS registered, so not 'at all'");
 
+    // e-IPO subscription is order entry too. `eipo_order` is a destructiveHint write that commits
+    // real money out of the RDN and is gated on the same `policy.enabled`, and `instructions.ts`
+    // counts it — so leaving it out of this list made the report say "no order-entry tools at all"
+    // on the very server whose instructions page opened with "PLACING AN ORDER IS TWO STEPS,
+    // ALWAYS: eipo_order_preview…". The fixtures below are the reason that was invisible: they
+    // never mentioned an e-IPO tool, so the principle this test encodes passed while the report
+    // contradicted it.
+    const withEipo = await collectStatus({
+      profileLabel: "eipo",
+      missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel", "order_amend"],
+    });
+    assert.doesNotMatch(
+      withEipo.checks.find((c) => c.name === "trading tools")!.detail,
+      /at all/,
+      "eipo_order is registered under this profile, so 'no order-entry tools at all' is false",
+    );
+
     const none = await collectStatus({
       profileLabel: "core",
-      missingTools: ["order_preview", "order_buy", "order_sell", "order_cancel", "order_amend"],
+      missingTools: [
+        "order_preview",
+        "order_buy",
+        "order_sell",
+        "order_cancel",
+        "order_amend",
+        "eipo_order_preview",
+        "eipo_order",
+      ],
     });
     assert.match(
       none.checks.find((c) => c.name === "trading tools")!.detail,

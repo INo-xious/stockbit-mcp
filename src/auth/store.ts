@@ -189,11 +189,17 @@ function keychainRead(slot: StoreSlot): { status: number | null; value: string |
  *     the same way, and the write fails anyway — so the only lasting effect was the credential in
  *     `ps`, twice per rotation, because `persistRotated` retries.
  *
- * So argv is reached only from a DEFINITE refusal: `security` ran, answered, and answered non-zero
- * — which is what a build that insists on reading the value from `/dev/tty` rather than a pipe
- * actually looks like, and the only case the fallback was ever for. A write that was killed, or
- * that could not be spawned at all, throws instead. The caller retries; a lost rotation is
- * recoverable and a leaked credential is not.
+ * So argv is reached only from a refusal that is both DEFINITE and not a refusal to act: `security`
+ * ran, answered, and answered with something other than "the Keychain is locked" or "the prompt was
+ * declined". A write that was killed, that could not be spawned, or that hit one of those two,
+ * throws instead. The caller retries; a lost rotation is recoverable and a leaked credential is not.
+ *
+ * Worth being straight about what that leaves: a `security` whose `readpassphrase` blocks on
+ * `/dev/tty` rather than erroring is KILLED, not refused, so the fallback the argv form was
+ * originally written for is no longer reachable from that cause. If such a machine exists the
+ * credential is not written at all, and `doctor` must say so rather than reporting a fallback that
+ * will not be taken — which is why `probeKeychainWrite` shares this function instead of carrying
+ * its own copy of the rule.
  */
 /**
  * What to do after the prompted write, given only what the spawns reported. Pure, and exported, so
@@ -208,6 +214,18 @@ function keychainRead(slot: StoreSlot): { status: number | null; value: string |
  * `readBack` is null when no read was attempted, which is every case where the prompted write did
  * not exit 0.
  */
+/**
+ * `security` exit codes that mean "I could not act", not "the answer is no".
+ *
+ * The distinction decides whether the refresh token may be passed in `argv`, so it is named once
+ * and used on both sides of `keychainWriteDecision` rather than spelled out twice — spelling it out
+ * twice is how the two sides came to disagree.
+ */
+const KEYCHAIN_REFUSED_TO_ACT = new Set([
+  45, // errSecInteractionNotAllowed — the Keychain is locked and nothing may prompt
+  51, // errSecAuthFailed — someone declined the prompt
+]);
+
 export function keychainWriteDecision(
   promptedStatus: number | null,
   readBack: { matched: boolean; status: number | null } | null,
@@ -215,8 +233,15 @@ export function keychainWriteDecision(
   // Killed by the timeout, or never ran. NOT a refusal, and the credential does not go in `argv`
   // on the strength of a non-answer.
   if (promptedStatus === null) return "fail";
-  // `security` ran and refused. This is what a build that insists on /dev/tty looks like, and it
-  // is the only thing the argv fallback was ever for.
+  // Nor on the strength of a refusal to ACT. `readState` below already classifies these two, and
+  // the read-back branch of this very function honours that classification — an earlier version
+  // did not apply it here, so a locked Keychain (45) or a user clicking Deny (51) was read as
+  // "security answered, and the answer was no" and the credential went into `argv` anyway. Same
+  // function, same two codes, opposite verdicts. They are non-answers on both sides, and the argv
+  // spawn could not have helped in either case: it meets the same lock and the same prompt.
+  if (KEYCHAIN_REFUSED_TO_ACT.has(promptedStatus)) return "fail";
+  // `security` ran and refused for some other reason. This is the only thing left that reaches the
+  // fallback.
   if (promptedStatus !== 0) return "argv";
   if (!readBack) return "fail";
   if (readBack.matched) return "stdin";
@@ -287,25 +312,44 @@ export function probeKeychainWrite(): { available: boolean; method: KeychainWrit
       stdio: ["pipe", "ignore", "ignore"],
       timeout: KEYCHAIN_TIMEOUT_MS,
     });
-    if (prompted.status === 0) {
-      const back = readBack();
-      if (back === value) {
-        return {
-          available: true,
-          method: "stdin",
-          detail: "the token is passed on stdin — never visible in `ps`",
-        };
-      }
-      if (back === null) {
-        return {
-          available: true,
-          method: "stdin-unverified",
-          detail:
-            "the stdin write reported success but could not be read back — probably a Keychain " +
-            "prompt nobody answered. The token is NOT put in `ps` to find out; if a session goes " +
-            "missing after a rotation, this row is where to look",
-        };
-      }
+    // THE SAME DECISION FUNCTION THE REAL WRITE USES. It used to be a second copy of the rule, and
+    // the copies drifted the moment the rule changed: on a machine where the prompted write hangs,
+    // `keychainWrite` throws and stores nothing while the probe fell through, succeeded via argv,
+    // and reported `method: "argv"` — which `doctor` renders as a WARNING that the fallback is in
+    // use and the token is briefly visible in `ps`. Both halves false, on a machine where in fact
+    // no credential can be written at all and the honest answer is `fail`. `doctor` is what someone
+    // runs when login is not working; it must not describe a path the writer will not take.
+    const back = prompted.status === 0 ? readBack() : null;
+    const decision = keychainWriteDecision(
+      prompted.status,
+      prompted.status === 0 ? { matched: back === value, status: back === null ? null : 0 } : null,
+    );
+    if (decision === "stdin") {
+      return {
+        available: true,
+        method: "stdin",
+        detail: "the token is passed on stdin — never visible in `ps`",
+      };
+    }
+    if (decision === "stdin-unverified") {
+      return {
+        available: true,
+        method: "stdin-unverified",
+        detail:
+          "the stdin write reported success but could not be read back — probably a Keychain " +
+          "prompt nobody answered. The token is NOT put in `ps` to find out; if a session goes " +
+          "missing after a rotation, this row is where to look",
+      };
+    }
+    if (decision === "fail") {
+      return {
+        available: true,
+        method: null,
+        detail:
+          "`security` would not carry out the write — it was killed, the Keychain is locked, or a " +
+          "prompt was declined. No credential can be stored here, and the argv fallback is NOT " +
+          "tried, because it meets the same refusal and would put the token in `ps` on the way",
+      };
     }
     const viaArgv = spawnSync("security", [...args, value], {
       stdio: "ignore",

@@ -85,34 +85,66 @@ export function buildInstructions(surface: Surface): string {
   // wrong at once under `STOCKBIT_TOOLS=eipo`: it suppressed the protocol for a tool that needs it,
   // and then asserted "there is no way to place an order from here" while a tool that places one
   // was registered. A false negative about order entry is the most expensive sentence on this page.
+  // Each preview describes its OWN ticket. An IPO has no auto-rejection band and its ticket carries
+  // no commission and no net; saying otherwise under `eipo` invented three fields, which is the
+  // "never invent a number" rule losing to a shared sentence.
+  const ORDER_PREVIEWS = [
+    {
+      tool: "order_preview",
+      fields: "the price, the lots, the commission, the net, today's band, and every check",
+    },
+    {
+      tool: "eipo_order_preview",
+      fields: "the lots, the shares, the price, the amount committed, the RDN balance, and every check",
+    },
+  ];
   const ORDER_ENTRY_TOOLS = [
-    "order_preview",
+    ...ORDER_PREVIEWS.map((p) => p.tool),
     "order_buy",
     "order_sell",
     "order_amend",
     "order_cancel",
-    "eipo_order_preview",
     "eipo_order",
   ];
-  const previewTools = ["order_preview", "eipo_order_preview"].filter(has);
-  const orderBlock = ORDER_ENTRY_TOOLS.some(has)
+  const previews = ORDER_PREVIEWS.filter((p) => has(p.tool));
+  const orderWrites = ["order_buy", "order_sell", "order_amend", "order_cancel", "eipo_order"].filter(has);
+
+  // Three states, not two, and the middle one is a profile nobody would configure on purpose.
+  //
+  // Gating on "any order tool at all" was the fix for a false NEGATIVE — `STOCKBIT_TOOLS=eipo`
+  // being told order entry was impossible while `eipo_order` was registered. But it turned that
+  // into a false POSITIVE for a hand-picked profile that registers a write and no preview
+  // (STOCKBIT_TOOLS takes individual tool names, so `core,order_buy` is a thing a user can type).
+  // The write tools take a ticket id and nothing else, and tickets are minted only by a preview, so
+  // that server can describe the protocol perfectly and still refuse every call — and the refusal
+  // tells the model to run a tool that does not exist. The protocol needs a preview, so it is
+  // gated on one.
+  const orderBlock = previews.length
     ? `PLACING AN ORDER IS TWO STEPS, ALWAYS
-1. ${previewTools.length ? previewTools.join(" / ") : "The preview tool"} builds a ticket: the price, the lots, the commission, the net, today's band, and
-   every check. Relay its "summary" to the user VERBATIM and ask them, in words.
-2. Only after they agree, call the matching write tool with that ticket id and confirm: true. The
+${previews.map((p, i) => `${i + 1}. ${p.tool} builds a ticket: ${p.fields}.\n   Relay its "summary" to the user VERBATIM and ask them, in words.`).join("\n")}
+${previews.length + 1}. Only after they agree, call the matching write tool with that ticket id and confirm: true. The
    write tools take no price and no quantity, so what reaches the exchange is exactly what the user
    was shown. Never set confirm on their behalf. A ticket expires in two minutes.
 Afterwards, read "outcome" before saying anything. Only "ok" means the order is on the book and was
 seen there. Anything else means the state is uncertain: relay "message" and DO NOT RESEND — a resend
 is how one intention becomes two orders.
 `
-    : `ORDER ENTRY IS NOT REGISTERED IN THIS SERVER
+    : orderWrites.length
+      ? `ORDER ENTRY IS REGISTERED HERE BUT CANNOT BE USED
+This server registered ${orderWrites.join(" / ")} without a preview tool. Those take a
+ticket id and nothing else, and tickets are minted only by order_preview / eipo_order_preview, which
+this server did not register — so every call will be refused, and the refusal will name a tool that
+is not here. Do not offer to place, amend or cancel an order. Setting STOCKBIT_TOOLS to include the
+whole trading or eipo family, rather than individual tool names, is what fixes it.
+`
+      : `ORDER ENTRY IS NOT REGISTERED IN THIS SERVER
 This server has none of ${ORDER_ENTRY_TOOLS.join(" / ")}, so there is
 no way to place, amend or cancel an order — or to subscribe to an e-IPO — from here, whatever the
 trading mode says. Do not offer to.
 The trading account can still be READ if the tools above list it. Adding
-STOCKBIT_TOOLS=${surface.profileLabel},trading to the client's config and restarting it is what
-changes that, and it is the user's decision to make.
+STOCKBIT_TOOLS=${surface.profileLabel},trading for equities, or ,eipo for e-IPO subscription, to the
+client's config and restarting it is what changes that — the claim above covers both, so the remedy
+has to name both. It is the user's decision to make.
 `;
 
   const accountBlock = has("portfolio")

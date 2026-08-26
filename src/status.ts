@@ -483,9 +483,21 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
   // AT ALL" has to be measured against every order-entry tool including `order_amend`, or the
   // report asserts something false about a registered, destructive write that changes a live order
   // on the exchange.
+  //
+  // `eipo_order` is one of those tools and was missing from this list. It is a `destructiveHint`
+  // write that commits real money out of the RDN, it is gated on the same `policy.enabled`, and
+  // `instructions.ts` counts it as order entry — so under `STOCKBIT_TOOLS=eipo` this report said
+  // "no order-entry tools at all" on the same server whose instructions page said "PLACING AN ORDER
+  // IS TWO STEPS, ALWAYS: eipo_order_preview…". Whichever of the two the user believed, one of them
+  // was lying to them about a live money write.
   const missing = new Set(options.missingTools ?? []);
   const ORDER_ENTRY_CORE = ["order_preview", "order_buy", "order_sell", "order_cancel"];
-  const ORDER_ENTRY_ALL = [...ORDER_ENTRY_CORE, "order_amend"];
+  const ORDER_ENTRY_ALL = [
+    ...ORDER_ENTRY_CORE,
+    "order_amend",
+    "eipo_order_preview",
+    "eipo_order",
+  ];
   const absentOrderTools = ORDER_ENTRY_CORE.filter((name) => missing.has(name));
   const noOrderToolsAtAll = ORDER_ENTRY_ALL.every((name) => missing.has(name));
   const tradingToolsMissing = trading.enabled && absentOrderTools.length > 0;
