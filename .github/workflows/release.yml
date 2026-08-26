@@ -1,8 +1,33 @@
 name: Release
 
+# The tag-triggered path. `publish.yml` is the primary one — a version bump landing on `main`
+# publishes, tags and releases in one run — and this exists for a tag pushed by hand.
+#
+# ## The order of the steps is the point
+#
+# This file used to create the GitHub Release BEFORE the publish step, and the publish step skipped
+# itself when NPM_TOKEN was absent. The result, in production: v1.0.0 and v1.0.1 both ran GREEN,
+# both produced a public GitHub Release with attached assets, and neither reached npm. `stockbit-mcp`
+# has still never been published. A green run that announces something nobody can install is the
+# worst outcome this pipeline can produce, so:
+#
+#   - the publish happens FIRST and the Release is the LAST thing in the job;
+#   - a publish that is NEEDED but impossible is a hard failure, never a skip. Skipping is correct
+#     only when the registry already has the version, which is the one case where there is genuinely
+#     nothing left to do.
+
 on:
   push:
     tags: ["v*"]
+
+concurrency:
+  # SHARED WITH publish.yml, byte for byte. `npm version patch && git push --follow-tags` delivers
+  # the commit and the tag in the same moment with the USER's credential, so the GITHUB_TOKEN
+  # recursion guard does not apply and both workflows start. Both would see "not published" and both
+  # would publish; the loser gets E403 on a release that in fact succeeded. Serialised, the second
+  # re-runs its check afterwards and correctly observes the version as published.
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -14,9 +39,6 @@ jobs:
     env:
       STOCKBIT_NO_BROWSER: "1"
       STOCKBIT_FORCE_FILE_STORE: "1"
-      # `secrets` cannot be used in a job-level `if:`, so it is read into the
-      # environment and the steps below branch on the string.
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -26,16 +48,72 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
-      - run: npm ci
-
       - name: The tag must be the version in package.json
         run: |
+          set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
           if [ "$tag" != "$pkg" ]; then
-            echo "tag v$tag does not match package.json $pkg" >&2
+            echo "::error::tag v$tag does not match package.json $pkg" >&2
             exit 1
           fi
+          # Validated before it is written to $GITHUB_ENV, which is parsed as `key=value` lines: an
+          # unchecked value containing a newline defines a second variable of the writer's choosing.
+          # The class is what npm allows in a version and nothing else.
+          case "$pkg" in
+            "" | *[!0-9A-Za-z.+-]*)
+              echo "::error::version '$pkg' has characters outside [0-9A-Za-z.+-]. Refusing to use it." >&2
+              exit 1 ;;
+          esac
+          echo "VERSION=$pkg" >> "$GITHUB_ENV"
+
+      # Guard against a DOUBLE publish, not just a missing token.
+      #
+      # `publish.yml` publishes on a version bump landing on `main`, and it pushes the matching tag
+      # when it does. A tag arriving here is therefore no longer proof that this version still needs
+      # publishing — it may be the tag that workflow just created. Only the registry knows, so ask
+      # it, and skip cleanly when the answer is "already there".
+      #
+      # A tag push made with GITHUB_TOKEN does not itself start another workflow, so today the two
+      # paths cannot collide that way. This does not rely on that: the recursion guard is a GitHub
+      # behaviour a later switch to a PAT would silently remove, and the shared concurrency group
+      # above covers the collision it never applied to in the first place.
+      #
+      # THREE outcomes, not two: `scripts/npm-version-state.mjs` prints a word and reserves a
+      # non-zero exit for "could not determine", which `set -e` turns into a failed job. The inline
+      # check this replaces read "not published" out of ANY non-zero exit, so a malformed response
+      # or an unreadable temp file voted to PUBLISH.
+      - name: Is this version still unpublished?
+        id: registry
+        run: |
+          set -euo pipefail
+          state="$(node scripts/npm-version-state.mjs)"
+          case "$state" in
+            present)
+              echo "needed=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::$VERSION is already on npm — publish.yml got here first. Skipping the publish." ;;
+            absent)
+              echo "needed=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::npm-version-state printed '$state', which is neither present nor absent." >&2
+              exit 1 ;;
+          esac
+
+      # A missing token is an ERROR when a publish is needed. Skipping instead is the defect that
+      # produced two green releases of nothing. It runs before the gates for the same reason
+      # publish.yml's copy does: prove the unworkaroundable thing before spending twenty minutes.
+      - name: The publish token must exist when a publish is needed
+        if: steps.registry.outputs.needed == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::$VERSION is not on npm, but the NPM_TOKEN secret is not set, so this tag cannot be released. Add it under Settings → Secrets and variables → Actions, then re-run this workflow." >&2
+            exit 1
+          fi
+          echo "NPM_TOKEN is present."
+
+      - run: npm ci
 
       - run: npm run typecheck
       - run: npm test
@@ -43,12 +121,34 @@ jobs:
       - run: npm run smoke
       - run: npm run check:pack
 
-      - name: Pack the tarball
-        run: npm pack
+      # `npm pack` runs prepack (clean plus tsc), so this is the build that ships.
+      - name: Pack the tarball that will be published
+        run: |
+          set -euo pipefail
+          npm pack
+          if [ ! -f "stockbit-mcp-${VERSION}.tgz" ]; then
+            echo "::error::npm pack did not produce stockbit-mcp-${VERSION}.tgz" >&2
+            ls -1 ./*.tgz >&2 || true
+            exit 1
+          fi
+
+      # The TARBALL PATH, not the directory: npm runs prepack and prepublishOnly for a directory spec
+      # only (`lib/commands/publish.js`: `if (spec.type === 'directory' && !ignoreScripts)`), so
+      # publishing from the directory built a SECOND, independent tarball — the `.tgz` on the Release
+      # was not the `.tgz` on npm, and the provenance attestation covered only npm's. One artefact,
+      # built once, attested, published and attached.
+      - name: Publish to npm
+        if: steps.registry.outputs.needed == 'true'
+        run: npm publish "./stockbit-mcp-${VERSION}.tgz" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Build the Desktop Extension
         run: node scripts/build-mcpb.mjs
 
+      # LAST. A Release is public and announces something installable; nothing may create one until
+      # the thing it announces is on npm. Reaching this line means either the publish above
+      # succeeded or the registry already had the version.
       - name: GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -57,37 +157,39 @@ jobs:
             stockbit-mcp-*.tgz
             stockbit-mcp-*.mcpb
 
-      # The first publish is done by hand by the account owner. After that,
-      # setting NPM_TOKEN turns this on; without it the step is skipped, not failed.
-      - name: Publish to npm
-        if: env.HAS_NPM_TOKEN == 'true'
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   registry:
     name: MCP Registry
     needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-    env:
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+      id-token: write # mcp-publisher authenticates as this repository over OIDC
     steps:
       - uses: actions/checkout@v7
 
       - name: Install mcp-publisher
-        if: env.HAS_NPM_TOKEN == 'true'
         run: |
-          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" \
-            | tar xz mcp-publisher
+          set -euo pipefail
+          asset="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+          # Downloaded to a file rather than piped into tar: in a pipeline curl's exit status is not
+          # the one the shell reports, and without --fail a 404 HTML page is happily fed to tar. The
+          # retries are for a DNS or TLS blip, which would otherwise end the run on a bare exit code
+          # with no annotation saying what to do about it.
+          if ! curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+                 -o /tmp/mcp-publisher.tar.gz \
+                 "https://github.com/modelcontextprotocol/registry/releases/latest/download/$asset"; then
+            echo "::error::could not download $asset. The npm package IS live; re-run this job once github.com is reachable." >&2
+            exit 1
+          fi
+          tar xzf /tmp/mcp-publisher.tar.gz mcp-publisher
           ./mcp-publisher --version
 
-      # Publishing to the registry only makes sense once the npm package with the
-      # matching `mcpName` is live, which is why this needs the job above.
+      # No NPM_TOKEN condition any more. The job above now FAILS rather than skipping when a needed
+      # publish is impossible, so reaching this point means the npm package with the matching
+      # `mcpName` is live — the only precondition the MCP Registry has. Gating on the token instead
+      # used to skip this silently for a version publish.yml had already put on npm.
       - name: Publish server.json
-        if: env.HAS_NPM_TOKEN == 'true'
         run: |
+          set -euo pipefail
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish

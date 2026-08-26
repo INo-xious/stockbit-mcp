@@ -1,0 +1,342 @@
+name: Publish
+
+# Publish to npm when a version bump lands on `main`.
+#
+# ## What decides that a publish should happen
+#
+# TWO facts, and BOTH must hold. Either one alone is wrong.
+#
+# 1. **The npm registry says this version is not there.** The question "is this version already
+#    published" has one authoritative answer and it lives on registry.npmjs.org — asking git instead
+#    gets it wrong in every interesting case: a re-run of the same commit, a revert-and-reapply, a
+#    merge commit that carries the bump without touching the file in its own diff, a force-push.
+#    Asking the registry makes the workflow idempotent: run it a hundred times on the same commit
+#    and at most one publish happens.
+#
+# 2. **The version actually changed in this push**, or a human started the run by hand. The registry
+#    alone is not enough, and this is not theoretical: `1.1.0` has never been published, so fact 1 is
+#    true on EVERY push to `main`. Without fact 2 the next unrelated commit — a Dependabot bump, a
+#    README fix — would set off an unattended first-ever publish nobody asked for.
+#
+#    The `paths: ["package.json"]` filter that used to sit on the trigger LOOKED like fact 2. It is
+#    not: it means "any package.json edit", which is exactly what a Dependabot merge is. The real
+#    test is a comparison of `version` before and after, and it lives in `decide` where it can be
+#    read and where each way of skipping says so in an annotation.
+#
+# Anything the check cannot establish counts as "do not publish". An unattended publish is
+# irreversible; a skipped one is one `workflow_dispatch` away.
+#
+# ## What must NOT happen
+#
+# - **A silent no-op.** If a version is genuinely new and the publish cannot proceed, this FAILS
+#   loudly. The worst outcome here is believing you shipped when you did not, and a skipped step
+#   that reports success is exactly that. Skipping is correct only when there is nothing to do.
+# - **A double publish.** `release.yml` also publishes, on its own tag trigger. Both ask the
+#   registry first, and both sit in the SAME concurrency group so the check-then-act cannot
+#   interleave.
+# - **A cancelled publish.** `npm publish` is irreversible. Cancelling the job in the window between
+#   it and the tag push would leave npm holding a version this repository has no tag for.
+# - **A tag with nothing behind it.** The publish comes FIRST and the tag second, because every step
+#   between them can fail and a tag pushed by GITHUB_TOKEN cannot start `release.yml` to recover.
+
+on:
+  push:
+    branches: [main]
+  # The escape hatch, and the deliberate-publish switch: it skips the "did the version change in
+  # this push" test, so a version that is new to npm can be released from `main` at any time.
+  workflow_dispatch:
+
+concurrency:
+  # SHARED WITH release.yml. The group string must stay byte-identical in both files.
+  #
+  # `npm version patch && git push --follow-tags` is the ordinary way to bump, and it delivers the
+  # commit and the tag in the same moment with the USER's credential — so the recursion guard does
+  # not apply and BOTH workflows start. Both would query the registry, both would correctly see
+  # "absent", and both would publish; the loser gets `E403 You cannot publish over the previously
+  # published versions` on a release that in fact succeeded. Serialised, the second one re-runs its
+  # check after the first finishes and correctly observes the version as published.
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  decide:
+    name: Should this version be published?
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `git show <before>:package.json` needs the before-commit to be a real object in this
+          # clone. checkout's default `fetch-depth: 1` fetches only the head commit, so the
+          # comparison would fail on every run and nothing would ever publish. 0 fetches the
+          # branch's full history, which is what makes the before-commit resolvable.
+          fetch-depth: 0
+
+      # Pinned rather than inherited: this job runs `scripts/npm-version-state.mjs`, which uses
+      # global `fetch` and `AbortSignal.timeout`. The runner's default Node is not part of this
+      # repository's contract; `engines` says 22.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - id: check
+        name: Ask the registry, then ask git what changed
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+
+          # Validate BEFORE anything reaches $GITHUB_OUTPUT. That file is parsed as `key=value`
+          # lines, so a value containing a newline defines a SECOND key of the writer's choosing —
+          # including `publish=true`. The character classes are what npm allows and nothing more.
+          case "$version" in
+            "" | *[!0-9A-Za-z.+-]*)
+              echo "::error::package.json version is empty or has characters outside [0-9A-Za-z.+-]. Refusing to use it." >&2
+              exit 1 ;;
+          esac
+          case "$name" in
+            "" | *[!0-9A-Za-z@/._-]*)
+              echo "::error::package.json name is empty or has characters outside [0-9A-Za-z@/._-]. Refusing to use it." >&2
+              exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # THREE outcomes, not two. The script prints `present` or `absent` and exits 0; it exits
+          # non-zero only for "could not determine", which `set -e` turns into a failed job. Its
+          # predecessor here inferred "not published" from a non-zero exit, so an unreadable file or
+          # malformed JSON voted to PUBLISH. Read the WORD, never the exit code.
+          state="$(node scripts/npm-version-state.mjs --name "$name" --version "$version")"
+          case "$state" in
+            present)
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::$name@$version is already on npm. Nothing to publish."
+              exit 0 ;;
+            absent)
+              : ;;
+            *)
+              echo "::error::npm-version-state printed '$state', which is neither present nor absent." >&2
+              exit 1 ;;
+          esac
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$name@$version is not on npm and this run was started by hand. It will be published."
+            exit 0
+          fi
+
+          # Fact 2: did the version CHANGE in this push? Anything that cannot be established counts
+          # as "unchanged", because that is the direction that cannot cause an unwanted release.
+          NO_COMMIT="0000000000000000000000000000000000000000"
+          previous=""
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "$NO_COMMIT" ]; then
+            echo "::notice::this push reports no before-commit (a new branch, or the first push to it)."
+          elif ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "::notice::the before-commit $BEFORE is not in this checkout — a force-push rewrote it."
+          elif ! git show "${BEFORE}:package.json" > /tmp/previous-package.json 2>/dev/null; then
+            echo "::notice::$BEFORE has no package.json to compare against."
+          else
+            # Read as DATA: a fixed script string reading a fixed path, with nothing interpolated
+            # into it. `?? ""` and the `||` keep a malformed previous package.json from failing the
+            # run — an unreadable previous version is "unknown", and unknown means do not publish.
+            previous="$(node -p 'JSON.parse(require("node:fs").readFileSync("/tmp/previous-package.json","utf8")).version ?? ""' 2>/dev/null)" || previous=""
+          fi
+
+          if [ -z "$previous" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::could not read the previous version, so this push is not a proven version bump. Run this workflow manually to publish $version."
+          elif [ "$previous" = "$version" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::package.json is still at $version, so this push bumped nothing. Not publishing."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$name went from $previous to $version in this push, and $version is not on npm. It will be published."
+          fi
+
+  publish:
+    name: Publish ${{ needs.decide.outputs.version }}
+    needs: decide
+    if: needs.decide.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag and the GitHub Release
+      id-token: write # npm provenance
+    env:
+      STOCKBIT_NO_BROWSER: "1"
+      STOCKBIT_FORCE_FILE_STORE: "1"
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Before spending twenty minutes on the gates, prove the one thing that cannot be worked
+      # around. A missing token is an ERROR here, not a skip: `decide` has already established that
+      # this version is genuinely unpublished, so quietly succeeding would report a publish that
+      # never happened.
+      - name: The publish token must exist
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::$VERSION is not on npm, but the NPM_TOKEN secret is not set, so it cannot be published. Add it under Settings → Secrets and variables → Actions, then re-run this workflow." >&2
+            exit 1
+          fi
+          echo "NPM_TOKEN is present."
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      # The same gates CI runs, because a publish is the one moment they cannot be re-run later.
+      # Ubuntu only, deliberately: the browser-driven tests are flaky on the Windows and macOS
+      # runners, and a release that fails at random is worse than one platform's coverage.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run smoke
+      - run: npm run check:pack
+
+      # docs/ is NOT in `files`, so nothing checked here ever ships in the tarball. It runs anyway
+      # because `scripts/smoke.mjs` reads docs/TOOLS.md for the tool counts it asserts against the
+      # running server: a stale TOOLS.md makes the smoke test agree with the wrong number.
+      - name: docs/TOOLS.md is what the smoke test counts against, so it must not be stale
+        run: |
+          npm run docs:tools
+          git diff --exit-code docs/TOOLS.md
+
+      # `npm pack` runs prepack, which is `npm run build` — clean plus tsc. THIS is the build that
+      # ships, and the step below publishes this exact file.
+      - name: Pack the tarball that will be published
+        run: |
+          set -euo pipefail
+          npm pack
+          if [ ! -f "stockbit-mcp-${VERSION}.tgz" ]; then
+            echo "::error::npm pack did not produce stockbit-mcp-${VERSION}.tgz" >&2
+            ls -1 ./*.tgz >&2 || true
+            exit 1
+          fi
+
+      # Publish the TARBALL PATH, not the directory.
+      #
+      # `npm publish` from a directory re-runs prepack and prepublishOnly and builds a second,
+      # independent tarball — so the `.tgz` attached to the GitHub Release was not the `.tgz` on npm,
+      # and the provenance attestation covered only npm's. npm runs those lifecycle scripts for a
+      # directory spec only (`lib/commands/publish.js`: `if (spec.type === 'directory' &&
+      # !ignoreScripts)`), so naming the file builds, attests, publishes and attaches ONE artefact —
+      # and drops a redundant rebuild and a second `npm test` along the way.
+      #
+      # `--provenance` needs `id-token: write` and a public repo; both hold. It is also set in
+      # package.json's publishConfig, and passing it explicitly keeps this readable at the call site.
+      - name: Publish to npm
+        run: npm publish "./stockbit-mcp-${VERSION}.tgz" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # AFTER the publish, deliberately. A tag pushed before it would survive a failure in any of
+      # the steps above and leave a public tag pointing at a version nobody can install — and
+      # because that tag is pushed with GITHUB_TOKEN, `release.yml` will not start and cannot
+      # recover it. A tag that already exists means a previous attempt got this far; reuse it.
+      - name: Tag v${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::notice::tag v$VERSION already exists on the remote; leaving it as it is."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$VERSION" -m "v$VERSION"
+            git push origin "refs/tags/v$VERSION"
+          fi
+
+      - name: Confirm the registry actually has it
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          # npm serves reads through a CDN, so a fresh publish is not visible instantly. Poll rather
+          # than assert once — and fail if it never appears, because "published" that cannot be
+          # installed is not published.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -sf --max-time 30 "https://registry.npmjs.org/${name}/${VERSION}" >/dev/null; then
+              echo "::notice::verified $name@$VERSION is live on npm."
+              exit 0
+            fi
+            echo "not visible yet (attempt $attempt); waiting…"
+            sleep 10
+          done
+          echo "::error::published $name@$VERSION but the registry never served it. Check https://www.npmjs.com/package/$name" >&2
+          exit 1
+
+      # A Release asset, not a publish prerequisite — so it runs after the publish. It does a
+      # network `npm install` into a staging directory and shells out to a downloaded packer; while
+      # it sat before `npm publish` any hiccup in it left a tag with nothing behind it.
+      - name: Build the Desktop Extension
+        run: node scripts/build-mcpb.mjs
+
+      # Last. A GitHub Release is public and announces something installable, so nothing may create
+      # one until the thing it announces is on npm. `release.yml` used to do this first, and v1.0.0
+      # and v1.0.1 both produced a green run, a public Release with assets, and nothing on npm.
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.decide.outputs.version }}
+          generate_release_notes: true
+          files: |
+            stockbit-mcp-*.tgz
+            stockbit-mcp-*.mcpb
+
+  # The MCP Registry has to be updated from HERE, not only from release.yml.
+  #
+  # `mcp-publisher publish` used to live solely in release.yml's tag-triggered job. The tag this
+  # workflow pushes is pushed with GITHUB_TOKEN, and GitHub does not start a workflow run from an
+  # event raised by that token — "events triggered by the GITHUB_TOKEN will not create a new
+  # workflow run", the only exceptions being workflow_dispatch and repository_dispatch
+  # (https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+  # So under the auto-publish flow every version would have reached npm and none would have reached
+  # the MCP Registry, silently. release.yml keeps its copy for the hand-pushed-tag path.
+  registry:
+    name: MCP Registry
+    needs: [decide, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mcp-publisher authenticates as this repository over OIDC
+    env:
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          asset="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+          # Downloaded to a file rather than piped into tar: in a pipeline curl's exit status is not
+          # the one the shell reports, and without --fail a 404 HTML page is happily fed to tar. The
+          # retries are for a DNS or TLS blip, which would otherwise end the run on a bare exit code
+          # with no annotation saying what to do about it.
+          if ! curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+                 -o /tmp/mcp-publisher.tar.gz \
+                 "https://github.com/modelcontextprotocol/registry/releases/latest/download/$asset"; then
+            echo "::error::could not download $asset. $VERSION IS on npm; re-run this job once github.com is reachable." >&2
+            exit 1
+          fi
+          tar xzf /tmp/mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher --version
+
+      # Publishing to the registry only makes sense once the npm package with the matching `mcpName`
+      # is live, which is what `needs: publish` guarantees.
+      - name: Publish server.json
+        run: |
+          set -euo pipefail
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

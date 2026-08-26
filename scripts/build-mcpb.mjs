@@ -99,6 +99,17 @@ cpSync(join(root, "package-lock.json"), join(stage, "package-lock.json"));
 console.log("Installing runtime dependencies into the staged extension…");
 npm(["install", "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts"], stage);
 
+/**
+ * Pinned, not floating.
+ *
+ * `npm exec --yes -- @anthropic-ai/mcpb` resolves `latest` over the network on every run, so the
+ * tool that packs a release asset could differ between the run that was tested and the run that
+ * ships — including a major version. The release workflows now build this AFTER `npm publish`, so a
+ * surprise here lands on an irreversible release. `2.1.2` is what `latest` resolved to when this was
+ * pinned; bump it deliberately, in a commit that can be reviewed.
+ */
+const MCPB_PACKER = "@anthropic-ai/mcpb@2.1.2";
+
 const out = `stockbit-mcp-${pkg.version}.mcpb`;
-npm(["exec", "--yes", "--", "@anthropic-ai/mcpb", "pack", stage, join(root, out)]);
+npm(["exec", "--yes", "--", MCPB_PACKER, "pack", stage, join(root, out)]);
 console.log(`\n${out} written.`);

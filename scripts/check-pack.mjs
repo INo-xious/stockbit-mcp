@@ -26,9 +26,17 @@ const ALLOWED = /^(dist\/(bin|src)\/.+\.js|README(\.id)?\.md|CHANGELOG\.md|SECUR
  */
 const KNOWN_BAD = /(^|\/)(test|tests)\/|(^|\/)plan\.md$|(^|\/)progress\//i;
 
-/** A sanity band, not a target. Well under it means the build broke; well over means something crept in. */
+/**
+ * A sanity band, not a target, and deliberately loose.
+ *
+ * It catches two shapes of accident: a build that produced almost nothing, and a `files` change
+ * that swept in a whole directory. It is NOT a budget on how many modules this server may have.
+ * The upper bound used to be 150 against 134 real files, so sixteen new modules — an ordinary
+ * feature — would have failed a release on a hand-tuned constant, at the one moment a check cannot
+ * be re-run later. The allow-list above is what actually decides what may ship.
+ */
 const MIN_FILES = 100;
-const MAX_FILES = 150;
+const MAX_FILES = 250;
 
 /**
  * Ask npm what it would pack, without going through a shell.
