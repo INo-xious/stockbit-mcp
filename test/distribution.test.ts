@@ -95,7 +95,7 @@ test("the extension's user settings are substituted into those variables", () =>
 
 /* ---------------------------------------- skills ---------------------------------------- */
 
-test("the plugin ships the eight skills, each named after its directory", () => {
+test("the plugin ships the nine skills, each named after its directory", () => {
   const dirs = readdirSync(join(ROOT, "skills"), { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
@@ -110,6 +110,7 @@ test("the plugin ships the eight skills, each named after its directory", () => 
     "stockbit-status",
     "strategy-backtest",
     "trade-with-guardrails",
+    "watch",
   ]);
 
   for (const dir of dirs) {
@@ -180,6 +181,9 @@ const PROSE_IDENTIFIERS = new Set([
   "inconclusive",
   "unverified",
   "readFrom",
+  // Error kinds from src/http/errors.ts — a skill quoting one back is naming a real failure,
+  // not calling a tool. Only the underscored one can match the tool-shaped pattern.
+  "rate_limited",
   // Trading modes.
   "off",
   "paper",
