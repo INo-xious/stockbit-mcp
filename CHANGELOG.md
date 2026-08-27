@@ -10,6 +10,25 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Security
+
+- **hono moved past four advisories it was never in a position to trigger.** The lockfile pinned
+  `hono 4.12.33`, which four GHSAs cover — a ReDoS in the CORS middleware, an SSR disclosure through
+  `memo()`, `Connection` header handling in the Proxy Helper, and a denial of service in the language
+  middleware. All four are fixed in `4.12.34`; the lockfile now records `4.13.5`.
+
+  This server never reaches any of that code. `hono` arrives only as a transitive dependency of
+  `@modelcontextprotocol/sdk`, which offers it to HTTP transports; the single transport this server
+  constructs is `StdioServerTransport`, and nothing under `src/` or `bin/` imports `hono`, an HTTP
+  framework, or an HTTP transport at all. No CORS layer, language middleware, `memo()` or proxy
+  helper is ever on a call path here. So this is hygiene — a clean `npm audit` and a quiet
+  Dependabot — not a fix for anything that was exploitable. `package.json` gains no `overrides`
+  entry: the SDK's own `^4.11.4` range already resolves to a patched `hono` on a fresh install, and
+  pinning a dependency this server does not use would only make the pin the thing that goes stale.
+
+  The same change corrects `package-lock.json`'s root `version` field, which still read `1.1.0` two
+  releases after `package.json` moved on.
+
 ## [1.2.1] — 2026-08-27
 
 ### Fixed
