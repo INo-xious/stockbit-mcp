@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expandEnvPath, familyForPath, findBrowser, findBrowsers } from "../src/auth/browsers.ts";
+import {
+  expandEnvPath,
+  familyForPath,
+  findBrowser,
+  findBrowsers,
+  defaultBrowserPath,
+  defaultBrowserAdvice,
+} from "../src/auth/browsers.ts";
 
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
   const saved: Record<string, string | undefined> = {};
@@ -137,4 +144,82 @@ test("PATH lookup never selects an executable from the current directory", () =>
   } finally {
     process.chdir(originalCwd);
   }
+});
+
+/* ----------------------- the user's own default browser ----------------------- */
+
+/**
+ * The defect these pin down.
+ *
+ * The candidate table is a PREFERENCE ORDER with Chrome first, and preference order is the wrong
+ * question to ask on someone else's machine. Measured on the machine this was written on: the OS
+ * default was Opera, Chrome was installed for unrelated reasons, and `findBrowser()` returned
+ * Chrome — so charting opened a browser the user does not use, holding a profile they never see,
+ * and asked them to log in to Stockbit a second time inside it.
+ *
+ * The OS default now outranks the table. It never outranks DRIVABILITY, because Firefox and Safari
+ * do not implement the Chrome DevTools Protocol and cannot be driven no matter whose default they
+ * are — and it never outranks an explicit `STOCKBIT_BROWSER`, because someone who named a browser
+ * has said something the OS has not.
+ */
+
+test("an explicit STOCKBIT_BROWSER outranks the OS default", () => {
+  // Ordering only — this must not depend on which browsers the test machine has, or on what its
+  // real default is.
+  const exe = join(mkdtempSync(join(tmpdir(), "stockbit-browser-")), "chrome.exe");
+  writeFileSync(exe, "");
+  withEnv({ STOCKBIT_BROWSER: exe }, () => {
+    const list = findBrowsers();
+    assert.equal(list[0].path, exe, "the named browser must come first");
+    assert.equal(list[0].isOverride, true);
+    assert.equal(findBrowser(), exe);
+  });
+});
+
+test("a drivable browser always outranks an un-drivable one, default or not", () => {
+  // The property that must hold no matter what the machine's default is: nothing un-drivable may
+  // appear above something drivable, or `findBrowser()` could hand back Firefox.
+  const list = findBrowsers();
+  let seenUnsupported = false;
+  for (const b of list) {
+    if (!b.supported) seenUnsupported = true;
+    else assert.equal(seenUnsupported, false, `${b.name} is drivable but sorted below an un-drivable browser`);
+  }
+});
+
+test("findBrowser only ever returns a drivable browser", () => {
+  const chosen = findBrowser();
+  if (chosen === null) return; // a machine with no browser at all is a valid state
+  assert.equal(familyForPath(chosen), "chromium", "charting needs CDP, which only Chromium speaks");
+});
+
+test("the OS default, when it is drivable, is what findBrowser picks", () => {
+  const list = findBrowsers();
+  const dflt = list.find((b) => b.isDefault && b.supported);
+  if (!dflt) return; // no detectable default, or the default is Firefox/Safari — both covered elsewhere
+  assert.equal(findBrowser(), dflt.path, "a drivable default must beat the preference table");
+});
+
+test("detection never throws, whatever the platform answers", () => {
+  // Every platform path reads something outside this project's control — a registry key, a plist, an
+  // xdg-settings binary that may not exist. A failure must degrade to "no opinion", because a
+  // browser that cannot be detected is not a reason to refuse to open one.
+  assert.doesNotThrow(() => defaultBrowserPath());
+  assert.doesNotThrow(() => defaultBrowserAdvice());
+});
+
+test("advice is silent when the default is drivable, and actionable when it is not", () => {
+  const advice = defaultBrowserAdvice();
+  const dflt = defaultBrowserPath();
+  if (dflt && familyForPath(dflt) === "chromium") {
+    assert.equal(advice, null, "a Chromium default needs no advice");
+    return;
+  }
+  if (!dflt) {
+    assert.equal(advice, null, "nothing detected means nothing to say");
+    return;
+  }
+  assert.ok(advice, "an un-drivable default must be explained");
+  assert.match(advice, /Chrome DevTools Protocol/, "say WHY it cannot be used");
+  assert.match(advice, /unaffected|Everything else/, "and that the rest of the server still works");
 });

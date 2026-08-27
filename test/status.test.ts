@@ -463,3 +463,82 @@ test("the terminal rendering says the same things as the structure", async () =>
   assert.ok(text.includes(report.nextStep));
   assert.ok(text.includes(report.market.phase));
 });
+
+/* ------------------------------ how old is my login? ------------------------------ */
+
+/**
+ * The question users actually ask, which had no answer.
+ *
+ * Three clocks were already on screen and none of them is the login: the web session's CAPTURE time
+ * (which moves every time a chart opens), the access token's 24h expiry, and the refresh token's
+ * ~7d deadline. Someone asking "how old is my login" was reading one of those and drawing the wrong
+ * conclusion. `loggedInAt` is written once, by the login itself.
+ *
+ * It is deliberately NOT a countdown. A login has no fixed lifetime — the refresh token slides
+ * forward on every use — so a three-week-old login can be perfectly healthy while yesterday's is
+ * dead. Age is a fact; the expiry is the deadline. The tests keep those two apart.
+ */
+
+function writeProfile(loggedInAt: string | undefined, browserPath = "/tmp/chrome"): void {
+  writeFileSync(
+    join(STORE, "browser-profile.json"),
+    JSON.stringify({
+      browserPath,
+      browserName: "chrome",
+      family: "chromium",
+      ...(loggedInAt === undefined ? {} : { loggedInAt }),
+    }),
+  );
+}
+
+test("the login age is reported in hours, alongside the timestamp it came from", async () => {
+  const at = new Date(Date.now() - 5 * 3_600_000).toISOString();
+  writeProfile(at);
+
+  const report = await collectStatus();
+  assert.equal(report.store.loggedInAt, at);
+  assert.ok(report.store.loginAgeHours !== null);
+  assert.ok(Math.abs(report.store.loginAgeHours! - 5) < 0.1, "about five hours");
+  assert.match(formatStatus(report), /Last login\s+5\.\d hour\(s\) ago/);
+});
+
+test("a login under an hour old reads in minutes, not '0.2 hours'", async () => {
+  writeProfile(new Date(Date.now() - 12 * 60_000).toISOString());
+  assert.match(formatStatus(await collectStatus()), /Last login\s+1[12] minute\(s\) ago/);
+});
+
+test("a login older than two days reads in days", async () => {
+  writeProfile(new Date(Date.now() - 5 * 24 * 3_600_000).toISOString());
+  assert.match(formatStatus(await collectStatus()), /Last login\s+5\.\d day\(s\) ago/);
+});
+
+test("a profile written before this field existed says so, rather than claiming an age", async () => {
+  // The old record has no `loggedInAt`. Reporting that as 1970 — an age of fifty-six years — is
+  // worse than saying it is unknown.
+  writeProfile(undefined);
+  const report = await collectStatus();
+  assert.equal(report.store.loggedInAt, null);
+  assert.equal(report.store.loginAgeHours, null);
+  assert.match(formatStatus(report), /Last login\s+unknown/);
+});
+
+test("an unparseable timestamp is unknown, not an age", async () => {
+  writeProfile("not-a-date");
+  const report = await collectStatus();
+  assert.equal(report.store.loginAgeHours, null);
+  assert.doesNotMatch(formatStatus(report), /56 year|NaN|Invalid/);
+});
+
+test("no profile at all says never, and names the command", async () => {
+  rmSync(join(STORE, "browser-profile.json"), { force: true });
+  const report = await collectStatus();
+  assert.equal(report.store.loggedInAt, null);
+  assert.match(formatStatus(report), /Last login\s+never/);
+  assert.match(formatStatus(report), /stockbit-auth login/);
+});
+
+test("the login age never leaks a token, like everything else in the report", async () => {
+  writeProfile(new Date().toISOString());
+  const serialised = JSON.stringify(await collectStatus());
+  assert.equal(/eyJ[A-Za-z0-9_-]{10,}/.test(serialised), false);
+});

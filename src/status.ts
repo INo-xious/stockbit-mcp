@@ -40,6 +40,7 @@ import {
 import { webSessionHealth, type WebSessionHealth } from "./auth/websession.js";
 import { decodeJwt, forceRefresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
+import { defaultBrowserPath, defaultBrowserAdvice } from "./auth/browsers.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
@@ -127,6 +128,19 @@ export interface StatusReport {
     dir: string;
     backend: "keychain" | "file" | "unknown";
     browserPinned: string | null;
+    /**
+     * When `stockbit-auth login` last ran, and how long ago.
+     *
+     * This is the question users actually ask — "how old is my login?" — and until now the answer
+     * was spread across three different clocks that mean different things: the web session's
+     * capture time, the access token's 24h expiry, and the refresh token's ~7d deadline. None of
+     * them is the login. `loggedInAt` is written once, by the login itself.
+     */
+    loggedInAt: string | null;
+    loginAgeHours: number | null;
+    /** The browser the OS opens links with, and whether it is the pinned one. */
+    defaultBrowser: string | null;
+    defaultBrowserIsPinned: boolean | null;
   };
   checks: StatusCheck[];
   /** The single next command or sentence. Always present. */
@@ -432,11 +446,34 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
 
   const web = webSessionHealth();
   let browserPinned: string | null = null;
+  let loggedInAt: string | null = null;
+  let loginAgeHours: number | null = null;
+  let pinnedPath: string | null = null;
   try {
     const pinned = readBrowserProfile();
     browserPinned = pinned ? `${pinned.browserName}${pinned.version ? ` ${pinned.version}` : ""}` : null;
+    pinnedPath = pinned?.browserPath ?? null;
+    // `loggedInAt` is "" when the record predates the field, and an unparseable value must read as
+    // "unknown" rather than as an age of 56 years.
+    const at = pinned?.loggedInAt ? Date.parse(pinned.loggedInAt) : Number.NaN;
+    if (Number.isFinite(at)) {
+      loggedInAt = new Date(at).toISOString();
+      loginAgeHours = (Date.now() - at) / 3_600_000;
+    }
   } catch {
     browserPinned = null;
+  }
+
+  // Which browser the OS would open a link with. Read here rather than in `formatStatus` so the
+  // structured report a model reads and the line a human reads cannot disagree.
+  let defaultBrowser: string | null = null;
+  let defaultBrowserIsPinned: boolean | null = null;
+  try {
+    defaultBrowser = defaultBrowserPath();
+    defaultBrowserIsPinned =
+      defaultBrowser && pinnedPath ? defaultBrowser.toLowerCase() === pinnedPath.toLowerCase() : null;
+  } catch {
+    defaultBrowser = null;
   }
   if (web.present && web.expired) {
     // `expired`, NOT `!likelyValid`. Under the three-state verdict those are different things:
@@ -451,6 +488,16 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     checks.push({ name: "website session", status: "warn", detail: web.hint });
   }
   checks.push(runningCodeCheck());
+
+  // Safari and Firefox cannot be driven for charting — they do not implement the Chrome DevTools
+  // Protocol. Say so once, with what to install, rather than letting the user discover it as a
+  // failed chart. Everything else works regardless, which the message says explicitly.
+  try {
+    const advice = defaultBrowserAdvice();
+    if (advice) checks.push({ name: "default browser", status: "warn", detail: advice });
+  } catch {
+    // Detection is best-effort; its absence is not a finding.
+  }
   if (!browserPinned) {
     checks.push({
       name: "browser profile",
@@ -581,7 +628,15 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     trading,
     market: sessionClock(options.now),
     webSession: web,
-    store: { dir, backend: auth.main.backend, browserPinned },
+    store: {
+      dir,
+      backend: auth.main.backend,
+      browserPinned,
+      loggedInAt,
+      loginAgeHours,
+      defaultBrowser,
+      defaultBrowserIsPinned,
+    },
     checks,
     nextStep: nextStepFor(auth, trading, {
       tradingToolsMissing,
@@ -589,6 +644,42 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       ...(options.profileError === undefined ? {} : { profileError: options.profileError }),
     }),
   };
+}
+
+/**
+ * How old the login is, in words a person can act on.
+ *
+ * Users ask "how old is my login?" and the answer used to be nowhere. Three different clocks were on
+ * screen — the web session's capture time, the access token's 24h expiry, the refresh token's ~7d
+ * deadline — and none of them is the login. This one is: `loggedInAt` is written once, by the login.
+ */
+function describeLoginAge(store: StatusReport["store"]): string {
+  if (store.loggedInAt === null || store.loginAgeHours === null) {
+    return store.browserPinned
+      ? "unknown — this profile predates login-time recording; the next `stockbit-auth login` will set it"
+      : "never — run `stockbit-auth login`";
+  }
+  const h = store.loginAgeHours;
+  const age =
+    h < 1
+      ? `${Math.round(h * 60)} minute(s) ago`
+      : h < 48
+        ? `${h.toFixed(1)} hour(s) ago`
+        : `${(h / 24).toFixed(1)} day(s) ago`;
+  // The age is not a countdown. A login stays good as long as its refresh token keeps being rotated
+  // forward, which regular use does — so the website-session line above is the deadline, not this.
+  return `${age}  (${store.loggedInAt})`;
+}
+
+/** The pinned browser, and whether it is the one the OS would have opened. */
+function describeBrowserPin(store: StatusReport["store"]): string {
+  if (!store.browserPinned) return "not pinned";
+  if (store.defaultBrowserIsPinned === false && store.defaultBrowser) {
+    // Not an error. The pin is authoritative because a Chromium profile is not portable between
+    // browsers, so this says what IS rather than demanding a change.
+    return `${store.browserPinned} — your default is ${store.defaultBrowser}; log in again to move the chart there`;
+  }
+  return store.browserPinned + (store.defaultBrowserIsPinned ? " (your default browser)" : "");
 }
 
 /**
@@ -693,7 +784,8 @@ export function formatStatus(report: StatusReport): string {
   const lines = [
     `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
     `Store            ${report.store.dir} (${report.store.backend})`,
-    `Browser profile  ${report.store.browserPinned ?? "not pinned"}`,
+    `Browser profile  ${describeBrowserPin(report.store)}`,
+    `Last login       ${describeLoginAge(report.store)}`,
     `Website session  ${describeWebSession(report.webSession)}`,
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),

@@ -594,6 +594,31 @@ test(
       };
       await cdp.send("Runtime.enable", {}, attached.sessionId, 5_000).catch(() => {});
 
+      // Wait for the fixture to actually be there before probing it.
+      //
+      // `Target.createTarget` returns as soon as the target EXISTS, not when it has loaded. Without
+      // this the probe could run against a document whose body had not been parsed yet, read an
+      // empty `innerText`, and report `blank: true` — failing an assertion about a page state the
+      // test had not reached. It looked like a flaky product bug and was a missing wait: the same
+      // poll every other browser-driven test in this repo already does, omitted only here. It lost
+      // the race more often on a loaded machine, which is exactly when the suite runs.
+      let loaded = false;
+      for (let i = 0; i < 50 && !loaded; i++) {
+        const probe = (await cdp.send(
+          "Runtime.evaluate",
+          {
+            expression:
+              "Boolean(document.body && document.body.innerText.trim().length > 0 && window.tvWidget)",
+            returnByValue: true,
+          },
+          attached.sessionId,
+          5_000,
+        )) as { result?: { value?: boolean } };
+        loaded = probe.result?.value === true;
+        if (!loaded) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(loaded, "the fixture page never finished loading its body and widget");
+
       const readiness = await evaluateInPage<{
         blank: boolean;
         hasChart: boolean;
