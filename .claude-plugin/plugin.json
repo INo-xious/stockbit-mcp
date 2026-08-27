@@ -1,7 +1,7 @@
 {
   "name": "stockbit",
   "displayName": "Stockbit MCP",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "IDX market data, bandarmology and your Stockbit account for Claude Code, plus trading-desk skills.",
   "author": {
     "name": "Marvel Harisson",

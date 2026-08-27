@@ -10,6 +10,54 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-27
+
+### Added
+
+- **The browser the user actually uses.** Selection asked a preference table, not the operating
+  system, so a machine whose default was Edge or Opera — but which happened to have Chrome installed
+  for something else — got Chrome: a browser the user does not use, holding a profile they never see,
+  asking them to log in to Stockbit a second time. **Observed** on a machine whose default is Opera
+  and which was being driven through Chrome for exactly that reason. `defaultBrowserPath()` now asks
+  the OS (Windows `UserChoice` registry key, macOS LaunchServices, Linux `xdg-settings`) and the
+  answer outranks the table.
+- **Advice instead of a dead end when the default cannot be driven.** Chartbit speaks the Chrome
+  DevTools Protocol; Firefox and Safari do not implement it, so they can never be driven no matter
+  whose default they are. `status` now names the browser, says the protocol is the reason, points at
+  an already-installed Chromium browser or names one to install, and states that everything except
+  chart drawing is unaffected — the REST tools never open a browser at all.
+- **`status` reports how old the login is.** Three clocks were already on screen and none of them was
+  the login: the web session's capture time (which moves every time a chart opens), the access
+  token's 24h expiry, and the refresh token's ~7d deadline. `loggedInAt` is written once, by the
+  login. Deliberately not a countdown — a login has no fixed lifetime, so the age is a fact and the
+  session line is the deadline. A profile predating the field reads `unknown` rather than claiming an
+  age of fifty-six years.
+
+### Fixed
+
+- **A test that was being excused as a flake.** `a widget whose activeChart() throws…` navigated with
+  `Target.createTarget` and probed the page immediately. `createTarget` returns when the target
+  EXISTS, not when it has loaded, so the probe could read an empty `innerText` and fail an assertion
+  about a state the page had not reached. Every other browser-driven test here already polls; this
+  one did not, and it lost the race more often on a loaded machine — which is when the suite runs.
+
+### Verified
+
+- Each discovered browser is launched for real, in a throwaway profile, and made to evaluate
+  something: **Opera (the OS default), Chrome and Edge all answered CDP.** "Chromium-based" is not a
+  guarantee that remote debugging is reachable, so `scripts/verify-default-browser.cjs` checks rather
+  than assumes.
+- Chartbit drawing **exercised end to end in Opera** against live IDX data, using an isolated store so
+  the real session was untouched — confirmed byte-identical afterwards. The stored web session seeded
+  across from the Chrome-created profile, so changing browsers did not require another login.
+- Five full verification cycles across one hour, zero failures.
+
+### Note
+
+The browser pin is unchanged and still authoritative: a Chromium **profile** is not portable between
+browsers, so the browser recorded at login keeps driving the chart. This changes which browser the
+NEXT login picks, and `status` says when the pinned one is not the default.
+
 ## [1.1.0] – 2026-08-26
 
 The refresh token does not expire. It gets **spent** — and the process spending it is the browser
