@@ -29,6 +29,19 @@ export interface BrowserProfileRecord {
   version?: string;
   /** ISO timestamp of the successful capture. */
   loggedInAt: string;
+  /**
+   * HOW this browser came to be pinned — and the reason the driver can safely disagree with it.
+   *
+   * `explicit` — the user named it (`STOCKBIT_BROWSER`). A stated preference; nothing overrules it.
+   * `auto` — login took whatever `findBrowser()` returned that day. That is a guess, not a choice.
+   *
+   * The distinction exists because a pin written by an older build is indistinguishable from a
+   * deliberate one, and that silently defeated the whole point of preferring the OS default: a user
+   * who logged in the day before that shipped kept opening the browser the old preference table
+   * picked, forever, with no way to tell the difference. Records written before this field existed
+   * read as `auto`, which is exactly what they were.
+   */
+  chosen?: "auto" | "explicit";
 }
 
 export function profileRecordPath(): string {
@@ -36,13 +49,18 @@ export function profileRecordPath(): string {
 }
 
 /** Persist the browser identity a freshly-captured profile belongs to. Best-effort. */
-export function writeBrowserProfile(browserPath: string, at = new Date()): BrowserProfileRecord | null {
+export function writeBrowserProfile(
+  browserPath: string,
+  at = new Date(),
+  chosen: "auto" | "explicit" = process.env.STOCKBIT_BROWSER?.trim() ? "explicit" : "auto",
+): BrowserProfileRecord | null {
   const record: BrowserProfileRecord = {
     browserPath,
     browserName: browserPath.split("/").pop() ?? browserPath,
     family: familyForPath(browserPath),
     version: browserVersion(browserPath) ?? undefined,
     loggedInAt: at.toISOString(),
+    chosen,
   };
   try {
     mkdirSync(fileDir(), { recursive: true, mode: 0o700 });
@@ -71,6 +89,8 @@ export function readBrowserProfile(): BrowserProfileRecord | null {
       family: raw.family === "firefox" ? "firefox" : "chromium",
       version: typeof raw.version === "string" ? raw.version : undefined,
       loggedInAt: typeof raw.loggedInAt === "string" ? raw.loggedInAt : "",
+      // Absent means the record predates the field, and every one of those was auto-picked.
+      chosen: raw.chosen === "explicit" ? "explicit" : "auto",
     };
   } catch {
     return null;

@@ -38,6 +38,7 @@ import { launchDebuggableBrowser } from "../auth/launch.js";
 import { defaultProfileDir } from "../auth/login.js";
 import { seedWebSession, webSessionHealth } from "../auth/websession.js";
 import { pinnedBrowserExists, readBrowserProfile } from "../auth/browserprofile.js";
+import { defaultBrowserPath, familyForPath } from "../auth/browsers.js";
 import { fileDir } from "../auth/store.js";
 import { StockbitError } from "../http/errors.js";
 import { stockbitUrl } from "../desktop/browser.js";
@@ -122,7 +123,7 @@ async function probePort(port: number): Promise<string | null> {
  * without re-logging in — but it warns, since the override's likeliest outcome is a profile that
  * browser has never been logged into.
  */
-export function resolveDriverBrowser(): { path: string; warning?: string } {
+export function resolveDriverBrowser(): { path: string; warning?: string; note?: string } {
   const override = process.env.STOCKBIT_BROWSER?.trim();
   if (override) {
     return {
@@ -157,6 +158,37 @@ export function resolveDriverBrowser(): { path: string; warning?: string } {
         "with a browser that is installed, or point STOCKBIT_BROWSER at the one you moved it to.",
     );
   }
+
+  // An AUTO pin is a guess made on login day, not a decision, so the OS default outranks it.
+  //
+  // Without this, "open the browser the user actually uses" is dead on arrival for everyone who
+  // logged in before it shipped: their pin still names whatever the old preference table picked, it
+  // is indistinguishable from a deliberate choice, and charting keeps opening a browser they do not
+  // use. Measured on the machine this was written for — default Opera, pin Chrome, written one day
+  // before the fix landed.
+  //
+  // Switching browsers is safe here for one measured reason: the stored WEB SESSION is seeded into
+  // whichever browser is opened. The profile DIRECTORY genuinely is not portable — the header of
+  // `browserprofile.ts` is right about that — but the cookies are, so the new browser comes up
+  // signed in rather than empty. An `explicit` pin is a stated preference and is never overruled.
+  if (pinned.chosen !== "explicit") {
+    const osDefault = defaultBrowserPath();
+    if (
+      osDefault &&
+      osDefault.toLowerCase() !== pinned.browserPath.toLowerCase() &&
+      familyForPath(osDefault) === "chromium" &&
+      existsSync(osDefault)
+    ) {
+      return {
+        path: osDefault,
+        note:
+          `Opening your default browser (${osDefault}) rather than ${pinned.browserName}, which login ` +
+          "picked automatically. The stored session is seeded into it, so it comes up signed in. Set " +
+          "STOCKBIT_BROWSER to pin a different one deliberately.",
+      };
+    }
+  }
+
   return { path: pinned.browserPath };
 }
 
@@ -220,6 +252,7 @@ export class ChartbitSession {
     const browser = resolveDriverBrowser();
     const warnings: string[] = [];
     if (browser.warning) warnings.push(browser.warning);
+    if (browser.note) warnings.push(browser.note);
 
     // Reuse a debuggable browser another process left running, when the record still answers AND is
     // the same binary. A record pointing at a different browser is stale, not a shortcut.
@@ -460,7 +493,12 @@ export function driverAvailability(): { ok: boolean; detail: string } {
     if (!existsSync(profile)) {
       return { ok: false, detail: `no browser profile at ${profile} — run \`stockbit-auth login\`` };
     }
-    return { ok: true, detail: `${browser.path}${browser.warning ? " (overridden by STOCKBIT_BROWSER)" : ""}` };
+    const why = browser.warning
+      ? " (overridden by STOCKBIT_BROWSER)"
+      : browser.note
+        ? " (your OS default; login had auto-picked another)"
+        : "";
+    return { ok: true, detail: `${browser.path}${why}` };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   }
