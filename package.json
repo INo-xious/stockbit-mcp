@@ -1,6 +1,6 @@
 {
   "name": "stockbit-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "MCP server for Stockbit (IDX, Indonesia): bandarmology/broker flow, quotes, orderbook, fundamentals, screener, watchlists, alerts, chart drawing and confirm-gated order entry through your own Stockbit account. Unofficial.",
   "keywords": [
     "mcp",

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "stockbit-mcp",
   "display_name": "Stockbit MCP",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "IDX market data, bandarmology and your Stockbit account inside Claude Desktop. Unofficial.",
   "long_description": "The read-only half is one click: install, then say \"log me into Stockbit\" and sign in in the browser window that opens. Portfolio and order entry additionally need `stockbit-auth trading-login` (which asks for the PIN) and `stockbit-auth trading-enable --paper|--live` in a terminal — by design, so that nothing reachable from an assistant can turn trading on or handle a PIN.",
   "author": {

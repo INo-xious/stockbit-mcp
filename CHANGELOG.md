@@ -10,6 +10,29 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-08-27
+
+### Fixed
+
+- **The browser pin no longer outranks the user's default browser when nobody chose it.** 1.2.0
+  taught selection to prefer the OS default, and on an existing install it changed nothing: the pin
+  in `browser-profile.json` is written at login and is authoritative, so anyone who logged in before
+  1.2.0 kept opening whatever the old Chrome-first preference table had picked. Measured on a real
+  machine — default Opera, pin Chrome, written one day before the fix landed. The feature shipped and
+  did nothing for exactly the people it was for.
+
+  The defect was that an automatically-written pin is indistinguishable from a deliberate one, so
+  the record now says which it is. `chosen: "explicit"` means the user named it through
+  `STOCKBIT_BROWSER` and nothing overrules that; `chosen: "auto"` means login took whatever
+  `findBrowser()` returned that day, and a drivable OS default now outranks it. Records written
+  before the field existed read as `auto`, which is what they were — so this applies to existing
+  installs **without a re-login and without rewriting anyone's file**.
+
+  Switching browsers is safe here for one measured reason, and only that reason: the stored web
+  session is *seeded* into whichever browser is opened. The profile directory genuinely is not
+  portable between browsers; the cookies are, so the new browser comes up signed in rather than
+  empty. Verified end to end by drawing on a live chart in Opera against a Chrome-created session.
+
 ## [1.2.0] — 2026-08-27
 
 ### Added
