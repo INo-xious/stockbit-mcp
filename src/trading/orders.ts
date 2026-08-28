@@ -53,8 +53,17 @@ import {
   type PaperMarket,
   type PaperPlacementResult,
 } from "./paper.js";
-import { peek, take, type TicketBase } from "./tickets.js";
+import { blockingCheck, peek, take, TICKET_TTL_MS, type TicketBase } from "./tickets.js";
+import { grantRemember } from "./remember.js";
+import {
+  resolveConfirmation,
+  type ConfirmationSource,
+  type ElicitationOutcome,
+} from "./confirmation.js";
+import type { ElicitDecision } from "../tools/_define.js";
 import { stockbitDir } from "../paths.js";
+
+export type { ConfirmationSource, ElicitationOutcome };
 
 /**
  * The ticket store holds both kinds. This narrows to an exchange order, and refuses rather than
@@ -93,6 +102,15 @@ export interface OrderResult {
   /** The order being amended or cancelled, or the one the read-back found for a new order. */
   orderId?: string;
   outcome: OrderOutcomeKind;
+  /**
+   * What happened on the human channel before this was sent. ADR-0010.
+   *
+   * Reported rather than `via` because it is the fact a PERSON needs: `unavailable` and
+   * `disabled-by-policy` both mean nobody was asked, and a user is entitled to know that about an
+   * order placed in their name. `via` — which distinguishes the five ways the gate was satisfied —
+   * goes to the audit log, where the distinction is evidence rather than advice.
+   */
+  elicitation: ElicitationOutcome;
   /** True only when the read-back actually showed the intended state. */
   verified: boolean;
   /** Set when the account's state could not be established. Always relayed to the user verbatim. */
@@ -214,9 +232,6 @@ export function verifyAgainst(
 
 /* ------------------------------------- the gates ------------------------------------- */
 
-/** How the confirmation was satisfied, for the log and for the user. */
-export type ConfirmationSource = "explicit" | "auto-confirm" | "elicited";
-
 export interface SubmitOptions {
   ticketId: string;
   confirm?: boolean;
@@ -224,9 +239,13 @@ export interface SubmitOptions {
    * Ask the human directly, when the MCP client supports it.
    *
    * Injected rather than reached for: this module must not depend on the MCP server object, and a
-   * test must be able to drive both answers. Returns "unavailable" when the client cannot ask.
+   * test must be able to drive every answer. It reports "unavailable" when the client cannot ask.
+   *
+   * It is NOT optional in the sense that matters: when it is present it is always called, before
+   * `confirm` is looked at, and a declined dialog refuses the order whatever `confirm` said. See
+   * `src/trading/confirmation.ts` and ADR-0010.
    */
-  elicit?: (message: string) => Promise<"accepted" | "declined" | "unavailable">;
+  elicit?: ElicitDecision;
 }
 
 function refuse(message: string): never {
@@ -235,8 +254,16 @@ function refuse(message: string): never {
 
 /**
  * Everything that must be true before a request is built. Throws — this is all before the wire.
+ *
+ * Three things happen here in an order that is load-bearing. The policy gate first, because a
+ * server with no permission to trade should not be putting dialogs in front of anyone. Then the
+ * confirmation gate, against a ticket that has been PEEKED rather than spent — a call about to be
+ * refused must not cost the user their ticket. Only then is the ticket taken and re-fingerprinted,
+ * so the last thing checked before the wire is that what is being sent is still what was shown.
  */
-async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket; policy: TradingPolicy; via: ConfirmationSource }> {
+async function passGates(
+  options: SubmitOptions,
+): Promise<{ ticket: OrderTicket; policy: TradingPolicy; via: ConfirmationSource; elicitation: ElicitationOutcome }> {
   const policy = tradingPolicy();
   if (!policy.enabled) {
     refuse(
@@ -251,49 +278,49 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
   if (!found) take(options.ticketId); // throws with the precise reason (missing / expired)
 
   const ticket = asOrderTicket(found as TicketBase);
-  let via: ConfirmationSource | null = options.confirm === true ? "explicit" : null;
 
-  // Configured but not in effect. Falling through to the generic "no confirmation" refusal would be
-  // correct and useless: the user set a switch and it is not doing anything, and that is the fact
-  // worth saying.
-  if (!via && policy.autoConfirmIgnored) refuse(`${policy.autoConfirmIgnored} Nothing was sent.`);
+  // Before the dialog, not after it. `take()` refuses a ticket whose checks failed with this exact
+  // sentence, and it would do so moments from now — so asking a person to approve an order that
+  // cannot be placed whatever they answer would spend their attention on nothing and teach them
+  // that the dialog is noise. Reading it costs no ticket: `blockingCheck` only inspects.
+  const blocked = blockingCheck(ticket);
+  if (blocked) refuse(blocked);
 
-  if (!via && policy.autoConfirm) {
-    const cap = policy.maxOrderValueIdr;
-    // Belt and braces: `tradingPolicy` already refuses to report autoConfirm without a cap, and this
-    // module refuses to act on it without one. A single guard would be enough right up until
-    // somebody edits the other file.
-    if (cap === null) {
-      refuse(
-        "autoConfirm is set but no maxOrderValueIdr is configured, so it is ignored. Pass confirm: true after " +
-          "asking the user, or set a cap with `stockbit-auth trading-enable --max-order-value N`.",
-      );
-    }
-    if (ticket.grossIdr !== null && ticket.grossIdr <= cap) via = "auto-confirm";
-    else {
-      refuse(
-        `autoConfirm covers orders up to ${idr(cap)} and this one is ${idr(ticket.grossIdr)}. Ask the user and ` +
-          "pass confirm: true.",
-      );
-    }
-  }
-
-  if (!via && options.elicit) {
-    const answer = await options.elicit(ticket.summary);
-    if (answer === "accepted") via = "elicited";
-    else if (answer === "declined") refuse("The user declined this order when asked directly. Nothing was sent.");
-  }
-
-  if (!via) {
-    refuse(
-      "Refusing to send an order without confirmation. Show the user the ticket's `summary`, in words, and " +
-        "pass confirm: true only after they agree to THAT order. Do not set it on their behalf.",
-    );
-  }
+  const { via, elicitation, rememberRequested } = await resolveConfirmation({
+    confirm: options.confirm,
+    elicit: options.elicit,
+    policy,
+    summary: ticket.summary,
+    valueIdr: ticket.grossIdr,
+    noun: "order",
+    // A NEW order only. An amend and a cancel change something already working, and agreeing to
+    // spend X rupiah is not agreeing to move or withdraw an order already on the book. Stated here
+    // rather than inferred from `grossIdr` being null: an amend's ticket resolves price and lots
+    // from the working order, so its gross IS a number, and an earlier draft of this that leaned on
+    // the null silently waived every amend.
+    waivable: ticket.action === "buy" || ticket.action === "sell",
+  });
 
   // Spends the ticket. Everything from here on is one attempt, and this is the last point at which
   // a refusal costs nothing.
-  const taken = asOrderTicket(take(options.ticketId, "order"));
+  //
+  // The one refusal that can still land here is expiry, and it is not a corner case: the dialog runs
+  // at human speed and a ticket lasts two minutes, so a person who reads carefully can lose it while
+  // deciding. `take()`'s own message explains the expiry but not the connection, so a reader who
+  // just clicked yes would be told their ticket expired with nothing tying that to what they did.
+  let taken: OrderTicket;
+  try {
+    taken = asOrderTicket(take(options.ticketId, "order"));
+  } catch (err) {
+    if (elicitation === "accepted" && err instanceof StockbitError && /expired/.test(err.message)) {
+      refuse(
+        `${err.message} The confirmation dialog was open while that happened: a ticket lasts ` +
+          `${TICKET_TTL_MS / 1000} seconds and it ran out before the answer came back. Nothing was sent, and ` +
+          "nothing was remembered. Preview again and the numbers will be current.",
+      );
+    }
+    throw err;
+  }
 
   if (fingerprintOf(taken) !== taken.fingerprint) {
     refuse(
@@ -302,7 +329,20 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
     );
   }
 
-  return { ticket: taken, policy, via };
+  // The grant is created HERE, not inside the gate, and the placement is the point.
+  //
+  // The gate runs against a peeked ticket so that a refusal costs nothing — which means it must not
+  // leave anything behind either. Creating the grant there meant every refusal after it (an expired
+  // ticket, failed checks, a fingerprint mismatch) left a live fifteen-minute waiver for an order
+  // that never happened, and the refusal said nothing about it. The waiver now rides with the
+  // commitment: the ticket is spent and proven, so there is an order to have agreed to.
+  //
+  // Later failures — lock contention, an unreadable snapshot — do keep the grant. By then the person
+  // approved a valid, well-formed order and the machinery failed underneath them; their "stop asking
+  // me" stands, and the attempt is in the audit log either way.
+  if (rememberRequested && taken.grossIdr !== null) grantRemember(policy, taken.grossIdr);
+
+  return { ticket: taken, policy, via, elicitation };
 }
 
 /* ------------------------------------- the write ------------------------------------- */
@@ -313,7 +353,7 @@ async function passGates(options: SubmitOptions): Promise<{ ticket: OrderTicket;
  * Throws only before the request. After it, returns a description — see the outcome table above.
  */
 export async function submitOrder(options: SubmitOptions): Promise<OrderResult> {
-  const { ticket, via, policy } = await passGates(options);
+  const { ticket, via, elicitation, policy } = await passGates(options);
   const at = new Date().toISOString();
   const base = {
     ticketId: ticket.id,
@@ -322,6 +362,10 @@ export async function submitOrder(options: SubmitOptions): Promise<OrderResult> 
     uiRef: ticket.uiRef,
     price: ticket.price,
     shares: ticket.shares,
+    // In `base` rather than passed alongside, so it reaches the result AND every audit line by the
+    // same route the ticket id does. `via` is added at each log site instead, because it belongs to
+    // the log and not to the answer the user reads.
+    elicitation,
     logPath: orderLogPath(),
     at,
     ...(ticket.orderId ? { orderId: ticket.orderId } : {}),

@@ -12,6 +12,43 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Security
 
+- **`confirm: true` could skip the human entirely, and now cannot.** The order gate opened with
+  `let via = options.confirm === true ? "explicit" : null`, and every later gate — including MCP
+  elicitation, the only channel in this protocol that reaches a *person* rather than a model — was
+  guarded behind `if (!via && …)`. So the caller's boolean did not add a gate to the human's; it
+  removed the human's. A model could place an order the account holder never saw by asserting that
+  the account holder had already agreed, and there is no undo for an order. `src/eipo/order.ts`
+  carried a second, drifted copy of the same six branches, for the one commitment here that cannot
+  be undone even by selling.
+
+  The audit log made it worse: both cases wrote `via: "explicit"`, so afterwards nothing could tell
+  "a person clicked yes" from "a model said one had" — on precisely the question the log exists to
+  answer. And four places in this repo described the additive behaviour the code did not implement,
+  while `login` had been doing it correctly all along. Order entry was weaker than opening a browser
+  window.
+
+  Now there is one gate, `src/trading/confirmation.ts`, shared by exchange orders and e-IPO, and the
+  ask runs **before** the `confirm` check and behind no `via` test at all. A person who has not been
+  asked is asked; a person who declines is obeyed whatever the model sent. A client that cannot ask
+  still trades — that was ADR-0004's rule and it stands — but it is recorded as `explicit-unelicited`
+  rather than `explicit`, and the `message` a model relays says in words that nobody was asked.
+  Paper mode inherits all of it, because paper diverges after this gate and nowhere earlier; the
+  report's proof-of-concept ran in `--paper` and is now a unit test in both modes.
+
+  **The audit log's `via` vocabulary changed.** `"explicit"` is gone rather than kept alongside the
+  new values, because keeping it would preserve exactly the ambiguity this closes. Every write now
+  logs one of `elicited`, `remembered`, `auto-confirm`, `explicit-unelicited` or
+  `explicit-elicit-disabled`, and the result carries an `elicitation` field beside it. The log is
+  append-only JSONL, so lines written before this keep their old value and mean what they meant —
+  but anything parsing it for the string `explicit` needs updating.
+
+  The reporter also suggested a short-lived single-use token from `order_preview`. Declined, with
+  reasons: `ticket_id` already is one — in memory, 120-second TTL, spent before the wire,
+  fingerprinted and rechecked — and a second secret changes nothing, because the same model that
+  reads the ticket id reads the second token from the same response. The gap was never token
+  binding. It was that nothing ever reached a person. [ADR-0010](docs/adr/0010-elicitation-is-decisive.md)
+  records all of it, and ADR-0004 carries an amendment saying which of its sentences is superseded.
+
 - **hono moved past four advisories it was never in a position to trigger.** The lockfile pinned
   `hono 4.12.33`, which four GHSAs cover — a ReDoS in the CORS middleware, an SSR disclosure through
   `memo()`, `Connection` header handling in the Proxy Helper, and a denial of service in the language
@@ -28,6 +65,63 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
   The same change corrects `package-lock.json`'s root `version` field, which still read `1.1.0` two
   releases after `package.json` moved on.
+
+### Added
+
+- **Three switches over who gets asked, all terminal-only.** `stockbit-auth trading-enable
+  --elicitation required|when-available|never` (with `--require-elicitation` and `--no-elicitation`
+  as sugar, mirroring the `--auto-confirm` pair). `required` refuses rather than send when no person
+  can be reached, and `confirm: true` never substitutes; `when-available` is the default and what
+  every existing install gets; `never` turns the ask off and leaves `confirm: true` as the only
+  gate. One tri-state rather than two booleans, for the same reason `TradingMode` is three values
+  rather than `enabled` plus a flag: a pair of booleans can be set to a combination that says
+  nothing. An unrecognised value in the file coerces to the *default* — deliberately unlike `mode`,
+  whose fallback is `off`, because falling back to `never` would silently weaken an account over a
+  typo and `required` would silently brick one. `required` and `autoConfirm` contradict, and the
+  ask wins, reported through the `autoConfirmIgnored` channel that already exists for a switch that
+  is not doing anything.
+- **"Don't ask again", granted by the person and by nothing else.** The confirmation dialog carries
+  a second box the user ticks themselves, which waives the dialog inside five bounds that must all
+  hold at once: it is a **new order** — a buy or a sell, never an amend, a cancel or an e-IPO
+  subscription; the value of the order they actually approved; fifteen minutes; a fingerprint of the
+  trading policy in force when they ticked it; and any later revocation. It has no cumulative budget
+  and no symbol or side restriction, which is why the box reads "each new order this size or
+  smaller" rather than "orders up to". It is created only once the order it was ticked on has been
+  committed to, so an order that is then refused — including one whose ticket expired while the
+  dialog was open, which is easy at human reading speed against a two-minute ticket — leaves no
+  waiver behind, and the refusal says so. Held in memory and never written to disk: a restart ends
+  it, and writing it would mean a module under `src/trading/` editing the settings file, which
+  invariant 3 forbids.
+- **A ticket whose checks have already failed is refused before anyone is asked.** Making the ask
+  unconditional would otherwise have put a dialog in front of a person for orders that cannot be
+  placed whatever they answer — an off-grid price, a symbol off the allow-list, a value over the cap.
+  That is how a confirmation stops being read.
+- **`trading_forget`, and `stockbit-auth trading-forget`.** The tool clears the grant in this server
+  process, for a user who says "ask me again" without leaving the conversation; it is safe to call
+  when there is nothing to clear and only ever makes the server ask *more* questions. The CLI
+  command crosses process boundaries the only way a terminal can — by stamping
+  `trading.confirmationsRevokedAt` into the settings file, which every order re-reads before the
+  gate — so it reaches grants held by servers that were already running. `trading-disable` stamps it
+  too, while deliberately leaving `elicitation` alone: two of its three values are stricter than the
+  default, and loosening a stricter setting on the way to "off" would restore it weaker than the
+  user left it.
+- **`status` and `trading_status` answer "will I be asked?"** Both now report `elicitation`,
+  `confirmationsRevokedAt` and the live grant — whether one is held, what value it is capped at, and
+  when it expires. That question is about process memory, so no file could answer it and this is the
+  only place it is visible.
+
+### Fixed
+
+- **The order dialog had been falling back to generic wording.** `passGates` called
+  `options.elicit(ticket.summary)` with one argument, so every order and every IPO subscription got
+  `_define.ts`'s defaults rather than words of its own. Orders, paper orders and subscriptions now
+  each say what they actually are — a paper dialog says a local ledger rather than promising the
+  exchange, and an IPO dialog says the money leaves the RDN account and cannot be cancelled by
+  selling.
+- **The duplicated e-IPO gate had drifted, and is gone.** Its cap-missing message was a short form,
+  it had no guard for a commitment with no value, and it had lost "Do not set it on their behalf" —
+  the single most load-bearing sentence in the refusal. One gate now serves both, so there is one
+  wording and one test surface.
 
 ## [1.2.1] — 2026-08-27
 

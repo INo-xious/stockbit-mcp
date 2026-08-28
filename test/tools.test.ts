@@ -50,6 +50,9 @@ const WRITES = [
   "screener_delete",
   "screener_favorite",
   "screener_save",
+  // Not an order tool: it revokes a standing "don't ask again". A write because it changes process
+  // state and so must stay out of the workflow handler map, never because it can cost anything.
+  "trading_forget",
   "watchlist_add",
   "watchlist_create",
   "watchlist_delete",

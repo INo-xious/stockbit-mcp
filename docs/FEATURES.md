@@ -3,11 +3,14 @@
 Tools over Stockbit's private APIs, plus a standalone alert daemon. The complete, generated list —
 every tool, its evidence and its arguments — is [`TOOLS.md`](TOOLS.md); this page is the tour.
 
-Most of them read. Twenty-four write: the four order tools, the e-IPO subscription, the eight
-Chartbit drawing and layout tools, the nine watchlist and screener edits, and `login`/`logout`. They
-are confirmation-gated; order entry defaults to per-action confirmation, with a deliberately enabled,
-value-capped live autoconfirm exception. Trading is **off** until you turn it on yourself at a
-terminal. If you never do, nothing here can reach your money.
+Most of them read. Twenty-five write: the four order tools, the e-IPO subscription, the eight
+Chartbit drawing and layout tools, the nine watchlist and screener edits, `login`/`logout`, and
+`trading_forget` — which is a write only because it changes state, and can only ever make the server
+ask you *more* questions. They are confirmation-gated; order entry defaults to per-action
+confirmation, and where your client supports MCP elicitation **you are asked directly and your
+answer decides it**, with a deliberately enabled, value-capped live autoconfirm exception. Trading is
+**off** until you turn it on yourself at a terminal. If you never do, nothing here can reach your
+money.
 
 You do not call these yourself — you ask the assistant in plain language and it picks the tool. The
 argument names below matter when you want to be specific ("broker summary for BBRI from 2026-07-01
@@ -456,6 +459,11 @@ than the happy path.
 - **It cannot place an order outside the policy you chose.** The write tools take a ticket id, an
   optional confirmation, and no price or quantity. The default requires per-order agreement; capped
   live autoconfirm is an operator-enabled exception that a model cannot switch on or widen.
+- **It cannot talk its way past you.** Where your client supports MCP elicitation, the server asks
+  you directly *before* it looks at the assistant's `confirm` flag, and your answer is the decisive
+  one — declining refuses the order however the assistant set that flag. Where your client cannot
+  ask, the result and the audit line both say plainly that no human was asked, and
+  `stockbit-auth trading-enable --elicitation required` makes that case refuse instead.
 - **A saved workflow recipe cannot reach anything that writes.** Recipes are data — a name and a
   list of steps — and `define.write` deliberately never registers a tool in the map the workflow
   engine looks names up in.

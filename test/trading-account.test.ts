@@ -543,10 +543,16 @@ test("the reads and the writes are exactly these, and nothing drifts between the
       "trading_status",
     ],
   );
-  // The four that move money, and only those four. `order_preview` is a read on purpose: it prices
-  // and checks an order and sends nothing, so a saved workflow recipe may reach it — and a recipe
-  // that reaches the preview still cannot reach anything that places what it priced.
-  assert.deepEqual([...writes].sort(), ["order_amend", "order_buy", "order_cancel", "order_sell"]);
+  // The four that move money, and only those four — plus `trading_forget`, which is a write for the
+  // same structural reason and for no other: it changes process state, so it must not be reachable
+  // from a saved workflow recipe. It moves nothing and can only ever make this server ask MORE
+  // questions. `order_preview` is a read on purpose: it prices and checks an order and sends
+  // nothing, so a recipe may reach it — and a recipe that reaches the preview still cannot reach
+  // anything that places what it priced.
+  assert.deepEqual(
+    [...writes].sort(),
+    ["order_amend", "order_buy", "order_cancel", "order_sell", "trading_forget"],
+  );
 });
 
 test("the arguments a model sends reach the wire", async () => {
@@ -597,11 +603,30 @@ test("every write description says there is no undo, and forbids a resend", () =
   // These four are the only tools in this project that cannot be taken back. A model reads the
   // description and nothing else before deciding how to talk about the result, so the two facts
   // that matter most have to be in it.
+  //
+  // `trading_forget` is named as an exception rather than filtered out by a pattern, the same way
+  // the read exemptions above are, because the whole value of this test is that a NEW write has to
+  // be thought about here. It is exempt because every clause would be a lie: it moves no money,
+  // there is nothing to resend, and it is undone by ticking the box again.
   const { writes } = descriptions();
-  assert.equal(writes.size, 4);
+  assert.equal(writes.size, 5);
+  const exempt = new Set(["trading_forget"]);
   for (const [name, description] of writes) {
+    if (exempt.has(name)) continue;
     assert.match(description, /no undo/i, `${name} must say the order cannot be taken back`);
     assert.match(description, /confirm: true/, `${name} must state the confirmation requirement`);
     assert.match(description, /resend|RESEND/, `${name} must forbid resending on an uncertain outcome`);
   }
+  assert.equal(writes.size - exempt.size, 4, "the money-moving writes are still exactly four");
+});
+
+test("trading_forget's description says it only ever tightens", () => {
+  // The one thing a model must not conclude from "this is a write tool" is that calling it is
+  // risky. It is the opposite: it takes a permission away, so hesitating over it is the failure.
+  const { writes } = descriptions();
+  const description = writes.get("trading_forget")!;
+  assert.doesNotMatch(description, /no undo/i, "saying so would be false and would teach hesitation");
+  assert.match(description, /ask me again|ask the user directly|asks the user directly/i);
+  assert.match(description, /never fewer|only ever/i, "it must say it cannot loosen anything");
+  assert.match(description, /stockbit-auth trading-forget/, "and name the terminal command that crosses processes");
 });

@@ -42,6 +42,7 @@ import { decodeJwt, forceRefresh } from "./auth/session.js";
 import { readBrowserProfile } from "./auth/browserprofile.js";
 import { defaultBrowserPath, defaultBrowserAdvice } from "./auth/browsers.js";
 import { tradingPolicy, type TradingMode, type TradingPolicy } from "./settings.js";
+import { describeRemember } from "./trading/remember.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
 import { VERSION } from "./version.js";
@@ -109,6 +110,18 @@ export interface StatusReport {
     maxOrderValueIdr: number | null;
     maxLotsPerOrder: number;
     allowedSymbols: string[];
+    /** Whether a person must be asked, may be asked, or is never asked, before an order. ADR-0010. */
+    elicitation: TradingPolicy["elicitation"];
+    /** When the owner last revoked every standing "don't ask again", or null. */
+    confirmationsRevokedAt: string | null;
+    /**
+     * The live "don't ask again", if there is one in THIS process.
+     *
+     * The whole point of putting it on `status` is that "will I be asked?" is a question about
+     * memory that no file can answer, and a user who ticked a box twenty minutes ago has no other
+     * way to find out whether it is still in force.
+     */
+    rememberGrant: { active: boolean; expiresAt?: string; capIdr?: number; stale?: true };
     source: TradingPolicy["source"];
     reason: string;
     settingsPath: string;
@@ -417,6 +430,12 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       maxOrderValueIdr: null,
       allowedSymbols: [],
       maxLotsPerOrder: 0,
+      // The whole point of this literal is that it is a compile-time canary: a field added to
+      // TradingPolicy and forgotten here reddens the build rather than reaching a user as
+      // `undefined` in a report about their money. `when-available` is the shipped default, and a
+      // policy nobody could read has revoked nothing.
+      elicitation: "when-available",
+      confirmationsRevokedAt: null,
       source: "default-off",
       reason: "The settings file could not be read, and an unreadable policy file is treated as no permission.",
       settingsPath: "(unknown)",
@@ -431,6 +450,11 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     maxOrderValueIdr: policy.maxOrderValueIdr,
     maxLotsPerOrder: policy.maxLotsPerOrder,
     allowedSymbols: policy.allowedSymbols,
+    elicitation: policy.elicitation,
+    confirmationsRevokedAt: policy.confirmationsRevokedAt,
+    // Passed the policy so `active` answers the question a person actually asked — a grant that has
+    // outlived the policy it was made against is reported as stale rather than as live.
+    rememberGrant: describeRemember(policy),
     source: policy.source,
     reason: policy.reason,
     settingsPath: policy.settingsPath,

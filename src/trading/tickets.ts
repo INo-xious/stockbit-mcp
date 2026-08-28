@@ -87,15 +87,38 @@ export function issue<T extends TicketBase>(ticket: T): T {
 /**
  * Look at a ticket without spending it.
  *
- * Returns undefined for an id that was never issued and for one that has expired — a caller
- * inspecting a ticket wants to know it is still good, and "expired" and "gone" lead to the same
- * next step.
+ * Returns undefined for an id that was never issued, for one that has expired, and for one that has
+ * already been SPENT — a caller inspecting a ticket wants to know it is still good, and all three
+ * lead to the same next step. Every caller follows a miss with `take()`, which then says which of
+ * the three it was.
+ *
+ * The spent case was added with ADR-0010 and is not cosmetic. Since the human is now asked before
+ * the ticket is taken, a `peek` that admitted a consumed ticket meant a model retrying `order_buy`
+ * put the dialog in front of the person a SECOND time, asking them to approve an order that had
+ * already reached the exchange — and only then refused. Being asked twice about one order is how a
+ * person ends up believing they have two.
  */
 export function peek(id: string): TicketBase | undefined {
   const slot = slots.get(id);
   if (!slot) return undefined;
+  if (slot.consumedAt !== null) return undefined;
   if (now() > Date.parse(slot.ticket.expiresAt)) return undefined;
   return slot.ticket;
+}
+
+/**
+ * The refusal a ticket's own failed checks earn, or null when nothing blocks it.
+ *
+ * Exported so a caller can ask the question WITHOUT spending the ticket. `passGates` uses it to
+ * refuse a doomed ticket before it puts a dialog in front of a person: `take()` would refuse a
+ * moment later with this exact sentence, and asking someone to approve an order that cannot be
+ * placed whatever they answer is not a confirmation, it is a nuisance. One implementation so the
+ * early refusal and the real one can never disagree about what blocks an order.
+ */
+export function blockingCheck(ticket: TicketBase): string | null {
+  const failed = ticket.checks.filter((check) => !check.ok);
+  if (!failed.length) return null;
+  return `Order ticket ${ticket.id} cannot be placed: ${failed.map((c) => `${c.name} — ${c.detail}`).join("; ")}`;
 }
 
 /**
@@ -135,13 +158,8 @@ export function take(id: string, expectedKind?: TicketBase["kind"]): TicketBase 
         "was sent.",
     );
   }
-  const failed = slot.ticket.checks.filter((check) => !check.ok);
-  if (failed.length) {
-    throw new StockbitError(
-      "invalid_param",
-      `Order ticket ${id} cannot be placed: ${failed.map((c) => `${c.name} — ${c.detail}`).join("; ")}`,
-    );
-  }
+  const blocked = blockingCheck(slot.ticket);
+  if (blocked) throw new StockbitError("invalid_param", blocked);
   // Marked spent BEFORE the caller sends anything. See the module note.
   slot.consumedAt = now();
   return slot.ticket;

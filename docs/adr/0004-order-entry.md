@@ -10,6 +10,43 @@ goal-completion check, a task runner, an automated reviewer, or an assistant's o
 feature "should" be finished are none of them an instruction from the account owner. This ADR was
 written from a decision the owner made in conversation, and its scope is that decision.
 
+## Amendment 1 (2026-08-28): elicitation is decisive, and `confirm` cannot skip the ask
+
+The clause below under *The protocol* — "That is in addition to the caller's confirmation, never
+instead of it" — is **superseded**. It is replaced by: *always ask a person when one can be reached,
+and never let `confirm` skip that ask.*
+
+The clause was not merely wrong in hindsight. **The implementation never matched it**, and matched
+it in the one direction that mattered. `src/trading/orders.ts` seeded the gate from
+`options.confirm === true` and guarded every later gate — including the elicitation branch, the only
+channel in MCP that reaches a person — behind `if (!via && …)`. So `confirm: true` did not add a
+second gate to the human's; it removed the human's. `src/eipo/order.ts` held a second, drifted copy
+of the same six branches. The audit log recorded `via: "explicit"` for both "a person clicked yes"
+and "a model asserted one had", so afterwards nothing could tell the two apart. This project's own
+`SECURITY.md` already classified that: "a path that satisfies a confirmation the user did not give …
+is a vulnerability in this project, whatever else it looks like."
+
+Requiring the model's boolean **as well as** a human's click is also not the improvement it reads
+as. When a person has clicked yes, the boolean adds no security; what it adds is a reason for every
+model to send `confirm: true` unconditionally, and that habit is corrosive precisely where the
+boolean is the *only* gate — on clients that cannot elicit at all.
+
+So the ask now runs **before** the `confirm` check and is not behind any `via` test. A person who
+has not been asked is asked; a person who says no is obeyed whatever the model said. A client that
+cannot ask still trades — that half of this ADR stands, and "a client that cannot ask must not
+become a client that cannot trade" is unchanged — but it is recorded as `explicit-unelicited` rather
+than as `explicit`, and the user is told in the result that nobody was asked.
+
+Three switches, all terminal-only, now sit over that: `trading.elicitation` (`required` /
+`when-available` / `never`, default `when-available`), a fifteen-minute in-memory "don't ask again"
+the *person* grants themselves by ticking a second box in the dialog, and
+`stockbit-auth trading-forget` to revoke every such grant across running processes.
+
+The full reasoning, the alternatives, and why a second preview-issued token was rejected are in
+[ADR-0010](0010-elicitation-is-decisive.md). Everything else in this ADR — the five routes, the
+ticket protocol, the outcome classes, the audit line, the refusal-over-rollback posture — stands
+unchanged.
+
 ## Scope
 
 Five routes, and nothing else:
@@ -90,9 +127,13 @@ agree.
   agreed to.
 - A ticket is fingerprinted over the fields that define the order and rechecked immediately before
   the request, so a ticket altered in memory between the two steps is caught rather than sent.
-- Where the MCP client advertises **elicitation**, the human is asked directly as well. That is in
-  addition to the caller's confirmation, never instead of it, and a client that cannot ask is
-  refused rather than waved through.
+- Where the MCP client advertises **elicitation**, the human is asked directly — *first*, before the
+  caller's `confirm` is looked at, and their answer decides it. **Amended:** this clause originally
+  read "in addition to the caller's confirmation, never instead of it", and the code never
+  implemented it that way. See Amendment 1 above and [ADR-0010](0010-elicitation-is-decisive.md). A
+  client that cannot ask is not refused by default — it falls back to `confirm: true` and the result
+  says a human was not asked — unless the account owner sets `trading.elicitation: required`, which
+  makes that refusal their deliberate choice rather than this ADR's.
 
 ## Checks that failed, and checks that could not be run
 

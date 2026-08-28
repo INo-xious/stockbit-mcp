@@ -24,8 +24,9 @@ import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { hasStoredSession, resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
-import { defaultSettings, settingsPath } from "../src/settings.ts";
+import { defaultSettings, settingsPath, tradingPolicy } from "../src/settings.ts";
 import { clearTickets, peek, setClock, resetClock } from "../src/trading/tickets.ts";
+import { forgetRemember, grantRemember } from "../src/trading/remember.ts";
 import { findGrant, ensureEipoSession } from "../src/eipo/session.ts";
 import { getMyOrder, getRdnBalance, listOfferings, normalizeEmiten } from "../src/eipo/api.ts";
 import { eipoLogPath, eipoOrderBody, placeEipoOrder, previewEipoOrder, readVerdict } from "../src/eipo/order.ts";
@@ -140,6 +141,10 @@ function setPolicy(trading: Partial<ReturnType<typeof defaultSettings>["trading"
 beforeEach(() => {
   clearCache();
   clearTickets();
+  // Process memory shared with exchange orders, so it would otherwise leak between tests. No e-IPO
+  // path can create one today — a subscription is never waivable — but the store is one slot and a
+  // test that forgot this would pass for the wrong reason.
+  forgetRemember();
   resetClock();
   resetSession();
   getStore("main").set("MAIN-REFRESH");
@@ -317,6 +322,162 @@ test("a snapshot that cannot be read aborts before the subscription", async () =
   wire.failDetailFrom = 1;
   detailCalls = 0;
   await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /no way to tell whether this one landed/);
+});
+
+/* --------------------- elicitation is decisive here too (ADR-0010) --------------------- */
+
+/**
+ * The human channel, as the shared gate sees it.
+ *
+ * This file contained no occurrence of the word `elicit` before ADR-0010, so the whole channel was
+ * untested on the one commitment in this project that cannot be undone by selling. Mirrors the
+ * harness in `test/trading.test.ts` deliberately: one gate, so one shape of test.
+ */
+function fakeElicit(...answers: Array<"accepted" | "declined" | "unavailable" | { remember: true }>) {
+  const calls: Array<{ message: string; prompt?: Record<string, unknown> }> = [];
+  let index = 0;
+  const elicit = async (message: string, prompt?: Record<string, unknown>) => {
+    calls.push({ message, prompt });
+    const answer = answers[Math.min(index++, answers.length - 1)];
+    return typeof answer === "string"
+      ? { answer, remember: false }
+      : { answer: "accepted" as const, remember: true };
+  };
+  return { elicit, calls };
+}
+
+test("confirm: true cannot skip a declined elicitation on an IPO subscription either", async () => {
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  const asked = fakeElicit("declined");
+  await refuses(
+    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
+    /declined this subscription/,
+  );
+  assert.equal(asked.calls.length, 1, "the human must have been asked");
+  assert.ok(peek(ticket.id), "and a refused call does not spend the ticket");
+});
+
+test("an elicited yes commits it, and the result says a person was asked", async () => {
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 10, price: 700 });
+  const asked = fakeElicit("accepted");
+  const result = await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "accepted");
+  const entry = JSON.parse(readFileSync(eipoLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "elicited");
+  assert.equal(entry.elicitation, "accepted");
+});
+
+test("the subscription dialog says what an IPO is, not what an order is", async () => {
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  const asked = fakeElicit("accepted");
+  await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(asked.calls[0].message, ticket.summary);
+  assert.match(String(asked.calls[0].prompt?.title), /IPO subscription/);
+  assert.match(String(asked.calls[0].prompt?.description), /RDN/);
+  assert.match(String(asked.calls[0].prompt?.description), /cannot be cancelled by selling/);
+});
+
+test("no human reachable plus confirm: true proceeds, marked as unelicited", async () => {
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  const result = await placeEipoOrder({
+    ticketId: ticket.id,
+    confirm: true,
+    elicit: fakeElicit("unavailable").elicit,
+  });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "unavailable");
+  const entry = JSON.parse(readFileSync(eipoLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "explicit-unelicited");
+});
+
+test("elicitation: required refuses a client that cannot ask, and names the way out", async () => {
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  await refuses(
+    () => placeEipoOrder({ ticketId: ticket.id, confirm: true }),
+    /--elicitation when-available/,
+  );
+});
+
+test("the de-drifted refusal now carries the sentence the e-IPO copy had lost", async () => {
+  // The duplicated gate's own wording had drifted: it never told a model not to set confirm on the
+  // user's behalf, which is the single most load-bearing sentence in the whole refusal.
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  await refuses(() => placeEipoOrder({ ticketId: ticket.id }), /Do not set it on their behalf/);
+});
+
+test("a grant ticked on an exchange order does NOT waive an IPO subscription", async () => {
+  // The grant store is one slot shared with `src/trading/orders.ts`, and the first implementation
+  // bounded it by time, value and policy but not by what KIND of commitment it was. So a box ticked
+  // on a cancellable share order silently waived the dialog for the one commitment in this project
+  // that cannot be undone even by selling — and the person never saw the words about the allotment
+  // possibly being smaller, because the dialog was never shown.
+  const policy = tradingPolicy();
+  grantRemember(policy, 10_000_000);
+
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 }); // Rp 700,000
+  assert.ok(ticket.amountIdr < 10_000_000, "well inside the grant's cap, so only the KIND bound can refuse it");
+
+  const asked = fakeElicit("declined");
+  await refuses(
+    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
+    /declined this subscription/,
+  );
+  assert.equal(asked.calls.length, 1, "the human MUST have been asked despite the standing grant");
+});
+
+test("an IPO dialog never offers the waiver box", async () => {
+  // It could not be honoured, and a box that does nothing tells the person they have answered for
+  // next time when they have not.
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
+  const asked = fakeElicit("accepted");
+  await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(asked.calls[0].prompt?.remember, undefined);
+});
+
+test("an unplaceable subscription is refused before anyone is asked", async () => {
+  // The same guard `passGates` has, on the same gate's other caller. An e-IPO ticket has six
+  // failable checks — including the RDN balance — so without it a person could be asked to commit
+  // money out of an account that does not have it, and only then be refused.
+  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1000, price: 700 });
+  assert.equal(ticket.checks.find((c) => c.name === "rdn_sufficient")!.ok, false, "precondition");
+
+  const asked = fakeElicit("accepted");
+  await refuses(
+    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
+    /cannot be placed: rdn_sufficient/,
+  );
+  assert.equal(asked.calls.length, 0, "nobody is asked to approve a subscription the ticket already blocks");
+});
+
+test("the tool layer wires the human channel through to the subscription", async () => {
+  const reads = new Map<string, ToolHandler>();
+  const writes = new Map<string, ToolHandler>();
+  const asked = fakeElicit("declined");
+  registerEipoTools({
+    read: (name, _d, _s, handler) => {
+      reads.set(name, handler);
+    },
+    write: (name, _d, _s, handler) => {
+      writes.set(name, handler);
+    },
+    writeNames: () => [...writes.keys()],
+    elicitDecision: asked.elicit,
+  });
+
+  const preview = await reads.get("eipo_order_preview")!({ emiten_code: "BREN", lots: 1, price: 700 });
+  const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
+
+  const before = sent.filter((s) => s.url.endsWith("/eipo/order")).length;
+  const placed = (await writes.get("eipo_order")!({ ticket_id: ticketId, confirm: true })) as {
+    content: Array<{ text: string }>;
+    isError?: boolean;
+  };
+  assert.equal(placed.isError, true);
+  assert.match(placed.content[0].text, /declined this subscription/);
+  assert.equal(asked.calls.length, 1);
+  assert.equal(sent.filter((s) => s.url.endsWith("/eipo/order")).length, before, "nothing was committed");
 });
 
 /* --------------------------------- the outcomes --------------------------------- */
