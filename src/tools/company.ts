@@ -13,16 +13,9 @@ import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
 /** The paragraph every row-set tool ends with. One wording, so the contract cannot drift per tool. */
-const ROW_SOURCE_NOTE =
-  "Rows come back verbatim under `rows`. `source` says where they were found in the response: " +
-  '"data" when the payload was a bare array, "data.<key>" when it was wrapped, and **null when no ' +
-  "row array could be found at all** — in that case `extra` holds what the response did carry, and " +
-  "an empty `rows` means the lookup failed rather than that the answer was empty. `rows: []` with a " +
-  "non-null `source` is a genuine zero.";
+const ROW_SOURCE_NOTE = "When `source` is null, `extra` holds what the response did carry.";
 
-const PENDING_NOTE =
-  "Pending verification: this endpoint has not been observed live, so nothing is renamed or " +
-  "projected — you are reading the fields the API sent.";
+const PENDING_NOTE = "PENDING VERIFICATION: this endpoint has not been observed live.";
 
 export function registerCompanyTools(define: Definer): void {
   define.read(

@@ -21,9 +21,9 @@ const LAG =
 
 /** Also repeated: what an unverified shape means for the caller. */
 const PENDING =
-  "PENDING VERIFICATION: this endpoint has not been observed live from this server. Field names " +
-  "are projected defensively and the raw row is included alongside them, so read a field you do " +
-  "not see here straight off the raw row rather than assuming it is missing.";
+  "PENDING VERIFICATION: this endpoint has not been observed live, so field names are projected " +
+  "ALONGSIDE the row's own keys, which are kept rather than replaced — read a field you do not see " +
+  "here straight off the row.";
 
 export function registerInsiderTools(define: Definer): void {
   define.read(

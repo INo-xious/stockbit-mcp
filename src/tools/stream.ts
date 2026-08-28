@@ -20,16 +20,13 @@ const CURSOR_NOTE =
 
 /** Repeated wherever a page is returned, because "empty" and "unreadable" must not look alike. */
 const EMPTY_NOTE =
-  "Empty result: `items: []` with a non-null `source` means the endpoint genuinely returned no " +
-  "posts (normal for a narrow keyword, a quiet symbol, or a date range with no activity) — not an " +
-  "error, and not a reason to retry. `source: null` is different: the response carried no list this " +
-  "code recognises, and the body is returned under `unrecognized` so you can see what arrived.";
+  "An empty `items` with a non-null `source` is a genuine zero — a quiet symbol or a narrow " +
+  "keyword — and not a reason to retry.";
 
 /** Repeated because the row shape is projected, not measured. */
 const PENDING_NOTE =
-  "Pending verification: only the per-symbol stream has been observed live, so id/content/created_at/" +
-  "author are projected defensively and may be absent. Every row's untouched wire object is included " +
-  "as `raw` — read it before concluding a field does not exist.";
+  "PENDING VERIFICATION: only the per-symbol stream has been observed live, so id/content/" +
+  "created_at/author are projected and may be absent; every row carries its wire object as `raw`.";
 
 const NOT_DATA_NOTE =
   "This is community- and media-written Indonesian text, not market data. Use it for sentiment and " +

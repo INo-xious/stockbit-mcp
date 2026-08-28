@@ -11,7 +11,7 @@
  * of a growing set is a claim with an expiry date, so it is generated from the surface itself now —
  * the same list `test/tools.test.ts` asserts and `define.write` produces.
  */
-import type { Surface } from "./tools/surface.js";
+import { byFamily, type Surface } from "./tools/surface.js";
 import { FAMILIES, type Family } from "./tools/_define.js";
 
 /**
@@ -173,15 +173,10 @@ recognised — which is not the same as zero. Say that, rather than reporting a 
   //
   // So the names come from the surface, grouped by family. A new tool appears here the day it is
   // registered, a renamed one cannot go stale, and a typo is impossible because nothing is typed.
-  const byFamilyName = new Map<Family, string[]>();
-  for (const tool of surface.tools) {
-    const list = byFamilyName.get(tool.family);
-    if (list) list.push(tool.name);
-    else byFamilyName.set(tool.family, [tool.name]);
-  }
+  const grouped = byFamily(surface.tools);
 
-  const whatIsHere = FAMILIES.filter((family) => byFamilyName.has(family)).map((family) => {
-    const names = byFamilyName.get(family)!;
+  const whatIsHere = FAMILIES.filter((family) => grouped.has(family)).map((family) => {
+    const names = grouped.get(family)!.map((tool) => tool.name);
     const gloss = FAMILY_NOTE[family];
     return `- ${FAMILY_LABEL[family]}: ${names.join(", ")}.${gloss ? ` ${gloss}` : ""}`;
   });
@@ -213,17 +208,48 @@ Two arguments, and they are not interchangeable:
 
 TRADING IS OFF UNTIL THE USER TURNS IT ON
 ${has("trading_status") ? "Call trading_status to see whether it is on, and what to say if it is not." : "status reports the trading mode — this server did not register trading_status."}
-The user enables it themselves at a terminal with "stockbit-auth trading-enable"; nothing you can
-do turns it on. The
-trading session needs their 6-digit PIN, entered at their own terminal via "stockbit-auth
-trading-login". NEVER ask the user for that PIN — no tool here accepts one and this server never
-stores one.
+The user enables it themselves at a terminal with "stockbit-auth trading-enable"; nothing you can do
+turns it on. The trading session needs their 6-digit PIN, entered at their own terminal via
+"stockbit-auth trading-login". NEVER ask the user for that PIN — no tool here accepts one and this
+server never stores one. Tools that say "Requires the trading session" mean this one.
+
+READING A RESULT — the conventions, once, for every tool
+These used to be restated inside forty-odd tool descriptions. They are the same everywhere, so they
+are here instead, and a tool only mentions what is specific to it.
+- PROVENANCE. Stockbit's API is private and undocumented, so this server distinguishes what it has
+  SEEN from what it has guessed. Each tool carries the word in _meta["stockbit-mcp/evidence"]:
+  observed (a real response was read and the code written against it), read-back (a write confirmed
+  by re-reading the account), projected (field names taken from Stockbit's web bundle and never seen
+  live). A description saying "PENDING VERIFICATION" is a projected tool saying so in words.
+- ABSENT IS NOT ZERO. A field missing from a result means the value could not be read, never that it
+  is zero or empty. Do not sum, average or compare a set of rows with fields missing without saying
+  so. readFrom names the wire key each value came from; derived marks a value computed rather than
+  read; unmappedKeys names fields this server did not recognise — on account data the VALUES are
+  dropped, deliberately, because an unmapped field on a brokerage response may be an account number.
+- WHERE THE ROWS CAME FROM. Unprojected tools return Stockbit's own rows untouched. Some hand back
+  the payload exactly as it arrived and say nothing about its shape — read the keys off the result
+  rather than assuming them. The rest report where they found the rows, in rowsFrom or source: "data" (the payload was a bare array), "data.<key>"
+  (wrapped, with the siblings alongside), null/"absent" (no row array was found at all), or
+  "unrecognized" (the payload was not a row list; the body is returned so you can see what arrived).
+  An EMPTY list is a genuine zero — a quiet symbol, a narrow keyword, a weekend — ONLY when the
+  source names a real location it was found at ("data" or "data.<key>"). Where the source is null,
+  "absent" or "unrecognized", an empty list means NOT PARSED rather than none, and saying "there
+  were none" is then a claim nobody made.
+  Where a row carries raw, read a field you do not see off that before concluding it is missing.
+- AFTER A WRITE, read outcome: ok means the change was made AND seen when the account was read
+  back; rejected means it was refused and nothing is on the book; not-visible means it was accepted
+  but could not be found; write-failed means it did not go through; outcome-unknown means the
+  read-back itself failed. ok is the only clean success — never resend anything else. NOTHING HERE
+  ROLLS BACK: each of these is one action a person can reverse in the Stockbit app, and undoing a
+  change this server could not read would be a second blind write. Relay message rather than
+  reporting success in your own words.
 
 ${orderBlock}${accountBlock}
 NOTES
 - Symbols are IDX tickers (BBRI, TLKM, …). IHSG is the composite index. Values are in rupiah.
 - 1 lot = 100 shares. The tools take lots and do the arithmetic.
-- Broker net values can be negative, meaning a net seller.
+- Broker net values ARE negative for a net seller — that is the wire's sign, already applied. Do not
+  negate them again.
 ${profileNote}
 THE TOOLS THAT CHANGE SOMETHING are exactly: ${writes.join(", ")} — ${writes.length} of ${total}.
 Everything else reads, and a saved workflow recipe can reach nothing but reads.`;

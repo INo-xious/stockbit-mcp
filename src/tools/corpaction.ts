@@ -15,11 +15,8 @@ import type { Definer } from "./_define.js";
 
 /** Appended where the row shape has not been observed live. Same words everywhere on purpose. */
 const UNVERIFIED =
-  "Rows are returned exactly as Stockbit sends them, with no field renaming: this response shape " +
-  "has not been observed live, so nothing is projected into invented names. `rowsFrom` says where " +
-  "the rows were found — `data` (the array itself), `data.<key>` (nested, with siblings in `meta`), " +
-  "`absent` (no data field at all), or `unrecognized` (the payload was not a row list, `raw` holds " +
-  "it, and an empty `rows` there means NOT PARSED, not none).";
+  "PENDING VERIFICATION: this response shape has not been observed live. `rowsFrom` is never null " +
+  "here: `absent` or `unrecognized` with an empty `rows` means NOT PARSED, not none.";
 
 export function registerCorpactionTools(define: Definer): void {
   define.read(

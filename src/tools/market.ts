@@ -13,10 +13,7 @@ import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
 /** Appended where the row shape has not been observed live, so a caller does not over-trust it. */
-const PENDING =
-  "PENDING VERIFICATION: this response shape has not been observed live. The payload is returned " +
-  "as Stockbit sent it, unprojected, rather than reduced to guessed field names — read the keys off " +
-  "the result instead of assuming them.";
+const PENDING = "PENDING VERIFICATION: this response shape has not been observed live.";
 
 export function registerMarketTools(define: Definer): void {
   define.read(
