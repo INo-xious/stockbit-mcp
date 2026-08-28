@@ -45,7 +45,6 @@ NOT evidence problems — the mapping cannot be settled because the request neve
 | Tool | What the server actually said |
 |---|---|
 | `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;` |
-| `stock_conversion` | 400 `Page is a required field;Limit is a required field;` — works when both are passed |
 | `watchlist_search` | 400 `WatchlistID is a required field;` — the tool takes only `keyword` |
 | `order_queue` | 400 `Stock code is required` — with `symbol` supplied, so it is not being forwarded |
 | `shareholding` | 400 `Invalid company id` — a ticker is passed where a numeric company id is wanted |
@@ -77,6 +76,7 @@ one on the result. Checked directly, `brokers` maps 112 rows and `broker_top` ma
 | `order_queue` | sent `symbol`; the endpoint wants `stock_code` | `symbol`, `code`, `emiten_code`, `stockCode` and `company` each returned 400 "Stock code is required"; `stock_code` answered. The tool had never once returned data. |
 | `chart_series` | no `close` key on the wire, so the whole series was refused | the daily route carries the price in `value`. Proven by arithmetic on the payload rather than by assumption: a BBRI point read `value: "2930"`, `change: -20`, `percentage: "-0.68"`, and 20/2930 = 0.68%. |
 | `chart_series` | flat candles with NO warning | open/high/low/volume arrive as EMPTY STRINGS. The keys are present, so `unmapped` stayed clean and the flat-candle warning never fired, while `numberish("")` returned null and every bar silently took its close for all three. A field that reads null on every row now counts as flat. |
+| `stock_conversion` | sent no paging, and the endpoint has no default | 400 "Page is a required field;Limit is a required field;". Both are now defaulted (page 1, limit 20) rather than made mandatory on the tool: a caller asking a company for its conversions should not have to know the API needs paging to answer at all. |
 | `stream_user` | named 1 of its 4 fields | `/stream/non-login/user/:username` spells them `postid`, `created` and a FLAT `username`/`fullname`, where the per-symbol route uses `stream_id`, `created_at` and a nested `user`. All four now map. |
 
 Four more tools moved to `observed` on the strength of these: `brokers`, `broker_top`,

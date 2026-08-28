@@ -464,8 +464,13 @@ export async function getStockConversion(
   limit?: number,
 ): Promise<StockConversion> {
   const sym = normalizeSymbol(symbol);
-  const p = count("page", page, 0);
-  const rows = count("limit", limit, 1);
+  // Both are REQUIRED by the endpoint, which has no default of its own: omitting either returns
+  // 400 "Page is a required field;Limit is a required field;". Settled live on 2026-08-29, and it
+  // is why this tool had never returned a row. `index_members` documents the same behaviour on its
+  // own `limit`. Defaulted here rather than made mandatory on the tool, because a caller asking a
+  // company for its conversions should not have to know the API needs paging to answer at all.
+  const p = count("page", page, 0) ?? 1;
+  const rows = count("limit", limit, 1) ?? 20;
   return cached(`corpaction:conversion:${sym}:${p ?? "-"}:${rows ?? "-"}`, CACHE.keystatsTtlMs, async () => ({
     symbol: sym,
     ...(await fetchRows("stockConversion", "stock conversion", {

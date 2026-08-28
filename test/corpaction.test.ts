@@ -487,15 +487,19 @@ test("page 0 is sent, and a negative page is refused", async () => {
   // Whether pagination is 0- or 1-based is unverified, so 0 must survive as a value rather than be
   // dropped as falsy.
   await getStockConversion("BUKA", 0);
-  assert.deepEqual(query(), { page: "0" });
+  // `limit` rides along because the endpoint refuses a request without it; see the test below.
+  assert.deepEqual(query(), { page: "0", limit: "20" });
   await assert.rejects(() => getStockConversion("BUKA", -1), /page/i);
   await assert.rejects(() => getStockConversion("BUKA", undefined, 0), /limit/i);
   assert.equal(seen.length, 1, "only the valid call reached the wire");
 });
 
-test("omitted pagination is absent from the conversion query", async () => {
+test("omitted pagination is DEFAULTED, because this endpoint has no default of its own", async () => {
+  // This test used to assert the opposite, and that assertion was pinning the bug: with neither
+  // supplied the server answers 400 "Page is a required field;Limit is a required field;", so
+  // stock_conversion had never returned a row. Settled live on 2026-08-29.
   await getStockConversion("BUKA");
-  assert.deepEqual(query(), {});
+  assert.deepEqual(query(), { page: "1", limit: "20" });
 });
 
 test("the conversion cache key holds symbol, page and limit", async () => {

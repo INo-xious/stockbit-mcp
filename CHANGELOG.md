@@ -145,6 +145,22 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- **Four endpoints that had never returned usable data now do.** Found by calling all 77 projected
+  tools against a live account rather than by reading them. `order_queue` sent `symbol` where the
+  endpoint wants `stock_code` and answers 400 to every other spelling. `stock_conversion` sent no
+  paging to an endpoint that has no default and refuses without it. `chart_series` refused every
+  series because `/charts/:symbol/daily` carries no `close` key at all — it carries the price in
+  `value`, settled by arithmetic on the payload rather than assumption (a point read `value "2930"`,
+  `change -20`, `percentage "-0.68"`, and 20/2930 = 0.68%). `stream_user` named one of its four
+  fields out of sixty wire keys, because the user route spells them `postid`, `created` and a flat
+  username where the per-symbol route nests them.
+
+  The chart route also sends open, high, low and volume as EMPTY STRINGS, which is worse than
+  absent: the keys are present so `unmapped` stayed clean, the flat-candle warning never fired, and
+  `numberish("")` returns null so every bar silently took its close for all three. A caller could
+  run candlestick patterns on a series of flat candles and be told nothing. A field that reads null
+  on every row now counts as flat.
+
 - **The browser trading login opened a stranger's profile page.** `startUrl` was
   `https://stockbit.com/trade`, and `/trade` is a Stockbit *username* route — so the window landed on
   whichever account owns that handle, the PIN form was never shown, and the capture then sat waiting
