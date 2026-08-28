@@ -213,10 +213,18 @@ export const SEGMENT_NAMES = Object.keys(SEGMENT_VALIDATORS) as SegmentName[];
  *
  * A silently-shadowed name would be the worst kind of bug this table can have: the call site would
  * still compile, still send a request, and send it to the wrong host with the wrong credential.
+ *
+ * Exported for `test/transport.test.ts` only. It builds `ROUTES`, so it is load-bearing rather than
+ * a helper, and the throw is the whole point of it — that deserves a test that does not need a
+ * deliberately broken route file to exist.
  */
-function mergeRoutes<T extends Record<string, RouteSpec>[]>(...tables: T): Record<string, RouteSpec> {
+export function mergeRoutes<
+  A extends Record<string, RouteSpec>,
+  B extends Record<string, RouteSpec>,
+  C extends Record<string, RouteSpec>,
+>(a: A, b: B, c: C): A & B & C {
   const merged: Record<string, RouteSpec> = {};
-  for (const table of tables) {
+  for (const table of [a, b, c] as Array<Record<string, RouteSpec>>) {
     for (const [name, spec] of Object.entries(table)) {
       if (name in merged) {
         throw new Error(
@@ -227,7 +235,10 @@ function mergeRoutes<T extends Record<string, RouteSpec>[]>(...tables: T): Recor
       merged[name] = spec;
     }
   }
-  return merged;
+  // The intersection is the honest type: the keys are exactly the three tables' keys, which is what
+  // `RouteName` is built from. The cast is the one place that has to be asserted, and the loop above
+  // is what earns it.
+  return merged as A & B & C;
 }
 
 /**
@@ -235,15 +246,18 @@ function mergeRoutes<T extends Record<string, RouteSpec>[]>(...tables: T): Recor
  *
  * Adding a row is a deliberate act reviewable in a diff. Anything absent — every undeclared write,
  * every other host — is rejected here rather than by convention.
+ *
+ * Built BY the guard rather than beside it. This used to be an object spread with a discarded
+ * `mergeRoutes(...)` call underneath it, which meant the table existed twice: the one everything
+ * read was assembled by `...`, which resolves a duplicate name by silently keeping the last one —
+ * the exact failure the guard was written to catch — while the guard threw over a second copy
+ * nothing used. Two constructions can drift; one cannot.
  */
-export const ROUTES = {
-  ...EXODUS_ROUTES,
-  ...CARINA_ROUTES,
-  ...SEKURITAS_ROUTES,
-} as const satisfies Record<string, RouteSpec>;
-
-// Runs at import: a duplicate name must fail loudly at start-up, not on the one call that hits it.
-mergeRoutes(EXODUS_ROUTES, CARINA_ROUTES, SEKURITAS_ROUTES);
+export const ROUTES = mergeRoutes(
+  EXODUS_ROUTES,
+  CARINA_ROUTES,
+  SEKURITAS_ROUTES,
+) satisfies Record<string, RouteSpec>;
 
 export type RouteName = keyof typeof ROUTES;
 

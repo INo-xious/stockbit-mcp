@@ -37,6 +37,7 @@ import {
   domainOf,
   isPermitted,
   isRefreshRoute,
+  mergeRoutes,
   permittedRequests,
   resolvePath,
   type Host,
@@ -1045,4 +1046,41 @@ test("AUTHENTICATED_ORIGIN still names the market-data host", () => {
   assert.equal(AUTHENTICATED_ORIGIN, ORIGINS.exodus);
   assert.notEqual(ORIGINS.exodus, ORIGINS.carina);
   assert.notEqual(ORIGINS.carina, ORIGINS.sekuritas);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The route table is built BY its own duplicate guard.
+ *
+ * It used to be assembled by object spread, with `mergeRoutes(...)` called separately and its
+ * return value thrown away. So the table everything read was the one built by `...`, which resolves
+ * a collision by keeping the last spelling — precisely the silent shadowing the guard exists to
+ * prevent — while the guard threw over a second copy nothing used.
+ * ------------------------------------------------------------------ */
+
+test("mergeRoutes refuses a duplicate route name rather than shadowing it", () => {
+  const a = { quote: { host: "exodus", method: "GET", template: "/a", auth: "main" } } as const;
+  const b = { quote: { host: "carina", method: "GET", template: "/b", auth: "securities" } } as const;
+  const c = {} as const;
+
+  assert.throws(
+    () => mergeRoutes(a, b, c),
+    (err: unknown) =>
+      err instanceof Error &&
+      /Duplicate route name "quote"/.test(err.message) &&
+      /exodus/.test(err.message) &&
+      /carina/.test(err.message),
+  );
+
+  // Object spread, the thing this replaced, keeps the last one and says nothing.
+  assert.equal({ ...a, ...b }.quote.host, "carina");
+});
+
+test("ROUTES is exactly the three host tables, and nothing was lost building it through the guard", () => {
+  const names = Object.keys(ROUTES);
+  assert.equal(new Set(names).size, names.length, "no name may appear twice");
+  assert.ok(names.length > 100, `expected the full table, got ${names.length}`);
+  for (const spec of Object.values(ROUTES)) {
+    assert.ok(spec.host && spec.method && spec.template, "every row survives the merge intact");
+  }
 });

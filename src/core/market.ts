@@ -477,7 +477,7 @@ export type TradeBookDataMode = (typeof TRADE_BOOK_DATA_MODES)[number];
  * lets an unlisted-but-well-formed key through rather than refusing it — a closed `z.enum` here
  * would reject valid sort keys purely because nobody has written them down yet.
  */
-export const SORT_KEYS = ["TIME", "QUEUE", "LOT", "PRICE"] as const;
+const SORT_KEYS = ["TIME", "QUEUE", "LOT", "PRICE"] as const;
 
 const SORT_KEY_RE = /^[A-Z][A-Z0-9_]{0,30}$/;
 
@@ -519,8 +519,13 @@ function positiveInt(name: string, value: number): number {
  * Dropping one — a key of `runningTrade:${symbol}` that ignores `limit` — serves a five-row answer
  * to a caller who asked for fifty, which is a bug this repo has shipped before.
  */
-function keyFor(route: RouteName, params: QueryParams): string {
-  return `${route}:${JSON.stringify(Object.entries(params).sort())}`;
+export function keyFor(route: RouteName, params: QueryParams): string {
+  // Sorted BY KEY. A bare `.sort()` orders the [k, v] pairs by their default string coercion, so it
+  // is really sorting on "key,value" — two different param sets can tie, and the reader is told
+  // something other than what happens. Comparing the key alone is both injective and what the line
+  // looks like it does.
+  const entries = Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `${route}:${JSON.stringify(entries)}`;
 }
 
 /* ================================ running trade ================================ */

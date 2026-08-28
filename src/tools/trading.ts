@@ -31,7 +31,7 @@ import {
 import { TICKET_TTL_MS } from "../trading/tickets.js";
 import { hasStoredSession } from "../auth/session.js";
 import { tradingPolicy } from "../settings.js";
-import { runTool } from "./_format.js";
+import { COMMITMENT_CONFIRM, runTool } from "./_format.js";
 import type { Definer, ElicitDecision } from "./_define.js";
 import { elicitationNote } from "../trading/confirmation.js";
 import { describeRemember, forgetRemember, REMEMBER_TTL_MS } from "../trading/remember.js";
@@ -49,26 +49,14 @@ import { getQuote } from "../core/emitten.js";
 import { getIntradayPrices } from "../core/pricefeed.js";
 
 /** The sentence every description ends with. Written once so all ten agree word for word. */
-const PROJECTION_NOTE =
-  "PENDING VERIFICATION: this endpoint has not been observed live, so field names are projected. " +
-  "`readFrom` names the wire key each value was read from; a field that is absent was not " +
-  "recognised on the response, which is NOT the same as it being zero. `unmappedKeys` lists the " +
-  "names of fields this server did not recognise — their values are deliberately dropped rather " +
-  "than returned, because an unmapped field on a brokerage response may be an account number.";
+const PROJECTION_NOTE = "PENDING VERIFICATION: this endpoint has not been observed live.";
 
-const LOGIN_NOTE =
-  "Requires the trading session: if it is not set up the error says to run `stockbit-auth " +
-  "trading-login`, which asks the user for their 6-digit PIN at their own terminal. Never ask the " +
-  "user for that PIN here — no tool accepts one and this server never stores one.";
+// Names the command deliberately: `test/trading-account.test.ts` asserts every account read says
+// how to GET a session, and a tool that only says it needs one leaves the user stuck. The rest of
+// what this used to say — the PIN is typed at their terminal, never asked for here — is in the
+// server instructions now, once.
+const LOGIN_NOTE = "Requires the trading session (`stockbit-auth trading-login`).";
 
-/**
- * The sentence every paper-served tool carries.
- *
- * It says three things a model must relay rather than paraphrase: which account this is, that no
- * session is needed, and that the numbers are local. `mode: "paper"` on the result is the machine
- * form of the same fact, and `summary` opens with the banner — three redundant statements, because
- * the failure being prevented is a user believing a paper fill was real.
- */
 /**
  * For the three reads paper mode CANNOT answer.
  *
@@ -83,12 +71,20 @@ const NO_PAPER_NOTE =
   "will accept — so it needs a live trading session even when `trading_status` says paper. If there " +
   "is none, say that rather than reporting a paper figure in its place.";
 
+/**
+ * The sentence every paper-served tool carries.
+ *
+ * It says three things a model must relay rather than paraphrase: which account this is, that no
+ * session and no PIN are needed, and that the numbers are local. The second matters most, because
+ * this note is appended BESIDE `LOGIN_NOTE` — without it a paper user is sent to a terminal to type
+ * a PIN for a call that reads a local file. `mode: "paper"` on the result is the machine form of
+ * the same fact and `summary` opens with the banner; three redundant statements, because the
+ * failure being prevented is a user believing a paper fill was real.
+ */
 const PAPER_NOTE =
-  "IN PAPER MODE this reads a LOCAL LEDGER, not the brokerage. The result carries `mode: \"paper\"` " +
-  "and its summary opens with \"PAPER ACCOUNT — no real money.\" — say so, every time, rather than " +
-  "reporting these figures as the user's actual account. No trading session and no PIN are needed " +
-  "in paper mode. Turn it on with `stockbit-auth trading-enable --paper`; `trading_status` says " +
-  "which mode is in force.";
+  "IN PAPER MODE this reads a LOCAL LEDGER, not the brokerage, so NO trading session and NO PIN are " +
+  "needed however the line above reads — do not send the user to a terminal. The result says " +
+  "\"PAPER ACCOUNT\"; say so rather than reporting these figures as the user's actual account.";
 
 /**
  * The reads that paper mode answers from the ledger instead of the brokerage.
@@ -651,8 +647,23 @@ export function registerTradingTools(define: Definer): void {
     {
       action: z.enum(["buy", "sell", "amend", "cancel"]).describe("What the order would do"),
       symbol: z.string().optional().describe("IDX ticker. Required for buy and sell; read from the order otherwise."),
-      price: z.coerce.number().optional().describe("Limit price in rupiah. Must sit on the IDX tick grid."),
-      lots: z.coerce.number().optional().describe("Lots — 1 lot is 100 shares. The wire takes shares; this does the arithmetic."),
+      // Bounded at the schema, not only downstream. `z.coerce.number()` alone accepts NaN ("abc"),
+      // 0 (""), negatives and fractions, and previewOrder does five sequential network reads before
+      // anything looks at the value — so the user paid a full round trip for an argument that could
+      // never have been valid. The preview's own checks stay: they give a better message, and they
+      // are what a value read off an existing order goes through.
+      price: z.coerce
+        .number()
+        .finite()
+        .positive()
+        .optional()
+        .describe("Limit price in rupiah. Must sit on the IDX tick grid."),
+      lots: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Lots — 1 lot is 100 shares. The wire takes shares; this does the arithmetic."),
       order_id: z.string().optional().describe("The order to amend or cancel, from the `orders` tool"),
     },
     async (a) =>
@@ -682,12 +693,7 @@ export function registerTradingTools(define: Definer): void {
     confirm: z
       .boolean()
       .optional()
-      .describe(
-        "Must be true. The user must have agreed to THIS ticket's summary, in words, first. " +
-          "Where the client supports MCP elicitation the user is ALSO asked directly, and their " +
-          "answer decides it: a declined dialog refuses the order however this is set. Never set it " +
-          "on their behalf — on a client that cannot ask, this is the only gate there is.",
-      ),
+      .describe(COMMITMENT_CONFIRM),
   };
 
   const submit = (
@@ -841,7 +847,9 @@ function describeOutcome(result: OrderResult): string {
     case "rejected":
       return `${what} was REJECTED and is not working. ${result.error ?? ""}`.trim();
     case "write-failed":
-      return `${what} was refused before it reached the exchange, so nothing is on the book. ${result.error ?? ""}`.trim();
+      // Deliberately does not say WHERE it failed. This class covers both a refusal that never left
+      // this process and a 4xx from the server, and the old wording asserted the first for both.
+      return `${what} did not go through, so nothing is on the book. ${result.error ?? ""}`.trim();
     case "not-found-after-error":
       return (
         `The request for ${what} errored (${result.error}) and the order list read back clean, so it does not ` +

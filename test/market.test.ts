@@ -25,6 +25,7 @@ import {
   getSeriesBars,
   getTopStocks,
   getTradeBook,
+  keyFor,
   locateRows,
   normalizeChartTimeframe,
   normalizeSortKey,
@@ -544,4 +545,31 @@ test("the market-prices cache key includes the symbol, the date and the boards",
   assert.equal(requests, 3);
   await getMarketPrices({ symbol: "BBRI", date: "2026-08-04", boards: ["NEGO"] });
   assert.equal(requests, 4);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The cache key is injective.
+ *
+ * `Object.entries(params).sort()` with no comparator orders the [key, value] PAIRS by their default
+ * string coercion — that is, by "key,value" rather than by key. It happened to be deterministic, so
+ * nothing broke, but the line did something other than what it read as, and a key that sorts on its
+ * own value is one route argument away from surprising someone.
+ * ------------------------------------------------------------------ */
+
+test("keyFor sorts by key, so the same params in any order give one key", () => {
+  const a = keyFor("quote", { symbol: "BBRI", limit: 10, period: "1D" });
+  const b = keyFor("quote", { period: "1D", limit: 10, symbol: "BBRI" });
+  assert.equal(a, b, "argument order must not create a second cache entry");
+});
+
+test("keyFor separates param sets that a value-aware sort could tie", () => {
+  // Both of these coerce their single entry to the string "a,b,c".
+  const one = keyFor("quote", { a: "b,c" });
+  const two = keyFor("quote", { "a,b": "c" });
+  assert.notEqual(one, two, "two different requests must never share a cache entry");
+
+  // And a different value is always a different key.
+  assert.notEqual(keyFor("quote", { limit: 5 }), keyFor("quote", { limit: 50 }));
+  assert.notEqual(keyFor("quote", { limit: 5 }), keyFor("orderbook", { limit: 5 }));
 });

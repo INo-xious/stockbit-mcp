@@ -210,9 +210,13 @@ export async function resolveConfirmation(req: ConfirmationRequest): Promise<Con
   if (policy.autoConfirm && policy.elicitation !== "required") {
     const cap = policy.maxOrderValueIdr;
     if (cap === null) {
+      // Deliberately does NOT offer `confirm: true` as the way out. This branch refuses before
+      // `confirm` is read at all, so a caller following that advice retries with the boolean set,
+      // lands here again, and loops. The only exits are a cap or turning autoConfirm off.
       refuse(
-        "autoConfirm is set but no maxOrderValueIdr is configured, so it is ignored. Pass confirm: true after " +
-          "asking the user, or set a cap with `stockbit-auth trading-enable --max-order-value N`.",
+        "autoConfirm is set but no maxOrderValueIdr is configured, so it is ignored and nothing was sent. " +
+          "confirm: true will not help — this is refused before confirm is looked at. Set a cap with " +
+          "`stockbit-auth trading-enable --max-order-value N`, or turn autoConfirm off.",
       );
     }
     if (valueIdr !== null && valueIdr > cap) {

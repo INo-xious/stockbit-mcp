@@ -78,10 +78,43 @@ export function clearTickets(): void {
   slots.clear();
 }
 
+/**
+ * How long a dead slot is kept after it expires, so `take()` can still tell a user WHICH thing went
+ * wrong.
+ *
+ * Evicting on consumption would be wrong: the "already used — an order may already have been placed
+ * from it" message exists precisely because a spent ticket must not be mistaken for one that never
+ * existed, and that message is the one standing between a person and a duplicate order. So eviction
+ * waits until well past the point where either answer means the same thing in practice.
+ */
+const SLOT_RETENTION_MS = TICKET_TTL_MS * 5;
+
+/**
+ * Drop slots nothing can say anything useful about any more.
+ *
+ * The map used to grow for the life of the process: nothing ever called `delete`, `peek` and `take`
+ * only *tested* expiry, and `clearTickets()` is tests-only. Every preview in a long session left a
+ * whole ticket behind — its checks, its warnings, a copy of the policy in force, a market snapshot.
+ * Bounded now by the retention window rather than by uptime.
+ */
+function evictStale(at: number): void {
+  for (const [id, slot] of slots) {
+    if (at > Date.parse(slot.ticket.expiresAt) + SLOT_RETENTION_MS) slots.delete(id);
+  }
+}
+
 /** Store a ticket and return it unchanged, so a caller can `return issue(build(...))`. */
 export function issue<T extends TicketBase>(ticket: T): T {
+  // Swept here rather than on a timer: a timer would keep the process alive, and the only moment
+  // the map can grow is this one.
+  evictStale(now());
   slots.set(ticket.id, { ticket, consumedAt: null });
   return ticket;
+}
+
+/** How many slots are held. Tests only — the leak this bounds is invisible from the outside. */
+export function slotCount(): number {
+  return slots.size;
 }
 
 /**
