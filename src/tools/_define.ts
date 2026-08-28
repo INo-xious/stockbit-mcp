@@ -28,12 +28,20 @@
  * Every tool carries one of three words — see `CONTEXT.md`. It rides on `_meta` so a client, the
  * generated reference and a reviewer all read the same value rather than three drifting copies.
  *
- * The default is **derived from the description**, because the description is where the fact
- * already lives: dozens of tools say "PENDING VERIFICATION: this route has not been observed live"
- * and a second, hand-maintained flag saying the same thing would be a second thing to forget. An
- * explicit `evidence` still wins — except that claiming a tool is Observed while its own
- * description says it has never been observed throws at registration, which is a contradiction
- * nobody should be able to ship.
+ * It is **declared** — on the tool, or on its family — and never inferred. It used to be derived
+ * from the description, on the reasoning that the description is where the fact already lives and a
+ * second hand-maintained flag would be a second thing to forget. That reasoning was wrong in a way
+ * only visible from both ends at once: prose cannot distinguish a claim about a ROUTE from a caveat
+ * about one FIELD, so `company_overview` was demoted to `projected` by a sentence about
+ * `eligibility`'s key names, while `screener_save` widened itself to `read-back` by writing "has
+ * NEVER been observed" where the pattern knew only "has NOT been observed". A regex arbitrating the
+ * project's central provenance claim was the wrong shape for the job.
+ *
+ * A tool that declares nothing, in a family that declares nothing, now fails to register: the old
+ * fallback handed it `"observed"`, the strongest word on the ladder, for saying nothing at all.
+ * `NEVER_OBSERVED` survives as a cross-check that raises when a declaration and a description
+ * disagree — and `test/tools.test.ts` carries the whole map, hand-written, for the same reason
+ * `WRITES` is.
  *
  * ## Annotations
  *
@@ -83,11 +91,21 @@ export const EVIDENCE_META_KEY = "stockbit-mcp/evidence";
 /**
  * A description that says, in this project's own words, that nobody has seen this route answer.
  *
+ * This is a CROSS-CHECK, not the source of truth. It used to be both, and it failed in both
+ * directions at once. `screener_save` said "has NEVER been observed" where this pattern only knew
+ * "has NOT been observed", so it registered as `read-back` and nothing complained — the silent
+ * widening the evidence ladder exists to prevent. And because it matches anywhere in free prose, a
+ * sentence about one FIELD downgraded a whole tool: `company_overview` was `projected` on the
+ * strength of a caveat about `eligibility`'s key names, not because its route was unseen.
+ *
+ * Evidence is declared now, so this only raises when a declaration and a description disagree — and
+ * a description that means one field rather than the route has to say so in words that do not read
+ * as a claim about the whole tool.
+ *
  * Kept broad on purpose: the phrasing varies across modules ("PENDING VERIFICATION", "Pending
- * verification", "PENDING:", "has not been observed live"), and a marker that only matched one
- * spelling would silently let the others through as Observed.
+ * verification", "PENDING:", "has not been observed live", "has never been observed").
  */
-const NEVER_OBSERVED = /PENDING[ _]?VERIFICATION|PENDING:|(has|have) not been observed/i;
+const NEVER_OBSERVED = /PENDING[ _]?VERIFICATION|PENDING:|(has|have) (not|never) been observed/i;
 
 /** What a registered handler looks like once the schema has been applied and the type forgotten. */
 export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -251,19 +269,34 @@ export function makeDefiner(
 }
 
 function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence | undefined): Definer {
+  /**
+   * Evidence is DECLARED — per tool, or by the tool's family — and never inferred.
+   *
+   * There used to be two fallbacks under this and both were wrong. Reading it off the description
+   * meant a caveat about a single field could downgrade an entire tool, while a caveat phrased one
+   * word differently ("never" for "not") widened one silently. And falling through to `"observed"`
+   * meant the strongest claim on the ladder was what a tool got for saying nothing at all, which is
+   * exactly backwards for a default. A tool that declares nothing now fails to register.
+   */
   const resolveEvidence = (name: string, description: string, explicit?: Evidence): Evidence => {
-    const looksUnobserved = NEVER_OBSERVED.test(description);
-    if (explicit) {
-      if (looksUnobserved && explicit !== "projected") {
-        throw new Error(
-          `Tool ${JSON.stringify(name)} is declared evidence "${explicit}" but its own description ` +
-            `says it has not been observed live. One of the two is wrong.`,
-        );
-      }
-      return explicit;
+    const evidence = explicit ?? familyEvidence;
+    if (!evidence) {
+      throw new Error(
+        `Tool ${JSON.stringify(name)} declares no evidence, and its family ` +
+          `${JSON.stringify(familyName)} sets no default. Evidence is declared, not inferred: pass ` +
+          "{ evidence } on the tool, or on define.family(). CONTEXT.md defines the three words, and " +
+          "settling one takes a live call rather than an edit.",
+      );
     }
-    if (looksUnobserved) return "projected";
-    return familyEvidence ?? "observed";
+    if (NEVER_OBSERVED.test(description) && evidence !== "projected") {
+      throw new Error(
+        `Tool ${JSON.stringify(name)} is declared evidence "${evidence}" but its own description ` +
+          "says it has not been observed live. One of the two is wrong — and if the description " +
+          "means one FIELD rather than the route, say so in words this check cannot read as a claim " +
+          "about the whole tool.",
+      );
+    }
+    return evidence;
   };
 
   const shapeInputs = (shape: ZodRawShape): ToolRecord["inputs"] =>

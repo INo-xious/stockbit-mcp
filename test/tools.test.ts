@@ -89,7 +89,9 @@ function metaOf(server: McpServer): Record<string, Record<string, unknown> | und
 test("define.read joins the workflow handler map and define.write never does", () => {
   const { server, registered } = stubServer();
   const handlers = new Map<string, ToolHandler>();
-  const define = makeDefiner(server, handlers);
+  // Scoped with a declared evidence, because the root definer declares none and a tool that
+  // declares none either can no longer register. That refusal is the point of the guard.
+  const define = makeDefiner(server, handlers).family("market", { evidence: "observed" });
   const handler: ToolHandler = async () => ({});
 
   define.read("a_read", "reads", { x: z.string() }, handler);
@@ -105,7 +107,7 @@ test("a read is annotated read-only and a write is annotated destructive", () =>
   // gates. They are still asserted: a client that surfaces "this modifies your account" before the
   // call is one more place the user can say no, and it can only do that if the flag is right.
   const { server, registered } = stubServer();
-  const define = makeDefiner(server, new Map());
+  const define = makeDefiner(server, new Map()).family("market", { evidence: "observed" });
   const handler: ToolHandler = async () => ({});
 
   define.read("a_read", "reads", {}, handler);
@@ -120,7 +122,7 @@ test("a read is annotated read-only and a write is annotated destructive", () =>
 
 test("an annotation override applies without losing the write's read-only:false", () => {
   const { server, registered } = stubServer();
-  const define = makeDefiner(server, new Map());
+  const define = makeDefiner(server, new Map()).family("market", { evidence: "observed" });
   define.write("reversible", "writes, but undoably", {}, async () => ({}), { destructiveHint: false });
   assert.equal(registered.get("reversible")!.annotations!.destructiveHint, false);
   assert.equal(registered.get("reversible")!.annotations!.readOnlyHint, false, "it is still a write");
@@ -208,7 +210,7 @@ test("a tool whose description says it has never been observed is tagged project
   // spellings the phrase has across the family modules.
   const surface = describeSurface();
   const contradictions = surface.tools
-    .filter((t) => /PENDING VERIFICATION|not been observed/i.test(t.description) && t.evidence !== "projected")
+    .filter((t) => /PENDING VERIFICATION|(has|have) (not|never) been observed/i.test(t.description) && t.evidence !== "projected")
     .map((t) => `${t.name} is ${t.evidence}`);
   assert.deepEqual(contradictions, []);
 
@@ -340,4 +342,227 @@ test("every order-entry write is in the list the instructions page measures agai
   for (const name of orderish) {
     assert.ok(all.includes(name), `${name} is an order-entry write the instructions never name`);
   }
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The evidence ladder, spelled out.
+ *
+ * Same reasoning as WRITES above and the same rule from CLAUDE.md: deriving this list from the code
+ * would make the test agree with the code, and agreement is not the property. Evidence is a claim
+ * about what somebody actually SAW, so the only honest place for it is a list a human edited.
+ *
+ * It used to be inferred from the description prose, which failed in both directions at once —
+ * `screener_save` widened itself to `read-back` by phrasing its caveat "has NEVER been observed"
+ * where the regex knew only "has NOT been observed", and `company_overview` was downgraded to
+ * `projected` by a sentence about one field's key names. A tool moving between these three lists is
+ * now a deliberate edit in a diff, and moving one UP the ladder takes a live call, not an edit.
+ * ------------------------------------------------------------------ */
+
+const OBSERVED = [
+  "status",
+  "login",
+  "logout",
+  "broker_summary",
+  "broker_distribution",
+  "alert_create",
+  "alert_list",
+  "alert_delete",
+  "alert_check",
+  "pine_script",
+  "stockbit_web",
+  "technicals",
+  "price_chart",
+  "quote",
+  "top_movers",
+  "trending",
+  "sectors",
+  "intraday_prices",
+  "price_performance",
+  "orderbook",
+  "keystats",
+  "ratios",
+  "financials",
+  "sentiment_stream",
+  "chart_settings",
+  "backtest",
+  "strategy_compare",
+  "patterns",
+  "timeframe_alignment",
+  "scan",
+  "price_bands",
+  "watchlist",
+  "screener",
+  "analyze",
+  "position_size",
+  "bandar_detector",
+  "chartbit_layouts",
+  "chartbit_layout",
+  "chartbit_drawings",
+  "chartbit_templates",
+  "chartbit_layout_save",
+  "chartbit_drawings_save",
+  "chartbit_layout_delete",
+  "chartbit_open",
+  "chartbit_draw",
+  "chartbit_clear",
+  "chartbit_shapes",
+  "chartbit_screenshot",
+  "chartbit_save",
+  "chartbit_study",
+  "chartbit_analyze",
+  "workflow_list",
+  "workflow_run",
+];
+
+const READ_BACK = [
+  "watchlist_create",
+  "watchlist_rename",
+  "watchlist_delete",
+  "watchlist_add",
+  "watchlist_remove",
+  "watchlist_favorite",
+  "screener_save",
+  "screener_delete",
+  "screener_favorite",
+];
+
+const PROJECTED = [
+  "stream",
+  "news",
+  "stream_trending",
+  "stream_post_detail",
+  "stream_pinned",
+  "stream_user",
+  "research",
+  "company_overview",
+  "company_profile",
+  "company_contact",
+  "company_subsidiaries",
+  "shareholders",
+  "classification",
+  "index_members",
+  "sector_companies",
+  "symbol_search",
+  "seasonality",
+  "earnings",
+  "analyst_ratings",
+  "peer_comparison",
+  "fundachart",
+  "entitlements",
+  "insider_transactions",
+  "insider_ownership",
+  "shareholding",
+  "ownership_composition",
+  "chart_series",
+  "running_trade",
+  "trade_book",
+  "broker_flow_intraday",
+  "market_movers",
+  "top_stocks",
+  "order_queue",
+  "market_session",
+  "prices_batch",
+  "price_market",
+  "brokers",
+  "broker_activity",
+  "broker_top",
+  "corporate_actions",
+  "dividend_calendar",
+  "calendar_today",
+  "corporate_action_status",
+  "stock_conversion",
+  "ipo_pipeline",
+  "underwriters",
+  "screener_run",
+  "screener_favorites",
+  "screener_finitems",
+  "watchlist_symbols",
+  "watchlist_search",
+  "portfolio",
+  "position",
+  "cash_balance",
+  "orders",
+  "order_detail",
+  "order_history",
+  "trade_performance",
+  "trading_info",
+  "stock_tradable",
+  "account",
+  "trading_status",
+  "order_preview",
+  "order_buy",
+  "order_sell",
+  "order_amend",
+  "order_cancel",
+  "trading_forget",
+  "eipo_list",
+  "eipo_detail",
+  "eipo_status",
+  "eipo_my_order",
+  "eipo_price_groups",
+  "eipo_rdn_balance",
+  "eipo_unboxing",
+  "eipo_order_preview",
+  "eipo_order",
+];
+
+test("every tool's evidence is exactly what this file says it is", () => {
+  const surface = describeSurface();
+  const expected = new Map<string, string>();
+  for (const n of OBSERVED) expected.set(n, "observed");
+  for (const n of READ_BACK) expected.set(n, "read-back");
+  for (const n of PROJECTED) expected.set(n, "projected");
+
+  assert.equal(
+    expected.size,
+    OBSERVED.length + READ_BACK.length + PROJECTED.length,
+    "a name appears in two lists",
+  );
+  assert.equal(surface.tools.length, expected.size, "a tool was added or removed without editing this file");
+
+  const wrong: string[] = [];
+  for (const tool of surface.tools) {
+    const want = expected.get(tool.name);
+    if (want === undefined) wrong.push(`${tool.name}: registered but not listed here`);
+    else if (want !== tool.evidence) wrong.push(`${tool.name}: listed ${want}, registered ${tool.evidence}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("a tool that declares no evidence, in a family that declares none either, cannot register", () => {
+  // The old fallback handed such a tool `"observed"` — the STRONGEST claim on the ladder, for
+  // saying nothing at all. Silence is not evidence.
+  const server = new McpServer({ name: "t", version: "0" });
+  const define = makeDefiner(server, new Map()).family("market");
+  assert.throws(
+    () => define.read("undeclared", "A tool that says nothing about provenance.", {}, async () => ({ content: [] })),
+    /declares no evidence/,
+  );
+});
+
+test("a description that says the route was never observed contradicts any claim above projected", () => {
+  const server = new McpServer({ name: "t", version: "0" });
+  const define = makeDefiner(server, new Map()).family("market", { evidence: "observed" });
+
+  // "never" — the spelling that used to slip past the guard entirely.
+  assert.throws(
+    () => define.read("neverseen", "This route has never been observed live.", {}, async () => ({ content: [] })),
+    /One of the two is wrong/,
+  );
+  // and the spelling it always caught
+  assert.throws(
+    () => define.read("notseen", "This route has not been observed live.", {}, async () => ({ content: [] })),
+    /One of the two is wrong/,
+  );
+  // `projected` agrees with the prose, so it registers.
+  assert.doesNotThrow(() =>
+    define.read(
+      "honest",
+      "PENDING VERIFICATION: this route has never been observed live.",
+      {},
+      async () => ({ content: [] }),
+      { evidence: "projected" },
+    ),
+  );
 });

@@ -84,7 +84,7 @@ Who accumulated and who distributed. The data no other market API has.
 | `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Projected | page, limit |
 | `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Projected | broker_code*, period, market_types, investor_types, sort_by, page, limit |
 | `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Projected | period, sort_by, page, limit |
-| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: total net buy and net sell value for… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
+| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
 
 ## analysis
 

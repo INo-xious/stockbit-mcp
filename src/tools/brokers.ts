@@ -152,26 +152,25 @@ export function registerBrokerTools(define: Definer): void {
   define.read(
     "bandar_detector",
     "A typed accumulation/distribution reading for one IDX stock, computed from the same broker " +
-      "summary broker_summary returns: total net buy and net sell value for the window, the top " +
-      "accumulators and distributors, and how concentrated each side is.\n" +
-      "WHAT IT DOES NOT PROVE, which matters more than the numbers:\n" +
-      "- A broker code is a pipe, not a person. One broker carries thousands of unrelated clients, " +
-      "so 'YP accumulated 40%' means YP's clients did, and they are not one buyer with one plan.\n" +
-      "- The same owner can split orders across several brokers precisely so this reading shows " +
-      "nothing. LOW concentration is therefore not evidence of absence.\n" +
-      "- A single session says very little. Institutions build over weeks, and one day of net " +
-      "buying sits inside ordinary two-way flow. Pass `period` or a from/to window before drawing " +
-      "any conclusion.\n" +
-      "- Nothing here separates accumulation from a client moving between accounts, a market maker " +
-      "hedging, an index fund tracking a reweight, or a pre-agreed block. It returns no verdict, " +
-      "no score and no price forecast.\n" +
-      "READING THE NUMBERS: values are IDR, volumes are LOTS (1 lot = 100 shares). `netValueIdr` " +
-      "is buy minus sell across the listed brokers and is near ZERO on a complete NET table by " +
-      "construction — both sides describe the same trades — so a large magnitude means the table " +
-      "was truncated by `limit` or the request was GROSS, not that the stock was bought up. Reason " +
-      "from `buyValueIdr` / `sellValueIdr` and the two lists.\n" +
-      "Concentration shares are null, never 0, when there is nothing on that side to take a share " +
-      "of — a weekend or a halted stock gives null, which is not 'evenly spread'.\n" +
+      "summary broker_summary returns: net buy and net sell totals for the window, the top " +
+      "accumulators and distributors, and how concentrated each side is. It returns no verdict, no " +
+      "score and no price forecast. A broker code is a pipe carrying thousands of unrelated " +
+      "clients, not a person — the bandar-check skill has the rest of what this cannot prove, and " +
+      "reading it before drawing a conclusion is the difference between flow and a story.\n" +
+      "SIGNS: values are IDR, volumes are LOTS. Sell figures are NEGATIVE — `sellValueIdr`, " +
+      "`sellLots`, and `netValueIdr` on anything in `topDistributors` — because that is how " +
+      "Stockbit sends them. Do not negate them again.\n" +
+      "`netValueIdr` is `buyValueIdr` minus the MAGNITUDE of `sellValueIdr`: how lopsided the two " +
+      "sides are, not how much was bought. Near zero is the normal reading of a complete NET " +
+      "table, since both sides describe the same trades from opposite ends. A large magnitude " +
+      "means they do not cover the same trades — usually truncation, sometimes GROSS. `limit` " +
+      "applies PER SIDE, so equal list lengths prove nothing; check whether `buyersListed` or " +
+      "`sellersListed` has REACHED `limit`, and if so raise it and see whether the totals move.\n" +
+      "`topDistributors` is largest seller FIRST, by size of flow. Concentration shares are " +
+      "fractions of one side taken on magnitudes, so both sides are positive; a null share means " +
+      "the question cannot be asked — that side is empty, or none of its figures could be read.\n" +
+      "`unreadable.buyers` / `.sellers` count listed brokers left out of that side's totals, so " +
+      "`buyers: 1` against `buyersListed: 16` means every buy figure covers 15 brokers.\n" +
       "Broker codes come back bare; the `brokers` tool turns them into names.\n" +
       "DATES: omit from/to for the latest session, or supply BOTH (YYYY-MM-DD). A half-specified " +
       "range is rejected because the API would silently answer with the latest session instead.",
@@ -234,5 +233,9 @@ export function registerBrokerTools(define: Definer): void {
           end_date: a.end_date,
         }),
       ),
+    // Opts out of this scope's `projected` default. It issues no request of its own — it computes
+    // entirely on `getBrokerSummary`, whose route IS observed and whose response is the fixture
+    // committed at test/fixtures/broker_summary_BBRI.json.
+    { evidence: "observed" },
   );
 }
