@@ -290,9 +290,15 @@ export interface BrokerFlowInput {
  * fewer brokers, where the share is 1.0 by construction and carries no information at all.
  */
 export function excessConcentration(
-  rows: Array<{ netValueIdr: number }>,
+  rows: Array<{ netValueIdr?: number }>,
 ): { share: number; excess: number } | null {
-  const magnitudes = rows.map((r) => Math.abs(r.netValueIdr)).sort((a, b) => b - a);
+  // A row whose figure could not be read is dropped, not read as zero: an unreadable broker is not
+  // a broker that netted nothing, and counting it as one would deflate every share below.
+  const magnitudes = rows
+    .map((r) => r.netValueIdr)
+    .filter((v): v is number => v !== undefined)
+    .map(Math.abs)
+    .sort((a, b) => b - a);
   const total = sum(magnitudes);
   if (total <= 0) return null;
 
@@ -369,8 +375,10 @@ export function brokerFlowPillar(input: BrokerFlowInput): Pillar {
             ? "the buy side"
             : "the sell side";
       notes.push(
-        `Broker concentration not read: ${why} had three or fewer brokers, or no net value at all. ` +
-          "A top-3 share over three brokers is 1.0 by arithmetic and measures nothing.",
+        `Broker concentration not read: ${why} had three or fewer brokers whose net value could be ` +
+          "read, or no net value at all. A top-3 share over three brokers is 1.0 by arithmetic and " +
+          "measures nothing. A broker whose figure Stockbit sent unreadably is not counted here, so " +
+          "this can differ from the broker counts reported beside it.",
       );
     }
   } else {
