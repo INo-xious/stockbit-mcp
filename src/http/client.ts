@@ -5,7 +5,10 @@
  *   - on 401: refresh that domain once and retry the request a single time
  *   - recognise a Cloudflare challenge before it is mistaken for an entitlement refusal
  *   - normalize errors via the grpc-gateway envelope mapper
- *   - never leak secrets (redaction is applied to all thrown errors)
+ *   - never leak secrets — though the redaction itself is NOT here: `StockbitError`'s constructor
+ *     calls `redact()` (`src/http/errors.ts`), so every message this module throws is scrubbed on
+ *     the way in. Worth knowing, because it means the guarantee is only ever as good as
+ *     `src/redact.ts`, and `String(err)` on line ~126 hands it a foreign error verbatim.
  *
  * It does not construct the request. Host, method, path, headers, credential placement and redirect
  * policy belong to `src/http/transport.ts` (ADR-0002); callers name a route from the closed table

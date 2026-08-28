@@ -104,7 +104,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const interval = Number(value("interval") ?? 60) * 1000;
+  // Refused rather than coerced. `Number("abc")` is NaN, and a NaN delay is not a long wait — Node
+  // clamps it to 1 ms, so a typo turned an every-60-seconds daemon into a tight polling loop
+  // against Stockbit's API. A number that is not a number is a mistake worth stopping for.
+  const rawInterval = value("interval");
+  const seconds = rawInterval === undefined ? 60 : Number(rawInterval);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    console.error(
+      `--interval must be a positive number of seconds; got ${JSON.stringify(rawInterval)}.`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const interval = seconds * 1000;
   const rules = loadRules().filter((r) => r.enabled);
   console.log(
     `stockbit-alerts watching ${rules.length} rule(s), every ${interval / 1000}s` +
