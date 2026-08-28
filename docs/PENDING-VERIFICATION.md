@@ -16,6 +16,76 @@
 | `/charts/{SYMBOL}` | **Resolved: the spelling was the problem.** The web client calls `/charts/{SYM}/daily?timeframe=1w\|1m\|3m\|ytd\|1y\|3y\|5y` — LOWERCASE, with `is_include_previous_historical=true` on `ytd` and `1w`. Every earlier probe sent an uppercase spelling (`1D`, `DAILY`, `TIMEFRAME_DAILY`) and was rejected, which is why the route looked real-but-unusable for months. Wired and covered by tests; a whole series now costs one request instead of the 12-row paged walk. |
 | Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Custom screens exist on the probed account and run. |
 
+## Probed live on 2026-08-29
+
+A second live pass, against a real account, with the market shut (Friday night WIB). 57 tools called
+once each; key names recorded, values never. What it settled, and what it broke open:
+
+### Settled — 14 tools moved from `projected` to `observed`
+
+`company_subsidiaries` · `index_members` · `symbol_search` · `classification` ·
+`corporate_actions` · `corporate_action_status` · `dividend_calendar` · `ipo_pipeline` ·
+`insider_transactions` · `screener_favorites` · `screener_finitems` · `stream` · `news`
+
+The bar was not "the route answered". It was: rows came back AND every field the tool names was read
+out of them. `index_members` returning exactly 45 rows for LQ45 is the kind of agreement that settles
+a mapping; a 200 with an empty page is not, and six tools that answered emptily stayed `projected`
+(`company_contact`, `stream_pinned`, `prices_batch`, `broker_activity`, `research`, `calendar_today`).
+
+`analyst_ratings` was promoted and then DEMOTED again before the commit. It returns two halves and
+its own note said "neither response shape has been observed"; the probe found an array of three, and
+nothing in that result says which half it was. A claim that cannot be told apart from the wrong claim
+is not evidence.
+
+### Broken, and not previously known to be
+
+Every one of these is a live 4xx or a parse failure on the tool's own documented arguments. They are
+NOT evidence problems — the mapping cannot be settled because the request never succeeds.
+
+| Tool | What the server actually said |
+|---|---|
+| `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;` |
+| `stock_conversion` | 400 `Page is a required field;Limit is a required field;` — works when both are passed |
+| `watchlist_search` | 400 `WatchlistID is a required field;` — the tool takes only `keyword` |
+| `order_queue` | 400 `Stock code is required` — with `symbol` supplied, so it is not being forwarded |
+| `shareholding` | 400 `Invalid company id` — a ticker is passed where a numeric company id is wanted |
+| `underwriters` | 404 `Unrecognized Command` — the route does not exist |
+| `price_market` | 400 `Silahkan Periksa permintaan` |
+| `stream_trending` | 400 `Silakan periksa konten anda` |
+| `shareholders` | schema drift: the token endpoint returned no token-shaped field (top-level keys: `message`, `data`) |
+| `chart_series` | schema drift: points carry no recognisable close field. Keys present: `date`, `formatted_date`, `xlabel`, `value`, `percentage`, `change`, `open`, `high`, `low`. `raw: true` succeeds |
+
+Three more that are not errors but are not right either:
+
+- **`stream_user` names 1 of 60 wire keys.** `src/core/stream.ts:127` says four named fields are the
+  design; this route delivers one. The `/stream/non-login/user/:username` envelope differs from the
+  others and the projection does not reach it.
+- **`brokers` and `broker_top` return ~53 KB and report `count: 0`.** The payload is there; the row
+  locator does not find it.
+- **`broker_flow_intraday` returns 1.1 MB** with nothing extracted. That is a tool result a model is
+  meant to read.
+
+### Blocked, and by what
+
+- **The trading host — still nothing observed.** Needs the six-digit PIN at the account owner's own
+  terminal. Nine reads returned the same honest auth refusal.
+- **e-IPO — `eipo_list`, `eipo_price_groups`, `eipo_rdn_balance` all 404 `Unrecognized Command`.**
+  The routes are wrong. The browser's own traffic during login named the real ones:
+  `GET /eipo/social/company/list?filter=ongoing`, `GET /auth/eipo/webview/link` and
+  `POST /partner/eipo/access_token`, all on `api-sekuritas.stockbit.com`.
+- **The six intraday feeds** — the market was shut. An empty tape settles nothing.
+
+### Two defects in the login path itself, found by using it
+
+1. **`bin/stockbit-auth.ts` opened `https://stockbit.com/trade` for the browser trading login.**
+   That path is a Stockbit *username* route, so it lands on a profile page and the PIN form is never
+   shown. Reported by the account owner, who read the page.
+2. **The already-signed-in harvest tier was slot-blind.** `harvestFromBrowser` reads
+   `credentialStorage` — the stockbit.com web session, a market-data credential by construction —
+   and `accept()` wrote it to whatever slot was asked for. `trading-login --browser` therefore stored
+   a MAIN token in the SECURITIES slot and printed "Trading session captured"; only the test refresh
+   afterwards produced the 401. The `slot` guard was one-directional. Fixed, and pinned by a test.
+
 ## Still open
 
 ### Unmapped orderbook fields

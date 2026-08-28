@@ -53,9 +53,7 @@ export function registerStreamTools(define: Definer): void {
       "stand alone; an inverted pair is rejected.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the market-wide stream."),
       category: z.enum(stream.STREAM_CATEGORIES).optional().describe("Wire spelling, case-sensitive. Omitted = Stockbit's default feed."),
@@ -85,7 +83,10 @@ export function registerStreamTools(define: Definer): void {
         symbol === undefined || symbol === "" ? stream.getStream(query) : stream.getSymbolStream(symbol, query),
       );
     },
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "news",
@@ -101,9 +102,7 @@ export function registerStreamTools(define: Definer): void {
       "from_date/to_date are YYYY-MM-DD and calendar-checked.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for market-wide news."),
       keyword: z.string().optional().describe("Full-text search over headlines and body."),
@@ -123,7 +122,10 @@ export function registerStreamTools(define: Definer): void {
           lastStreamId: a.last_stream_id as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "stream_trending",

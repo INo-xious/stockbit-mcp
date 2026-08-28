@@ -64,7 +64,7 @@ export function registerScreenerTools(define: Definer): void {
   define.read(
     "screener_favorites",
     "The screens the user has marked as favourites.\n" +
-      "PENDING: this route has not been probed. The rows are returned as they arrive, under `rows`, " +
+      "The rows are returned as they arrive, under `rows`, " +
       "with `foundAt` naming the response key they came from. `rows: null` means no list was found " +
       "where one was looked for — not that there are no favourites — and the raw body is attached so " +
       "the shape can be reported. `count: 0` with `rows: []` is the real \"none\".\n" +
@@ -72,18 +72,24 @@ export function registerScreenerTools(define: Definer): void {
       "verified, so use that if this answers oddly.",
     {},
     async () => runTool(() => core.getScreenerFavorites()),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "screener_finitems",
     "Stockbit's fin-item watchlist: the financial-statement line items saved for use as screener " +
       "columns. These are not stocks and not a watchlist of tickers.\n" +
-      "PENDING: this route has not been probed and what a row means is not confirmed, so rows are " +
-      "returned unprojected rather than renamed into fields that would be a guess. `rows: null` means " +
-      "the list was not found, not that it is empty.",
+      "A row carries `fitem_id` and `fitem_name`, and nothing is renamed beyond that: what a line " +
+      "item MEANS is Stockbit's own accounting vocabulary, not something this server can restate. " +
+      "`rows: null` means the list was not found, not that it is empty.",
     {},
     async () => runTool(() => core.getScreenerFinItems()),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "watchlist_symbols",

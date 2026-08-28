@@ -29,8 +29,7 @@ export function registerCorpactionTools(define: Definer): void {
       "action. `action_type` is a closed list and an unknown one is rejected here rather than sent, " +
       "because the endpoint answers an unknown kind with an empty page that reads like a quiet " +
       "calendar.\n" +
-      "For dividends prefer `dividend_calendar`, which also covers stock dividends. " +
-      UNVERIFIED,
+      "For dividends prefer `dividend_calendar`, which also covers stock dividends. ",
     {
       action_type: z.enum(core.CORPACTION_TYPES).describe("Which action kind, e.g. dividend, rightissue, rups"),
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the whole market"),
@@ -44,7 +43,10 @@ export function registerCorpactionTools(define: Definer): void {
           a.limit as number | undefined,
         ),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "dividend_calendar",
@@ -59,15 +61,17 @@ export function registerCorpactionTools(define: Definer): void {
       "here. If it is null, no candidate was present and the rows are in Stockbit's own order, NOT " +
       "chronological. Rows with no readable ex-date keep `exDate: null`, are counted in `undated`, " +
       "and are placed last rather than dropped.\n" +
-      "`limit` applies to each kind separately, so the merged list can hold up to twice it. " +
-      UNVERIFIED,
+      "`limit` applies to each kind separately, so the merged list can hold up to twice it. ",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the whole market"),
       limit: z.coerce.number().optional().describe("Max rows PER KIND (cash and stock fetched separately)"),
     },
     async (a) =>
       runTool(() => core.getDividendCalendar(a.symbol as string | undefined, a.limit as number | undefined)),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "calendar_today",
@@ -117,15 +121,17 @@ export function registerCorpactionTools(define: Definer): void {
       "and NOT as a confirmed clean bill: the matching is done by value (a row belongs to a symbol " +
       "if one of its fields equals that ticker) because the response's field names are unverified, " +
       "so a deeply nested row would also land a symbol in `unanswered`.\n" +
-      "Symbols are deduped and normalised before sending. " +
-      UNVERIFIED,
+      "Symbols are deduped and normalised before sending. ",
     {
       symbols: z
         .array(z.string())
         .describe("IDX tickers, e.g. [\"BBRI\",\"GOTO\"]. A single comma-joined string also works"),
     },
     async (a) => runTool(() => core.getCorpactionStatus(a.symbols as string[])),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "stock_conversion",
@@ -158,13 +164,15 @@ export function registerCorpactionTools(define: Definer): void {
       "one action kind that is about companies not yet listed, so no symbol filter applies. An " +
       "empty list means Stockbit is showing no IPOs right now, which is an ordinary state between " +
       "offerings, not an error. Pair it with `underwriters` for the track record of the houses " +
-      "running a deal. " +
-      UNVERIFIED,
+      "running a deal. ",
     {
       limit: z.coerce.number().optional().describe("Max rows. Omitted entirely when not given"),
     },
     async (a) => runTool(() => core.getCorpactions("ipo", undefined, a.limit as number | undefined)),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "underwriters",
