@@ -104,9 +104,14 @@ export const NEWS_CATEGORY: StreamCategory = "STREAM_CATEGORY_NEWS";
 const Post = z
   .object({
     stream_id: StrOrNum.optional(),
+    /** `/stream/non-login/user/:username` spells the id, the timestamp and the author differently. */
+    postid: StrOrNum.optional(),
     content: z.string().optional(),
     content_original: z.string().optional(),
     created_at: z.string().optional(),
+    created: z.string().optional(),
+    username: z.string().optional(),
+    fullname: z.string().optional(),
     user: z
       .object({ username: z.string().optional(), fullname: z.string().optional() })
       .passthrough()
@@ -140,10 +145,14 @@ function projectItem(row: unknown): StreamItem {
   if (!parsed.success) return { raw: row };
   const p = parsed.data;
   return {
-    id: p.stream_id,
+    // The per-symbol route nests the author and spells the id `stream_id`; the user route sends
+    // `postid`, `created` and a FLAT username. Settled live on 2026-08-29: before this, a user row
+    // matched one of the four named fields out of sixty wire keys, and the other three read as
+    // absent rather than as "spelled differently here".
+    id: p.stream_id ?? p.postid,
     content: p.content_original ?? p.content,
-    createdAt: p.created_at,
-    author: p.user?.username ?? p.user?.fullname,
+    createdAt: p.created_at ?? p.created,
+    author: p.user?.username ?? p.user?.fullname ?? p.username ?? p.fullname,
     raw: row,
   };
 }

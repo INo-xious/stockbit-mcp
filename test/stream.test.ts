@@ -492,3 +492,30 @@ test("a post that carries its replies under `stream` returns the POST, not the f
   assert.equal(detail.source, "data");
   assert.equal(detail.post?.id, "15731234", "the reply list was mistaken for the post");
 });
+
+test("the user route's own spellings map, not just its content", async () => {
+  // /stream/non-login/user/:username sends `postid`, `created` and a FLAT username — where the
+  // per-symbol route sends `stream_id`, `created_at` and a nested `user`. Settled live on
+  // 2026-08-29: before this, a user row matched ONE of the four named fields out of sixty wire
+  // keys, and the other three read as absent rather than as "spelled differently here".
+  clearCache();
+  bodies.set(P.user, {
+    data: [
+      {
+        postid: 35259019,
+        content: "EMAS: Rugi Bersih US$14,9",
+        content_original: "EMAS: Rugi Bersih US$14,9",
+        created: "2026-08-28 19:53:36",
+        username: "Stockbit",
+        fullname: "Stockbit Official",
+      },
+    ],
+  });
+  const page = await getUserStream("budi.trader");
+  assert.equal(page.items.length, 1);
+  const item = page.items[0];
+  assert.equal(item.id, "35259019");
+  assert.equal(item.createdAt, "2026-08-28 19:53:36");
+  assert.equal(item.author, "Stockbit");
+  assert.ok(item.content?.startsWith("EMAS"));
+});

@@ -31,8 +31,7 @@ export function registerBrokerTools(define: Definer): void {
       "One page covers the whole exchange at the default limit of 150, so call it once and reuse " +
       "the mapping; it is cached for five minutes and the membership list changes only when a " +
       "house is licensed or renamed.\n" +
-      "PENDING VERIFICATION: this route has not been observed live, so field names are projected " +
-      "defensively. Each entry carries `code` and `name` where a recognised key held them, " +
+      "Each entry carries `code` and `name` where a recognised key held them, " +
       "`readFrom` naming the wire key each was read from, and `row` with the entire raw row. If " +
       "`code` is undefined the projection did not recognise this row's key names — read `row` " +
       "directly and report `unmapped.sampleKeys`, which lists what the row actually contained.\n" +
@@ -46,7 +45,10 @@ export function registerBrokerTools(define: Definer): void {
     },
     async (a) =>
       runTool(() => brokers.getBrokerDirectory({ page: a.page, limit: a.limit })),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "broker_activity",
@@ -122,7 +124,7 @@ export function registerBrokerTools(define: Definer): void {
       "Board and investor-class filters are deliberately NOT offered here: they are documented for " +
       "the broker_activity route and only for it, and a filter this endpoint quietly ignores would " +
       "widen the answer without saying so. Use broker_activity when you need them.\n" +
-      "PENDING VERIFICATION: this route has not been observed live. Each entry carries `code` and " +
+      "Each entry carries `code` and " +
       "`name` where a recognised key held them, `readFrom` naming those keys, and the whole raw " +
       "row under `row` — the value, volume and frequency figures are in there under names that " +
       "have not been confirmed, so read them from `row`.\n" +
@@ -147,7 +149,10 @@ export function registerBrokerTools(define: Definer): void {
       runTool(() =>
         brokers.getBrokerTop({ period: a.period, sortBy: a.sort_by, page: a.page, limit: a.limit }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "bandar_detector",

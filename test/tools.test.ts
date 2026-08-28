@@ -360,6 +360,10 @@ test("every order-entry write is in the list the instructions page measures agai
  * ------------------------------------------------------------------ */
 
 const OBSERVED = [
+  "brokers",
+  "broker_top",
+  "chart_series",
+  "stream_user",
   "status",
   "login",
   "logout",
@@ -445,7 +449,6 @@ const PROJECTED = [
   "stream_trending",
   "stream_post_detail",
   "stream_pinned",
-  "stream_user",
   "research",
   "company_overview",
   "company_profile",
@@ -460,7 +463,6 @@ const PROJECTED = [
   "insider_ownership",
   "shareholding",
   "ownership_composition",
-  "chart_series",
   "running_trade",
   "trade_book",
   "broker_flow_intraday",
@@ -470,9 +472,7 @@ const PROJECTED = [
   "market_session",
   "prices_batch",
   "price_market",
-  "brokers",
   "broker_activity",
-  "broker_top",
   "calendar_today",
   "stock_conversion",
   "underwriters",

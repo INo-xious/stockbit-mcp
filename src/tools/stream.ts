@@ -208,9 +208,7 @@ export function registerStreamTools(define: Definer): void {
       "\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       username: z.string().describe("Stockbit handle, e.g. some_user"),
       limit: z.coerce.number().optional().describe("Max rows."),
@@ -223,7 +221,10 @@ export function registerStreamTools(define: Definer): void {
           lastStreamId: a.last_stream_id as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "research",

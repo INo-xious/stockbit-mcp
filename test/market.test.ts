@@ -420,7 +420,9 @@ test("order queue prefixes the sort key and does not double it", async () => {
   await getOrderQueue({ symbol: "bbri", sortBy: "lot", limit: 20 });
   const url = lastUrl("/order-queue");
   assert.equal(url.pathname, "/order-trade/order-queue");
-  assert.deepEqual(query(url), ["limit=20", "sort_by=SORT_BY_LOT", "symbol=BBRI"]);
+  // `stock_code`, not `symbol`. Settled against the live endpoint on 2026-08-29: every other
+  // spelling returns 400 "Stock code is required", so this tool had never returned data.
+  assert.deepEqual(query(url), ["limit=20", "sort_by=SORT_BY_LOT", "stock_code=BBRI"]);
 
   assert.equal(normalizeSortKey("SORT_BY_QUEUE"), "SORT_BY_QUEUE");
   assert.equal(normalizeSortKey("price"), "SORT_BY_PRICE");
@@ -572,4 +574,28 @@ test("keyFor separates param sets that a value-aware sort could tie", () => {
   // And a different value is always a different key.
   assert.notEqual(keyFor("quote", { limit: 5 }), keyFor("quote", { limit: 50 }));
   assert.notEqual(keyFor("quote", { limit: 5 }), keyFor("orderbook", { limit: 5 }));
+});
+
+test("the daily chart carries its close in `value`, and empty OHL is reported as flat", async () => {
+  // The live /charts/:symbol/daily payload, verbatim in shape: no `close` key at all, and
+  // open/high/low/volume present but EMPTY. Before 2026-08-29 this threw "no recognisable close
+  // field"; the arithmetic that identifies `value` as the price is change/value = percentage,
+  // 20/2930 = 0.68%.
+  responder = () => ({
+    data: {
+      chart: [
+        { date: "1785171600000", formatted_date: "2026-07-28", value: "2930", percentage: "-0.68", change: -20, open: "", high: "", low: "", volume: "" },
+        { date: "1785258000000", formatted_date: "2026-07-29", value: "2950", percentage: "0.68", change: 20, open: "", high: "", low: "", volume: "" },
+      ],
+    },
+  });
+  const series = await getSeriesBars("bbri", "1m");
+  assert.equal(series.mapped.close, "value", "the close is read from `value`");
+  assert.equal(series.bars.length, 2);
+  assert.equal(series.bars[0].close, 2930);
+  // Present-but-empty must be as loud as absent: every candle here is flat.
+  assert.ok(
+    series.warnings.some((w) => /open\/high\/low/.test(w)),
+    "a flat series must say so even when the keys were present and empty",
+  );
 });

@@ -21,7 +21,7 @@
 A second live pass, against a real account, with the market shut (Friday night WIB). 57 tools called
 once each; key names recorded, values never. What it settled, and what it broke open:
 
-### Settled — 14 tools moved from `projected` to `observed`
+### Settled — 18 tools moved from `projected` to `observed`
 
 `company_subsidiaries` · `index_members` · `symbol_search` · `classification` ·
 `corporate_actions` · `corporate_action_status` · `dividend_calendar` · `ipo_pipeline` ·
@@ -60,10 +60,31 @@ Three more that are not errors but are not right either:
 - **`stream_user` names 1 of 60 wire keys.** `src/core/stream.ts:127` says four named fields are the
   design; this route delivers one. The `/stream/non-login/user/:username` envelope differs from the
   others and the projection does not reach it.
-- **`brokers` and `broker_top` return ~53 KB and report `count: 0`.** The payload is there; the row
-  locator does not find it.
-- **`broker_flow_intraday` returns 1.1 MB** with nothing extracted. That is a tool result a model is
-  meant to read.
+- **`broker_flow_intraday` returns 1.1 MB** of unprojected payload. Not a mapping fault — it is
+  `getRunningTradeChart` returning what it is asked for — but it is a tool result a model is meant
+  to read, and 1.1 MB is not readable.
+
+RETRACTED, and left here rather than deleted: an earlier pass recorded `brokers` and `broker_top` as
+returning ~53 KB while reporting `count: 0`. That was wrong, and the fault was in the probe, not the
+server — a provenance extractor that took the first `count` it found at any depth rather than the
+one on the result. Checked directly, `brokers` maps 112 rows and `broker_top` maps 89, both with
+`readFrom` populated. Both are now `observed`.
+
+### Fixed in the same pass
+
+| Tool | What was wrong | How it was settled |
+|---|---|---|
+| `order_queue` | sent `symbol`; the endpoint wants `stock_code` | `symbol`, `code`, `emiten_code`, `stockCode` and `company` each returned 400 "Stock code is required"; `stock_code` answered. The tool had never once returned data. |
+| `chart_series` | no `close` key on the wire, so the whole series was refused | the daily route carries the price in `value`. Proven by arithmetic on the payload rather than by assumption: a BBRI point read `value: "2930"`, `change: -20`, `percentage: "-0.68"`, and 20/2930 = 0.68%. |
+| `chart_series` | flat candles with NO warning | open/high/low/volume arrive as EMPTY STRINGS. The keys are present, so `unmapped` stayed clean and the flat-candle warning never fired, while `numberish("")` returned null and every bar silently took its close for all three. A field that reads null on every row now counts as flat. |
+| `stream_user` | named 1 of its 4 fields | `/stream/non-login/user/:username` spells them `postid`, `created` and a FLAT `username`/`fullname`, where the per-symbol route uses `stream_id`, `created_at` and a nested `user`. All four now map. |
+
+Four more tools moved to `observed` on the strength of these: `brokers`, `broker_top`,
+`chart_series` and `stream_user` — 18 in total across the day.
+
+`order_queue` stayed `projected` on purpose. The route is proven and the request is now correct, but
+it answered `{"orders": [], "is_open_market": false}` with the market shut, so no row ever exercised
+the mapping. A working request is not a settled field map.
 
 ### Blocked, and by what
 
