@@ -12,6 +12,22 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Security
 
+- **`trading-login --browser` stored a MAIN token in the SECURITIES slot and called it success.**
+  The already-signed-in ladder harvests the browser's own credential out of `credentialStorage` —
+  which is the stockbit.com web session, so what it returns is a market-data token *by
+  construction*. `accept()` then wrote it to whatever slot the caller asked for. The trading login
+  asks for `securities`, so a main-domain token landed under the securities name and the CLI printed
+  "Trading session captured."; the 401 surfaced only on the test refresh that runs afterwards,
+  leaving a poisoned slot that fails every trading read until someone runs `trading-logout`.
+
+  The `slot` option's own doc stated the invariant in one direction only — "the `--browser` trading
+  login captures a carina token, which must NOT land in the main slot" — and three guards enforce
+  exactly that. Nothing guarded the reverse. The harvest tier now runs only for `main`, which is the
+  only slot it can honestly fill, and an inner-closure invariant is pinned by a test the way the
+  CDP-domain restriction above it is.
+
+  Found by running the command, not by reading it.
+
 - **`confirm: true` could skip the human entirely, and now cannot.** The order gate opened with
   `let via = options.confirm === true ? "explicit" : null`, and every later gate — including MCP
   elicitation, the only channel in this protocol that reaches a *person* rather than a model — was
@@ -128,6 +144,14 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
   only place it is visible.
 
 ### Fixed
+
+- **The browser trading login opened a stranger's profile page.** `startUrl` was
+  `https://stockbit.com/trade`, and `/trade` is a Stockbit *username* route — so the window landed on
+  whichever account owns that handle, the PIN form was never shown, and the capture then sat waiting
+  for a carina response that could not arrive. Reported by an account owner who simply read the page
+  they were sent to. The real trading URL is recorded nowhere in this repo and guessing a second one
+  would repeat the mistake, so the command now opens the site, says in words to go to the trading
+  page and enter the PIN there, and takes `STOCKBIT_TRADING_URL` from anyone who knows the exact page.
 
 - **`bandar_detector` was wrong on real data, and the test suite was hiding it.** The Stockbit
   broker wire signs the sell side negative — every one of the 25 sell rows in the captured
@@ -250,6 +274,26 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
   wording and one test surface.
 
 ### Changed
+
+- **14 tools moved from `projected` to `observed`, settled by live calls on 2026-08-29.**
+  `company_subsidiaries`, `index_members`, `symbol_search`, `classification`, `corporate_actions`,
+  `corporate_action_status`, `dividend_calendar`, `ipo_pipeline`, `insider_transactions`,
+  `screener_favorites`, `screener_finitems`, `stream` and `news`. The bar was not "the route
+  answered" but "rows came back and every field the tool names was read out of them" — `index_members`
+  returning exactly 45 rows for LQ45 is the kind of agreement that settles a mapping. Six tools that
+  answered with an empty page stayed `projected`, because an empty page proves a route and not a
+  field name.
+
+  `analyst_ratings` was promoted and then demoted again before this landed. It fetches two halves and
+  its own note said "neither response shape has been observed"; the probe found an array of three
+  rows and nothing in the result says which half produced it. A claim that cannot be distinguished
+  from the wrong claim is not evidence.
+
+  The same pass found ten tools that fail on their own documented arguments — four of them naming the
+  exact missing parameter in the server's reply — plus three that succeed while extracting almost
+  nothing, and confirmed the three e-IPO routes return 404. All of it is written down in
+  [`docs/PENDING-VERIFICATION.md`](docs/PENDING-VERIFICATION.md) with the server's own words, because
+  the next person to look should not have to re-run the account to find out.
 
 - **The tool surface stopped restating itself.** Forty-six sentences appeared verbatim in more than
   one tool description — 28,237 characters, about 7,000 tokens, spent saying the same eight things
