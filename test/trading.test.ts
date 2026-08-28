@@ -28,6 +28,8 @@ import { settingsPath, defaultSettings, tradingPolicy } from "../src/settings.ts
 import { clearTickets, peek, resetClock, setClock, take, TICKET_TTL_MS } from "../src/trading/tickets.ts";
 import { idr, nearestTicks, previewOrder, tickSize } from "../src/trading/preview.ts";
 import { orderBody, orderLogPath, placeBuy, placeSell, cancelOrder, submitOrder } from "../src/trading/orders.ts";
+import { describeRemember, forgetRemember, REMEMBER_TTL_MS } from "../src/trading/remember.ts";
+import { resolveConfirmation } from "../src/trading/confirmation.ts";
 import { registerTradingTools } from "../src/tools/trading.ts";
 import type { Definer, ToolHandler } from "../src/tools/_define.ts";
 
@@ -175,6 +177,9 @@ function setPolicy(trading: Partial<ReturnType<typeof defaultSettings>["trading"
 beforeEach(() => {
   clearCache();
   clearTickets();
+  // A "don't ask again" is process memory, so it would otherwise leak from one test into the next
+  // and make a later test pass for the wrong reason.
+  forgetRemember();
   resetClock();
   resetSession();
   getStore("main").set("MAIN-REFRESH");
@@ -395,9 +400,14 @@ test("autoConfirm covers an order under the cap and refuses one over it", async 
   const result = await placeBuy({ ticketId: small.id });
   assert.equal(result.outcome, "ok");
 
+  // Refused on the ticket's own `value_within_cap` check rather than on autoConfirm's, and the
+  // change of message is deliberate. `maxOrderValueIdr` is BOTH caps — the one autoConfirm is
+  // bounded by and the one the preview checks — so an order over it can never be placed, and the
+  // old wording ("Ask the user and pass confirm: true") was advice that could not have worked. The
+  // refusal now names the thing that actually blocks it.
   setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 1_000_000 });
   const big = await buyTicket();
-  await refuses(() => placeBuy({ ticketId: big.id }), /autoConfirm covers orders up to Rp 1,000,000/);
+  await refuses(() => placeBuy({ ticketId: big.id }), /value_within_cap — Rp 2,050,000 exceeds/);
 });
 
 test("an expired ticket is refused at the write, not repriced", async () => {
@@ -592,9 +602,23 @@ test("every attempt appends one line, and the line names the outcome and how it 
   assert.ok(lines.length > before - 1);
   const entry = JSON.parse(lines[lines.length - 1]);
   assert.equal(entry.outcome, "ok");
-  assert.equal(entry.via, "explicit");
+  // NOT "explicit". That value used to mean two different things — "a person clicked yes" and "a
+  // model asserted one had" — and an audit trail whose vocabulary cannot tell those apart is the
+  // defect ADR-0010 is about. No `elicit` is wired into this harness, so nobody was asked, and the
+  // line says exactly that.
+  assert.equal(entry.via, "explicit-unelicited");
+  assert.equal(entry.elicitation, "unavailable");
   assert.equal(entry.symbol, "BBRI");
   assert.equal(entry.shares, 500);
+});
+
+test("the audit vocabulary no longer contains the word that conflated two things", async () => {
+  // Pinned as a property of the whole file rather than of one line: `via: "explicit"` must not be
+  // reachable by any path, because its whole problem was that it was reachable by two.
+  const ticket = await buyTicket();
+  await placeBuy({ ticketId: ticket.id, confirm: true });
+  const contents = readFileSync(orderLogPath(), "utf8");
+  assert.equal(/"via":"explicit"/.test(contents), false, "no line may claim the old, ambiguous value");
 });
 
 test("the log never carries a credential", async () => {
@@ -607,14 +631,35 @@ test("the log never carries a credential", async () => {
 
 /* ---------------------------------- elicitation ---------------------------------- */
 
+/**
+ * The human channel, as the gate sees it.
+ *
+ * `answers` is the sequence of replies, one per call, so a test can drive two orders through one
+ * harness. `calls` is what proves the ask HAPPENED — which, since ADR-0010, is as much of the
+ * property as the answer is.
+ */
+function fakeElicit(...answers: Array<"accepted" | "declined" | "unavailable" | { remember: true }>) {
+  const calls: Array<{ message: string; prompt?: Record<string, unknown> }> = [];
+  let index = 0;
+  const elicit = async (message: string, prompt?: Record<string, unknown>) => {
+    calls.push({ message, prompt });
+    const answer = answers[Math.min(index++, answers.length - 1)];
+    return typeof answer === "string"
+      ? { answer, remember: false }
+      : { answer: "accepted" as const, remember: true };
+  };
+  return { elicit, calls };
+}
+
 test("an elicited yes is a confirmation; an elicited no is a refusal", async () => {
   const accepted = await buyTicket();
-  const result = await submitOrder({ ticketId: accepted.id, elicit: async () => "accepted" });
+  const result = await submitOrder({ ticketId: accepted.id, elicit: fakeElicit("accepted").elicit });
   assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "accepted");
 
   const declined = await buyTicket();
   await refuses(
-    () => submitOrder({ ticketId: declined.id, elicit: async () => "declined" }),
+    () => submitOrder({ ticketId: declined.id, elicit: fakeElicit("declined").elicit }),
     /declined this order/,
   );
 });
@@ -622,9 +667,485 @@ test("an elicited yes is a confirmation; an elicited no is a refusal", async () 
 test("a client that cannot ask does not become a client that cannot be refused", async () => {
   const ticket = await buyTicket();
   await refuses(
-    () => submitOrder({ ticketId: ticket.id, elicit: async () => "unavailable" }),
+    () => submitOrder({ ticketId: ticket.id, elicit: fakeElicit("unavailable").elicit }),
     /Refusing to send an order without confirmation/,
   );
+});
+
+/* ------------------------- elicitation is decisive (ADR-0010) ------------------------- */
+
+test("confirm: true CANNOT skip a declined elicitation — the reporter's PoC, as a unit test", async () => {
+  // This is the whole defect. `via` used to be seeded from `options.confirm`, and every later gate
+  // — including the only channel that reaches a person — was behind `if (!via)`. So a model that
+  // set confirm: true was never asking anyone, and the audit line said "explicit" either way.
+  const ticket = await buyTicket();
+  const asked = fakeElicit("declined");
+  await refuses(
+    () => submitOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
+    /declined this order/,
+  );
+  assert.equal(asked.calls.length, 1, "the human MUST have been asked, confirm: true notwithstanding");
+});
+
+test("the PoC reproduces in paper mode too, which is where it was reported", async () => {
+  setPolicy({ mode: "paper" });
+  const ticket = await buyTicket();
+  const asked = fakeElicit("declined");
+  await refuses(
+    () => submitOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
+    /declined this order/,
+  );
+  assert.equal(asked.calls.length, 1);
+  // Paper diverges after passGates and nowhere earlier, so it inherits the gate rather than
+  // reimplementing it. Asserting it here is what stops that ever becoming two code paths.
+  assert.deepEqual(sent, []);
+});
+
+test("confirm: true plus an available human records `elicited`, not `explicit-unelicited`", async () => {
+  const ticket = await buyTicket();
+  const asked = fakeElicit("accepted");
+  const result = await submitOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "accepted", "a person was asked, so the result says a person was asked");
+  assert.equal(asked.calls.length, 1);
+  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "elicited");
+  assert.equal(entry.elicitation, "accepted");
+});
+
+test("the order dialog is given its own words, not the generic fallback", async () => {
+  // `passGates` used to call `options.elicit(ticket.summary)` with one argument, so every order
+  // dialog silently fell back to _define.ts's defaults. The summary is the message; the title and
+  // description are what the box itself says.
+  const ticket = await buyTicket();
+  const asked = fakeElicit("accepted");
+  await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(asked.calls[0].message, ticket.summary);
+  assert.match(String(asked.calls[0].prompt?.title), /Place this order\?/);
+  assert.match(String(asked.calls[0].prompt?.description), /exchange/);
+  assert.ok(asked.calls[0].prompt?.remember, "and the waiver box is offered under the default policy");
+});
+
+test("in paper mode the dialog says paper, rather than promising the exchange", async () => {
+  setPolicy({ mode: "paper" });
+  const ticket = await buyTicket();
+  const asked = fakeElicit("accepted");
+  await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.match(String(asked.calls[0].prompt?.title), /PAPER/);
+  assert.match(String(asked.calls[0].prompt?.description), /No real money/);
+});
+
+test("an unavailable human plus confirm: true proceeds, and both the result and the log say so", async () => {
+  const ticket = await buyTicket();
+  const result = await submitOrder({ ticketId: ticket.id, confirm: true, elicit: fakeElicit("unavailable").elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "unavailable");
+  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "explicit-unelicited");
+  assert.equal(entry.elicitation, "unavailable");
+});
+
+test("elicitation: required refuses when no person can be reached, and names the way out", async () => {
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
+  const ticket = await buyTicket();
+  await refuses(
+    () => submitOrder({ ticketId: ticket.id, confirm: true, elicit: fakeElicit("unavailable").elicit }),
+    /--elicitation when-available/,
+  );
+
+  // And with no elicit channel offered at all, which is the same fact arriving a different way.
+  const second = await buyTicket();
+  await refuses(() => submitOrder({ ticketId: second.id, confirm: true }), /cannot ask/);
+});
+
+test("elicitation: required still lets an accepted dialog through", async () => {
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
+  const ticket = await buyTicket();
+  const asked = fakeElicit("accepted");
+  const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(asked.calls[0].prompt?.remember, undefined, "a policy that demands the ask offers no waiver box");
+});
+
+test("elicitation: never does not ask, even when it could, and needs confirm", async () => {
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "never" });
+  const asked = fakeElicit("declined");
+
+  const refused = await buyTicket();
+  await refuses(
+    () => submitOrder({ ticketId: refused.id, elicit: asked.elicit }),
+    /Refusing to send an order without confirmation/,
+  );
+
+  const ticket = await buyTicket();
+  const result = await submitOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "disabled-by-policy");
+  assert.equal(asked.calls.length, 0, "the channel exists and must not have been used");
+  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "explicit-elicit-disabled");
+});
+
+test("autoConfirm within its cap proceeds without asking, and says that is what happened", async () => {
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
+  const ticket = await buyTicket();
+  const asked = fakeElicit("declined");
+  const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "waived-by-auto-confirm");
+  assert.equal(asked.calls.length, 0, "the owner's own capped switch is the one thing that skips the ask");
+  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "auto-confirm");
+});
+
+test("autoConfirm loses to elicitation: required — the ask wins, and the order still goes through", async () => {
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000, elicitation: "required" });
+  const asked = fakeElicit("accepted");
+  const ticket = await buyTicket();
+  const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "accepted");
+  assert.equal(asked.calls.length, 1, "autoConfirm must not have skipped the ask the owner demanded");
+
+  // And the contradiction is reported through the channel that already exists for it.
+  assert.match(tradingPolicy().autoConfirmIgnored ?? "", /elicitation is `required`/);
+});
+
+test("the gate offers no waiver box it could not honour, and grants nothing on its own", async () => {
+  // Driven against `resolveConfirmation` directly rather than through an order, because the point
+  // is a property of the gate: it decides, and the caller commits. Two separate claims —
+  //
+  //   1. a box is never shown for a commitment with no gross value, because a grant is "each order
+  //      up to X rupiah" and there is no X to cap it at; and
+  //   2. an accepted-with-remember answer creates NOTHING here, it only reports the tick.
+  const policy = tradingPolicy();
+  const asked = fakeElicit({ remember: true });
+
+  const noValue = await resolveConfirmation({
+    policy,
+    summary: "a commitment with no gross value",
+    valueIdr: null,
+    noun: "order",
+    waivable: true,
+    elicit: asked.elicit,
+  });
+  assert.equal(asked.calls[0].prompt?.remember, undefined, "no box when there is no value to cap it at");
+  assert.equal(noValue.rememberRequested, false, "and a tick on a box that was not offered is not consent");
+
+  const withValue = await resolveConfirmation({
+    policy,
+    summary: "an ordinary order",
+    valueIdr: 2_050_000,
+    noun: "order",
+    waivable: true,
+    elicit: asked.elicit,
+  });
+  assert.ok(asked.calls[1].prompt?.remember, "the box IS offered here");
+  assert.equal(withValue.rememberRequested, true, "and the tick is reported");
+  assert.equal(describeRemember().active, false, "but the gate itself created nothing");
+});
+
+/* -------------------------- "don't ask again", and its bounds -------------------------- */
+
+test("a ticked box covers the NEXT order of equal or lower value, and nothing bigger", async () => {
+  const asked = fakeElicit({ remember: true });
+
+  const first = await buyTicket({ lots: 5 }); // Rp 2,050,000
+  const granted = await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+  assert.equal(granted.elicitation, "accepted", "the order they were asked about is still an ASKED order");
+  assert.equal(asked.calls.length, 1);
+
+  const smaller = await buyTicket({ lots: 2 });
+  const covered = await submitOrder({ ticketId: smaller.id, elicit: asked.elicit });
+  assert.equal(covered.outcome, "ok");
+  assert.equal(covered.elicitation, "remembered");
+  assert.equal(asked.calls.length, 1, "and this one was not asked about");
+  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
+  assert.equal(entry.via, "remembered");
+
+  const bigger = await buyTicket({ lots: 20 });
+  await submitOrder({ ticketId: bigger.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2, "a larger order is outside what they agreed to, so it IS asked about");
+});
+
+test("an accepted dialog with the box UNticked grants nothing", async () => {
+  const asked = fakeElicit("accepted");
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+  const second = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: second.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2, "consent to one order is not consent to the next");
+});
+
+test("a cancel is never covered by a grant", async () => {
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  book.push({ order_id: "ORD-77", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
+  const cancel = await previewOrder({ action: "cancel", symbol: "BBRI", orderId: "ORD-77" });
+  const result = await submitOrder({ ticketId: cancel.id, elicit: asked.elicit });
+  assert.equal(result.elicitation, "accepted");
+  assert.equal(asked.calls.length, 2, "a grant covers new orders, and a cancel is not one");
+});
+
+test("an AMEND is never covered by a grant — and it does have a gross value", async () => {
+  // The first implementation of this bound inferred it from `valueIdr === null`, on the reasoning
+  // that a cancel and an amend carry no value. That is false of an amend: its ticket resolves price
+  // and lots from the working order, so its gross is a real number. Every amend was therefore
+  // waived by a box ticked on a buy, for something `order_amend`'s own description calls "a real
+  // order decision and not an edit". The first assertion below is the one that would have caught it.
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 }); // Rp 2,050,000
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  book.push({ order_id: "ORD-88", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
+  const amend = await previewOrder({ action: "amend", symbol: "BBRI", orderId: "ORD-88", price: 4200, lots: 4 });
+  assert.equal(amend.grossIdr, 1_680_000, "an amend ticket carries a real gross — the null it was inferred from is a fiction");
+  assert.ok(amend.grossIdr < 2_050_000, "and it is under the approved cap, so only the KIND bound can refuse it");
+
+  const result = await submitOrder({ ticketId: amend.id, elicit: asked.elicit });
+  assert.equal(result.elicitation, "accepted");
+  assert.equal(asked.calls.length, 2, "the amend MUST have been put to the human");
+});
+
+test("the waiver box is not offered on a commitment a grant may not cover", async () => {
+  // A box that does nothing is worse than no box: the person believes they have answered for next
+  // time, and they have not.
+  const asked = fakeElicit("accepted");
+  // Two orders: a successful cancel removes its own row from the fake book, so one id cannot serve
+  // both halves of this test.
+  book.push({ order_id: "ORD-98", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
+  book.push({ order_id: "ORD-99", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
+
+  const cancel = await previewOrder({ action: "cancel", symbol: "BBRI", orderId: "ORD-98" });
+  await submitOrder({ ticketId: cancel.id, elicit: asked.elicit });
+  assert.equal(asked.calls[0].prompt?.remember, undefined, "no box on a cancel");
+
+  const amend = await previewOrder({ action: "amend", symbol: "BBRI", orderId: "ORD-99", price: 4200, lots: 4 });
+  await submitOrder({ ticketId: amend.id, elicit: asked.elicit });
+  assert.equal(asked.calls[1].prompt?.remember, undefined, "no box on an amend");
+});
+
+test("autoConfirm does not refuse a cancel it simply cannot speak to — it asks", async () => {
+  // A cancel has no gross value, so it is not "over the cap"; it is outside what a value cap can
+  // say anything about. Refusing it would make cancelling an order harder than placing one.
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
+  book.push({ order_id: "ORD-70", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
+  const cancel = await previewOrder({ action: "cancel", symbol: "BBRI", orderId: "ORD-70" });
+  const asked = fakeElicit("accepted");
+  const result = await submitOrder({ ticketId: cancel.id, elicit: asked.elicit });
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.elicitation, "accepted");
+  assert.equal(asked.calls.length, 1);
+});
+
+test("a grant expires, on the same clock the tickets use", async () => {
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  const base = Date.now();
+  setClock(() => base + REMEMBER_TTL_MS + 1);
+  // The ticket clock moved too, so this one has to be minted after the jump.
+  const later = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: later.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2, "fifteen minutes is the bound, and it is a real one");
+});
+
+test("changing the policy invalidates a grant made under the old one", async () => {
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  // They agreed to "orders up to Rp 2,050,000" against one set of rules. Tightening or loosening
+  // any of them makes it a different set, and the grant was not made against it.
+  setPolicy({ mode: "live", maxOrderValueIdr: 50_000_000 });
+  const after = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: after.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2);
+});
+
+test("a terminal revocation reaches a grant this process is already holding", async () => {
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  // What `stockbit-auth trading-forget` does: stamp a moment into the file. The server cannot be
+  // reached from a terminal, but it re-reads the policy on every order, so this is what crosses.
+  setPolicy({
+    mode: "live",
+    maxOrderValueIdr: 100_000_000,
+    confirmationsRevokedAt: new Date(Date.now() + 1000).toISOString(),
+  });
+  const after = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: after.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2, "a grant made before the revocation covers nothing after it");
+});
+
+test("an order that is refused AFTER the dialog leaves no grant behind", async () => {
+  // The gate runs against a peeked ticket so a refusal costs nothing — which means it must not
+  // leave anything behind either. Creating the grant inside the gate meant a person could watch
+  // their order be refused and still have silently turned confirmations off for fifteen minutes.
+  //
+  // The trigger is not exotic: the dialog runs at human speed and a ticket lasts two minutes.
+  const ticket = await buyTicket({ lots: 5 });
+  const slowHuman = async () => {
+    // They read the summary properly, and the ticket expires while they are doing it.
+    setClock(() => Date.parse(ticket.expiresAt) + 1);
+    return { answer: "accepted" as const, remember: true };
+  };
+  await refuses(() => submitOrder({ ticketId: ticket.id, elicit: slowHuman }), /ran out before the answer came back/);
+  assert.equal(describeRemember().active, false, "no waiver may survive an order that never happened");
+
+  // And the refusal ties the expiry to the dialog, rather than leaving the reader to connect them.
+  resetClock();
+  const asked = fakeElicit("accepted");
+  const next = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: next.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 1, "the next order is still asked about");
+});
+
+test("a ticket that cannot be placed is refused before anyone is asked", async () => {
+  // `take()` would refuse this a moment later with the same sentence. Asking a person to approve an
+  // order that cannot be placed whatever they answer spends their attention on nothing, and teaches
+  // them the dialog is noise — which is how a confirmation stops being read.
+  const ticket = await previewOrder({ action: "buy", symbol: "BBRI", price: 4105, lots: 1 });
+  const asked = fakeElicit("accepted");
+  await refuses(() => submitOrder({ ticketId: ticket.id, elicit: asked.elicit }), /price_tick/);
+  assert.equal(asked.calls.length, 0, "nobody is asked about an order the ticket already blocks");
+  assert.equal(describeRemember().active, false);
+});
+
+test("replaying a spent ticket does not ask the person a second time", async () => {
+  // Since the human is asked BEFORE the ticket is taken, a `peek` that admitted a consumed ticket
+  // meant a model retrying order_buy put the dialog up again — asking someone to approve an order
+  // that had already reached the exchange, and only then refusing. Being asked twice about one
+  // order is how a person ends up believing they have two.
+  const asked = fakeElicit("accepted");
+  const ticket = await buyTicket({ lots: 5 });
+  const first = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
+  assert.equal(first.outcome, "ok");
+  assert.equal(asked.calls.length, 1);
+
+  await refuses(() => submitOrder({ ticketId: ticket.id, elicit: asked.elicit }), /was already used/);
+  assert.equal(asked.calls.length, 1, "the replay must not reach a person at all");
+});
+
+test("a cap lowered between the preview and the write refuses, and does not auto-confirm", async () => {
+  // The two caps are the same field read at two moments: `value_within_cap` is computed at preview,
+  // and the gate reads the policy at the write. Lower it in between and a ticket that passed its
+  // own check arrives at the gate over the new cap. The autoConfirm branch must refuse it —
+  // returning `auto-confirm` here would send an order the owner's current policy forbids, unasked.
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 5_000_000 });
+  const ticket = await buyTicket({ lots: 5 }); // Rp 2,050,000, inside the cap it was priced against
+  assert.ok(ticket.checks.every((c) => c.ok), "precondition: the ticket passed every check");
+
+  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 1_000_000 });
+  const asked = fakeElicit("accepted");
+  await refuses(() => submitOrder({ ticketId: ticket.id, elicit: asked.elicit }), /the cap changed after this ticket was priced/);
+  assert.equal(asked.calls.length, 0, "and the cap is not something a person can confirm away");
+});
+
+test("a revocation timestamp that cannot be parsed revokes everything", async () => {
+  // The safe direction for a revocation. Somebody wrote something into that field; the reading that
+  // asks the human again costs a dialog, and the other reading costs an order.
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+
+  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, confirmationsRevokedAt: "yesterday" });
+  const after = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: after.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2);
+});
+
+test("trading_forget clears the grant, and says whether there was one", async () => {
+  const asked = fakeElicit({ remember: true });
+  const first = await buyTicket({ lots: 5 });
+  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
+  assert.equal(describeRemember().active, true, "precondition");
+
+  const handlers = new Map<string, ToolHandler>();
+  registerTradingTools({
+    read: () => {},
+    write: (name, _d, _s, handler) => {
+      handlers.set(name, handler);
+    },
+    writeNames: () => [...handlers.keys()],
+  });
+
+  const cleared = JSON.parse(
+    ((await handlers.get("trading_forget")!({})) as { content: Array<{ text: string }> }).content[0].text,
+  ).data;
+  assert.equal(cleared.hadGrant, true);
+  assert.equal(cleared.clearedCapIdr, 2_050_000);
+  assert.equal(describeRemember().active, false);
+
+  // Idempotent, and honest about it rather than claiming to have done something.
+  const again = JSON.parse(
+    ((await handlers.get("trading_forget")!({})) as { content: Array<{ text: string }> }).content[0].text,
+  ).data;
+  assert.equal(again.hadGrant, false);
+
+  const next = await buyTicket({ lots: 1 });
+  await submitOrder({ ticketId: next.id, elicit: asked.elicit });
+  assert.equal(asked.calls.length, 2, "and the next order is asked about again");
+});
+
+test("the tool layer wires the human channel through, and a declined dialog reaches the caller", async () => {
+  // The three Definer literals in this file had no elicitation member at all, so the whole
+  // tool-level path — the one a real client actually takes — was untested. This drives order_buy
+  // the way an MCP client does.
+  const reads = new Map<string, ToolHandler>();
+  const writes = new Map<string, ToolHandler>();
+  const asked = fakeElicit("declined");
+  registerTradingTools({
+    read: (name, _d, _s, handler) => {
+      reads.set(name, handler);
+    },
+    write: (name, _d, _s, handler) => {
+      writes.set(name, handler);
+    },
+    writeNames: () => [...writes.keys()],
+    elicitDecision: asked.elicit,
+  });
+
+  const preview = await reads.get("order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
+  const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
+
+  sent.length = 0;
+  const placed = (await writes.get("order_buy")!({ ticket_id: ticketId, confirm: true })) as {
+    content: Array<{ text: string }>;
+    isError?: boolean;
+  };
+  assert.equal(placed.isError, true, "a declined dialog is an error result, not a quiet success");
+  assert.match(placed.content[0].text, /declined this order/);
+  assert.equal(asked.calls.length, 1);
+  assert.deepEqual(sent, [], "and nothing reached the exchange");
+});
+
+test("the tool layer's message tells the user when nobody was asked", async () => {
+  const reads = new Map<string, ToolHandler>();
+  const writes = new Map<string, ToolHandler>();
+  registerTradingTools({
+    read: (name, _d, _s, handler) => {
+      reads.set(name, handler);
+    },
+    write: (name, _d, _s, handler) => {
+      writes.set(name, handler);
+    },
+    writeNames: () => [...writes.keys()],
+  });
+
+  const preview = await reads.get("order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
+  const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
+  const placed = await writes.get("order_buy")!({ ticket_id: ticketId, confirm: true });
+  const payload = JSON.parse((placed as { content: Array<{ text: string }> }).content[0].text).data;
+  assert.equal(payload.outcome, "ok");
+  assert.match(payload.message, /is on the book/);
+  assert.match(payload.message, /No human was asked directly/);
+  assert.match(payload.message, /--elicitation required/, "and names the switch that would refuse instead");
 });
 
 /* ------------------------------------ the tools ------------------------------------ */

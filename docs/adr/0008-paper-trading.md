@@ -36,11 +36,16 @@ therefore the six-digit PIN — is not involved at all. That is not a shortcut a
 it is the absence of the thing the rule is about.
 
 **The same protocol, deliberately.** `order_preview` still builds a ticket, the ticket still expires
-in two minutes, the write tools still take a ticket id and nothing else, `confirm: true` is still
-required, and elicitation is still consulted. Paper mode is not an easier path — it diverges from
-the live one at exactly one point, inside `submitOrder`, after every gate has already run.
-Autoconfirm is refused in paper on purpose: a rehearsal that skips the confirmation step rehearses
-the wrong thing.
+in two minutes, the write tools still take a ticket id and nothing else, the human is still asked
+directly wherever the client can ask, and `confirm: true` is still required where it cannot. Paper
+mode is not an easier path — it diverges from the live one at exactly one point, inside
+`submitOrder`, after every gate has already run. Autoconfirm is refused in paper on purpose: a
+rehearsal that skips the confirmation step rehearses the wrong thing.
+
+That single divergence point is why [ADR-0010](0010-elicitation-is-decisive.md) needed no paper-mode
+clause of its own: the shared confirmation gate runs above the split, so paper inherited the fix
+rather than being patched to match it. The reported bypass reproduced in `--paper`, and the
+regression test that pins it runs in both modes.
 
 **Every paper result says so, three times over.** `mode: "paper"` for a machine, a `summary` that
 opens with `PAPER ACCOUNT — no real money.` for a person, and a `PAPER_NOTE` in the tool description

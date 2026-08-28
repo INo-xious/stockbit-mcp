@@ -2,7 +2,7 @@
 
 # Tool reference
 
-**138 tools** (114 read, 24 write) in 17 families, 8 prompts.
+**139 tools** (114 read, 25 write) in 17 families, 8 prompts.
 
 Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
 
@@ -35,7 +35,7 @@ Every tool carries an **evidence** word — Observed, Read-back or Projected. Th
 | [alerts](#alerts) | 4 | Rules that fire while no client is open | Observed |
 | [pine](#pine) | 1 | TradingView Pine Script generation | Observed |
 | [workflows](#workflows) | 2 | Saved multi-step recipes, also offered as prompts | Observed |
-| [trading](#trading) | 16 | The brokerage account and order entry | Projected |
+| [trading](#trading) | 17 | The brokerage account and order entry | Projected |
 | [eipo](#eipo) | 9 | The IPO pipeline and subscribing to one | Projected |
 
 ## system
@@ -278,6 +278,7 @@ The brokerage account and order entry.
 | `order_sell` | write, destructive | PLACE A REAL SELL ORDER on the Indonesian exchange, against the user's actual position. | Projected | ticket_id*, confirm |
 | `order_amend` | write, destructive | CHANGE a working order's price or size on the exchange. | Projected | ticket_id*, confirm |
 | `order_cancel` | write, destructive | CANCEL a working order. | Projected | ticket_id*, confirm |
+| `trading_forget` | write | Cancel the user's standing "don't ask again", so the next order asks them directly again. | Projected | — |
 
 ## eipo
 

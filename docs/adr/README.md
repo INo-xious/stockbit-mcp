@@ -12,12 +12,13 @@ unassigned rather than back-filled.
 |---|---|---|
 | [0002](0002-daemon-is-the-product-server-stays-read-only.md) | The watch daemon is the product; the server stays read-only | ACCEPTED 2026-08-05 — daemon-first stands; the read-only posture is superseded by 0003–0006 |
 | [0003](0003-chartbit-writes.md) | Chartbit layout writes, with snapshot, verify and rollback | ACCEPTED and implemented (amended twice: the per-symbol routes are a server-side stub, real persistence is `/chartbit/charts`) |
-| [0004](0004-order-entry.md) | Order entry: off by default, two-step tickets, a human in the middle | ACCEPTED and implemented — never observed against a live brokerage session |
+| [0004](0004-order-entry.md) | Order entry: off by default, two-step tickets, a human in the middle | ACCEPTED and implemented — never observed against a live brokerage session; **amended once** (2026-08-28: "elicitation in addition to the caller's confirmation" is superseded by 0010) |
 | [0005](0005-browser-driven-chartbit.md) | Drawing on the user's chart through their own browser over CDP | ACCEPTED and implemented |
 | [0006](0006-account-writes.md) | Watchlist and screener edits — nine tools, read back after every write | ACCEPTED and implemented |
 | [0007](0007-auth-tools-in-the-server.md) | `status`, `login` and `logout` as tools; the PIN and the trading switch stay terminal-only | ACCEPTED 2026-08-24 |
 | [0008](0008-paper-trading.md) | Paper trading: three modes, not two; the same order protocol against a local ledger | ACCEPTED 2026-08-24 |
 | [0009](0009-browser-is-the-source-of-truth.md) | The browser is the source of truth for the rotating token family; the store follows it | ACCEPTED 2026-08-26 |
+| [0010](0010-elicitation-is-decisive.md) | Elicitation is decisive: the human is asked first, and `confirm` cannot skip the ask | ACCEPTED and implemented 2026-08-28 — amends 0004, no new routes |
 
 ## Writing a new one
 

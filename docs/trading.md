@@ -18,9 +18,10 @@ Paper mode gives you a **local ledger** to trade against. No real money, no exch
 session, and **no PIN** — none of that is involved, because there is no brokerage on the other end.
 
 The protocol is deliberately identical. `order_preview` builds the same ticket, it still expires in
-two minutes, the write tools still take a ticket id and nothing else, and `confirm: true` is still
-required — autoconfirm is refused in paper, because a rehearsal that skips the confirmation step
-rehearses the wrong thing. The point is that nothing about the live path is a surprise later.
+two minutes, the write tools still take a ticket id and nothing else, you are still asked directly
+wherever your client can ask, and `confirm: true` is still required where it cannot — autoconfirm is
+refused in paper, because a rehearsal that skips the confirmation step rehearses the wrong thing.
+The point is that nothing about the live path is a surprise later.
 
 Your portfolio, positions, cash, orders, order history and trade performance are served from the
 ledger while paper is on. Every one of those results carries `mode: "paper"` and opens with
@@ -83,9 +84,13 @@ The environment can only move **down** the ladder — `live` → `paper` → `of
 
 ### `autoConfirm`
 
-Skips the per-order confirmation, and is honoured **only when `maxOrderValueIdr` is set**. Without a
-cap it is ignored and `trading_status` says so. "I trust it for small orders" should not silently
-become "I trust it for any order" the day the cap is removed.
+Skips the per-order confirmation — including the ask — and is honoured **only when
+`maxOrderValueIdr` is set**. Without a cap it is ignored and `trading_status` says so. "I trust it
+for small orders" should not silently become "I trust it for any order" the day the cap is removed.
+
+It is also ignored outright when `elicitation` is `required`, because the two switches say opposite
+things about whether a person is asked. The ask wins, and `trading_status` says which of the two is
+not doing anything and how to resolve it.
 
 ## Placing an order
 
@@ -101,13 +106,86 @@ order_buy      ticket_id=tk_… confirm=true
 ```
 
 `order_buy`, `order_sell`, `order_amend` and `order_cancel` take a **ticket id, an optional
-confirmation, and nothing else** — no price, no quantity. By default the confirmation is explicit
-or directly elicited. If the operator enabled capped live autoconfirm, the caller omits `confirm`
-and server policy alone decides whether the ticket is covered. What reaches the exchange is what
-the ticket described.
+confirmation, and nothing else** — no price, no quantity. What reaches the exchange is what the
+ticket described.
 
 Tickets expire after **two minutes**, because they were priced against a market that moves. An
 expired ticket is refused, not quietly repriced.
+
+### Who confirms
+
+Two different things can confirm an order, and they are not interchangeable. `confirm: true` is a
+boolean **the model** sets. MCP elicitation is the only channel in the protocol that reaches **a
+person**. This server used to accept either, in that order, which meant a model could skip the
+person entirely by asserting the person had already agreed — and the audit log said `via:
+"explicit"` for both cases, so afterwards nothing could tell them apart. That is fixed;
+[ADR-0010](adr/0010-elicitation-is-decisive.md) is the record.
+
+Now, on a client that supports elicitation, **you are asked first — before `confirm` is looked at —
+and your answer decides it.** Declining refuses the order however `confirm` was set. On a client
+that cannot ask, `confirm: true` is the only gate there is: the order proceeds, and both the result
+and the audit line say plainly that no human was asked. A client that cannot ask must not become a
+client that cannot trade.
+
+The audit log records **how** the gate was satisfied, in one of five values:
+
+| `via` | |
+|---|---|
+| `elicited` | You clicked yes in the dialog. The strongest evidence this protocol can record. |
+| `remembered` | A "don't ask again" you granted yourself covered it. |
+| `auto-confirm` | Your capped `autoConfirm` policy, set at a terminal. |
+| `explicit-unelicited` | `confirm: true`, and the client advertises no way to ask you. |
+| `explicit-elicit-disabled` | `confirm: true`, and you set `elicitation: never` yourself. |
+
+The result carries `elicitation` instead — `accepted`, `remembered`, `unavailable`,
+`disabled-by-policy` or `waived-by-auto-confirm` — because "was I asked?" is the fact a person
+needs, and the five-way distinction is evidence for the log rather than advice for you.
+
+### `elicitation` — three values, one dial
+
+```bash
+stockbit-auth trading-enable --live --elicitation required        # or --require-elicitation
+stockbit-auth trading-enable --live --elicitation when-available  # the default
+stockbit-auth trading-enable --live --elicitation never           # or --no-elicitation
+```
+
+| | |
+|---|---|
+| `required` | Refuse rather than send when no person can be reached. `confirm: true` never substitutes, and `autoConfirm` is ignored outright — the two contradict, and the ask wins. |
+| `when-available` | Ask wherever the client supports it; fall back to `confirm: true` where it does not. **The default**, and what every existing install gets. |
+| `never` | Do not ask at all, whatever the client supports. `confirm: true` becomes the only gate. |
+
+`trading_status` and `status` both report which is in force.
+
+### "Don't ask again"
+
+The confirmation dialog carries a second box **you** tick, and only you: it waives the dialog for
+later new orders, inside five bounds that must all hold at once.
+
+- **Fifteen minutes.** One sitting, not one day.
+- **New orders only.** A buy or a sell. An amend and a cancel change something already working, and
+  agreeing to spend X rupiah is not agreeing to move or withdraw an order already on the book — so
+  those are *never* covered and are always asked about. Neither is an e-IPO subscription: it is a
+  different commitment, and the box you ticked on a share order never showed you that an allotment
+  may be smaller than the subscription and cannot be cancelled by selling.
+- **The value you approved.** You agreed to an order of X rupiah, so it covers orders up to X and
+  nothing larger. That is *each* order, not a total — any number of them can go through inside the
+  fifteen minutes, and that window is what bounds the total. It does not restrict which symbol or
+  which side.
+- **The policy that was in force.** Change the mode, a cap, the symbol list or this switch and every
+  outstanding grant dies with it.
+- **Revocation.** `stockbit-auth trading-forget` at a terminal ends every grant everywhere,
+  *including in server processes that are already running* — the CLI stamps a moment into the
+  settings file and every order re-reads the policy before the gate.
+
+The grant is created only once the order it was ticked on has actually been committed to — so an
+order that is then refused, including one whose two-minute ticket ran out while you were reading the
+dialog, leaves no waiver behind. If that happens the refusal says so.
+
+It is held in memory and never written to disk, so a restart ends it too. Inside a conversation, the
+`trading_forget` tool ends it immediately; it is safe to call when there is nothing to clear, and it
+can only ever make this server ask *more* questions. `status` and `trading_status` report whether one
+is live, what it is capped at, and when it expires.
 
 ### Reading the result
 

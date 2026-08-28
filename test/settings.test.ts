@@ -55,6 +55,11 @@ test("the shipped default has every money-moving switch off", () => {
   assert.equal(d.trading.autoConfirm, false);
   assert.equal(d.trading.maxOrderValueIdr, null);
   assert.deepEqual(d.trading.allowedSymbols, []);
+  // Not `required`: that would refuse orders from every client that cannot elicit, which is a
+  // breaking change dressed as a default. Not `never` either — the whole point is that the ask
+  // happens wherever it can.
+  assert.equal(d.trading.elicitation, "when-available");
+  assert.equal(d.trading.confirmationsRevokedAt, null);
 });
 
 test("enabling in the file enables the policy, and it is read at CALL time", () => {
@@ -142,6 +147,67 @@ test("an unrecognised mode is off, because an ambiguous permission is no permiss
   assert.equal(loadSettings().trading.mode, "off");
 });
 
+test("an unrecognised elicitation value is the DEFAULT, not the strictest or the loosest", () => {
+  // Deliberately unlike `mode`, whose fallback is `off`. An unreadable *permission* is no
+  // permission; this is not a permission. Falling back to `never` would silently weaken an account
+  // over a typo, and to `required` would silently brick one.
+  for (const value of ["requried", true, 1, null, [], "REQUIRED"]) {
+    writeRaw(JSON.stringify({ version: 2, trading: { mode: "live", elicitation: value } }));
+    assert.equal(loadSettings().trading.elicitation, "when-available", `elicitation: ${JSON.stringify(value)}`);
+  }
+  writeRaw(JSON.stringify({ version: 2, trading: { mode: "live" } }));
+  assert.equal(loadSettings().trading.elicitation, "when-available", "and an absent field is the same thing");
+});
+
+test("all three elicitation values survive a round trip through the file", () => {
+  for (const value of ["required", "when-available", "never"] as const) {
+    writeRaw(JSON.stringify({ version: 2, trading: { mode: "live", elicitation: value } }));
+    assert.equal(loadSettings().trading.elicitation, value);
+    assert.equal(tradingPolicy({}).elicitation, value, "and it reaches the policy every gate reads");
+  }
+});
+
+test("a revocation that cannot be read is kept, because dropping it would keep a grant alive", () => {
+  // The asymmetry that decides this: `confirmationsRevokedAt` is a REVOCATION, not a permission.
+  // Misreading it as "never revoked" silently keeps a standing confirmation alive; misreading it as
+  // "revoked" only means the user is asked again. So a non-empty string is carried through even
+  // when it is not a date, and `rememberCovers` treats an unparseable moment as revoking
+  // everything. Only a non-string, or an empty one, is "nothing here".
+  for (const value of [17, true, { at: 1 }, null, [], ""]) {
+    writeRaw(JSON.stringify({ version: 2, trading: { mode: "live", confirmationsRevokedAt: value } }));
+    assert.equal(loadSettings().trading.confirmationsRevokedAt, null, JSON.stringify(value));
+  }
+  writeRaw(JSON.stringify({ version: 2, trading: { mode: "live", confirmationsRevokedAt: "yesterday" } }));
+  assert.equal(loadSettings().trading.confirmationsRevokedAt, "yesterday", "a hand-edited value is not discarded");
+
+  const iso = "2026-08-28T01:02:03.000Z";
+  writeRaw(JSON.stringify({ version: 2, trading: { mode: "live", confirmationsRevokedAt: iso } }));
+  assert.equal(loadSettings().trading.confirmationsRevokedAt, iso);
+});
+
+test("elicitation: required and autoConfirm contradict, and the ASK wins", () => {
+  // Two switches that say opposite things about whether a person is asked. Resolved in favour of
+  // the one that produces a question, and reported through the channel that already exists for
+  // "you set this and it is not doing anything" rather than through a new field nobody reads.
+  const settings = defaultSettings();
+  settings.trading.mode = "live";
+  settings.trading.autoConfirm = true;
+  settings.trading.maxOrderValueIdr = 5_000_000;
+  settings.trading.elicitation = "required";
+  saveSettings(settings);
+
+  const policy = tradingPolicy({});
+  assert.equal(policy.enabled, true);
+  assert.equal(policy.autoConfirm, false, "the cap is fine; the contradiction is what disables it");
+  assert.equal(policy.elicitation, "required");
+  assert.match(policy.autoConfirmIgnored ?? "", /elicitation is `required`/);
+  assert.match(policy.autoConfirmIgnored ?? "", /The ask wins/);
+  assert.match(policy.autoConfirmIgnored ?? "", /confirm: true/);
+
+  // And the way out is named, so a user who actually wanted autoConfirm knows what to type.
+  assert.match(policy.autoConfirmIgnored ?? "", /--elicitation when-available/);
+});
+
 test("STOCKBIT_TRADING=off overrides an enabled file", () => {
   const settings = defaultSettings();
   settings.trading.mode = "live";
@@ -223,6 +289,9 @@ test("a hostile or half-typed file cannot smuggle a permission through", () => {
         maxOrderValueIdr: -5,
         allowedSymbols: "BBRI",
         maxLotsPerOrder: 0,
+        // A non-string that a loose reader would happily accept as "never".
+        elicitation: { toString: "never" },
+        confirmationsRevokedAt: 0,
       },
     }),
   );
@@ -232,6 +301,8 @@ test("a hostile or half-typed file cannot smuggle a permission through", () => {
   assert.equal(settings.trading.maxOrderValueIdr, null, "a negative cap is no cap");
   assert.deepEqual(settings.trading.allowedSymbols, []);
   assert.equal(settings.trading.maxLotsPerOrder, defaultSettings().trading.maxLotsPerOrder);
+  assert.equal(settings.trading.elicitation, "when-available", "a non-string cannot smuggle `never` through");
+  assert.equal(settings.trading.confirmationsRevokedAt, null);
 });
 
 test("allowed symbols are upper-cased, so a lower-case entry still restricts", () => {

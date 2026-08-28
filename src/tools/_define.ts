@@ -102,6 +102,25 @@ export interface ToolOptions extends ToolAnnotations {
   evidence?: Evidence;
 }
 
+/** What a person can answer. `unavailable` is neither a yes nor a no — nobody was reached. */
+export type ElicitAnswer = "accepted" | "declined" | "unavailable";
+
+/**
+ * The elicitation channel, with the second box and the answer to it.
+ *
+ * `elicit()` returns only the verdict, which is all `login` needs. Order entry needs one more fact
+ * — whether the person also ticked "don't ask again" — and a boolean cannot be smuggled through a
+ * three-member string union without inventing a fourth member that means two things. So this is a
+ * record, and `elicit()` is the same call with the record's `answer` field taken off the front.
+ *
+ * `prompt.remember`, when present, is the LABEL of the second box. Omitting it means no box, which
+ * is how a caller says "this one is not waivable" — see `trading.elicitation: "required"`.
+ */
+export type ElicitDecision = (
+  message: string,
+  prompt?: { title?: string; description?: string; remember?: string },
+) => Promise<{ answer: ElicitAnswer; remember: boolean }>;
+
 /**
  * Which families and tools a server instance registers.
  *
@@ -176,18 +195,24 @@ export interface Definer {
    * Ask the human directly, when the client can.
    *
    * MCP elicitation is the only channel in this protocol that reaches a person rather than a model.
-   * For an order that matters: `confirm: true` says a model decided the user agreed, and this says
-   * the user themselves clicked yes. Both are required — this is an additional gate, never a
-   * replacement for the confirmation the caller passes.
+   * `confirm: true` says a model decided the user agreed; this says the user themselves clicked
+   * yes, and the two are not the same evidence. Where both exist, the person's answer is the
+   * decisive one — a declined dialog refuses whatever the caller passed. See ADR-0010.
    *
    * Optional so a caller can be constructed without one (tests build a Definer by hand), and it
    * answers "unavailable" rather than throwing when the client advertises no elicitation support,
    * because a client that cannot ask must not become a client that cannot trade.
    */
-  elicit?(
-    message: string,
-    prompt?: { title?: string; description?: string },
-  ): Promise<"accepted" | "declined" | "unavailable">;
+  elicit?(message: string, prompt?: { title?: string; description?: string }): Promise<ElicitAnswer>;
+
+  /**
+   * The same channel, able to offer "don't ask again" and to report whether it was taken.
+   *
+   * One implementation, two entry points: `elicit()` is this with the record flattened to its
+   * `answer`. A second implementation is how the two would end up disagreeing about what counts as
+   * a yes, which is the class of drift this whole change is about.
+   */
+  elicitDecision?: ElicitDecision;
 }
 
 /** Everything the definers of one server share. */
@@ -353,33 +378,75 @@ function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence
     },
 
     async elicit(message, prompt) {
-      const inner = (shared.server as unknown as { server?: ElicitCapableServer }).server;
-      if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) return "unavailable";
-      try {
-        const result = await inner.elicitInput({
-          message,
-          requestedSchema: {
-            type: "object",
-            properties: {
-              confirm: {
-                type: "boolean",
-                title: prompt?.title ?? "Place this order?",
-                description: prompt?.description ?? "Yes places it on the exchange. There is no undo.",
-              },
-            },
-            required: ["confirm"],
-          },
-        });
-        // Anything short of an explicit yes is a no. A cancelled dialog is not an agreement, and
-        // neither is an accept whose content did not actually carry the box being ticked.
-        return result.action === "accept" && result.content?.confirm === true ? "accepted" : "declined";
-      } catch {
-        // The client claimed the capability and then failed to answer. Treating that as consent
-        // would be the worst reading of it.
-        return "unavailable";
-      }
+      return (await ask(shared, message, prompt)).answer;
+    },
+
+    async elicitDecision(message, prompt) {
+      return ask(shared, message, prompt);
     },
   };
+}
+
+/**
+ * The one place a person is actually asked.
+ *
+ * `elicit()` and `elicitDecision()` are both this; the first throws the `remember` half away. Two
+ * bodies would be two answers to "what counts as a yes", and the rule below — that anything short
+ * of an explicit tick is a no — is exactly the rule that must not exist in two versions.
+ */
+async function ask(
+  shared: Shared,
+  message: string,
+  prompt?: { title?: string; description?: string; remember?: string },
+): Promise<{ answer: ElicitAnswer; remember: boolean }> {
+  const inner = (shared.server as unknown as { server?: ElicitCapableServer }).server;
+  if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) {
+    return { answer: "unavailable", remember: false };
+  }
+  try {
+    const result = await inner.elicitInput({
+      message,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: {
+            type: "boolean",
+            title: prompt?.title ?? "Place this order?",
+            description: prompt?.description ?? "Yes places it on the exchange. There is no undo.",
+          },
+          // Deliberately NOT in `required`: a client that renders only the required fields, or that
+          // drops one it does not understand, must still be able to return a usable yes or no. An
+          // absent second box reads as an unticked one, which is the safe direction.
+          ...(prompt?.remember
+            ? {
+                remember: {
+                  type: "boolean",
+                  title: prompt.remember,
+                  description:
+                    "Optional, and separate from the answer above. Yes skips this dialog for later " +
+                    "commitments of the same value or smaller, for a short while, in this server " +
+                    "process only — never on disk and never past a restart.",
+                },
+              }
+            : {}),
+        },
+        required: ["confirm"],
+      },
+    });
+    // Anything short of an explicit yes is a no. A cancelled dialog is not an agreement, and
+    // neither is an accept whose content did not actually carry the box being ticked.
+    const accepted = result.action === "accept" && result.content?.confirm === true;
+    return {
+      answer: accepted ? "accepted" : "declined",
+      // The same rule, applied to the second box: it is a waiver of future questions, so it needs
+      // the same explicit tick rather than any truthy value that happens to come back.
+      remember: accepted && result.content?.remember === true,
+    };
+  } catch {
+    // The client claimed the capability and then failed to answer. Treating that as consent
+    // would be the worst reading of it.
+    return { answer: "unavailable", remember: false };
+  }
 }
 
 /** The slice of the low-level server this module uses, so the SDK's shape is named in one place. */
