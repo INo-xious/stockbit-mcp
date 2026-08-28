@@ -531,8 +531,20 @@ export interface RunningTradeOptions {
   action?: RunningTradeAction;
   limit?: number;
   /**
-   * Row ordering. The endpoint REQUIRES this — see the note on the function below. `1` is the
-   * default and is what every caller wants unless it has a reason otherwise.
+   * Row ordering. The endpoint REQUIRES this, and it is NOT a time ordering.
+   *
+   * Measured 2026-08-28 against BRMS:
+   *
+   *   `1` — true chronological order FROM THE SESSION OPEN, with real trade sizes (2, 12, 12, 6…).
+   *   `2` — lot-ascending: 100 rows, every one a 1-lot trade.
+   *   `3` — lot-ascending on a different tiebreak; also every row a 1-lot trade.
+   *
+   * So the only two things obtainable are "the first prints of the day" and "the smallest prints of
+   * the day". **No ordering returns the most recent prints, and none returns the largest.**
+   * `offset` and `page` are accepted and change nothing, so the window cannot be moved either.
+   *
+   * `1` is the default because chronological-with-real-sizes is the only one of the three that
+   * answers a question anybody actually asks.
    */
   orderBy?: 1 | 2 | 3;
   /** Read the grouped view (`runningTradeGroup`) instead of the raw tape. */

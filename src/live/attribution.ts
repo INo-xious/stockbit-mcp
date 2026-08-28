@@ -6,12 +6,21 @@
  * because they have different freshness, and pretending otherwise is the failure this whole feature
  * set is built to avoid.
  *
- * ## The tape is late, and that is not fixable here
+ * ## This CANNOT attribute a recent surge, and that is a property of the endpoint
  *
- * Measured 2026-08-27: `/order-trade/running-trade` runs EIGHT TO TEN MINUTES BEHIND and refreshes in
- * bursts, with `cache-control: max-age=1` and a CloudFront MISS placing the staleness at Stockbit's
- * own origin. So an attribution produced now explains a surge from several minutes ago. Every result
- * carries `lagged: true` so a caller cannot present it as current without doing so knowingly.
+ * The research asked for the prints behind a surge that just fired. Measured 2026-08-28, the tape
+ * cannot supply them. Its `order_by` is not a time ordering: `1` returns the session's FIRST prints
+ * chronologically, `2` and `3` return its SMALLEST (100 rows of 1-lot trades). There is no
+ * newest-first option, no largest-first option, and `offset`/`page` are accepted with no effect, so
+ * the window cannot be moved.
+ *
+ * On top of that the tape runs EIGHT TO TEN MINUTES BEHIND (measured 2026-08-27; `cache-control:
+ * max-age=1` with a CloudFront MISS puts the staleness at Stockbit's own origin).
+ *
+ * So what this module honestly delivers is REAL PRINTS WITH BROKER IDENTITY for a symbol, from the
+ * start of the session — which is genuinely useful and is not surge attribution. Every result
+ * carries `lagged: true` and reports the window it actually covers, so no caller can present it as
+ * "what just happened" by accident.
  *
  * ## What a print actually carries, observed rather than assumed
  *
@@ -119,6 +128,14 @@ export interface Attribution {
   prints: Print[];
   totalValue: number;
   totalLots: number;
+  /**
+   * The time span these prints actually cover, WIB.
+   *
+   * Reported because the caller cannot assume it. The tape's orderings do not reliably return the
+   * most recent prints, so "what window did I actually get" is a real question with a surprising
+   * answer, and answering it is the difference between attribution and a confident guess.
+   */
+  window: { earliest: string | null; latest: string | null };
   /** Rupiah bought by the aggressor minus rupiah sold. */
   netAggressorValue: number;
   /** The largest prints, biggest first. */
@@ -169,6 +186,8 @@ export function attribute(prints: Print[], symbol: string, from?: string, to?: s
   const net = inWindow.reduce((s, p) => s + (p.aggressor === "buy" ? p.value : -p.value), 0);
   const largest = [...inWindow].sort((a, b) => b.value - a.value).slice(0, 5);
   const brokersVisible = inWindow.some((p) => p.buyer !== null);
+  const times = inWindow.map((p) => p.time).filter(Boolean).sort();
+  const span = { earliest: times[0] ?? null, latest: times[times.length - 1] ?? null };
 
   const lines: string[] = [];
   if (inWindow.length === 0) {
@@ -177,6 +196,11 @@ export function attribute(prints: Print[], symbol: string, from?: string, to?: s
     lines.push(
       `${inWindow.length} print${inWindow.length === 1 ? "" : "s"}, ${totalLots.toLocaleString("en-US")} lots, ${rupiah(totalValue)}.`,
     );
+    if (span.earliest) {
+      lines.push(
+        `These cover ${span.earliest} to ${span.latest} WIB — the FIRST prints of the session, not the most recent. The endpoint offers no recency ordering and its window cannot be paged, so this explains how the day OPENED, not what just happened.`,
+      );
+    }
     lines.push(
       net >= 0
         ? `Net ${rupiah(net)} was buyer-initiated (HAKA — buyers lifting the offer).`
@@ -207,6 +231,7 @@ export function attribute(prints: Print[], symbol: string, from?: string, to?: s
     prints: inWindow,
     totalValue,
     totalLots,
+    window: span,
     netAggressorValue: net,
     largest,
     topBuyers: rank(inWindow, "buyer"),
