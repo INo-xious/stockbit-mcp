@@ -18,7 +18,7 @@ import { readFileSync, statSync } from "node:fs";
 import { refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
 
 /** Refuse absurd inputs rather than OOM. A login-flow HAR is typically 5-50 MB. */
-export const MAX_HAR_BYTES = 256 * 1024 * 1024;
+const MAX_HAR_BYTES = 256 * 1024 * 1024;
 
 export interface HarMatch {
   refresh: string;

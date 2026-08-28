@@ -117,7 +117,7 @@ export interface Settings {
  * 2 since paper trading. A v1 file is migrated on read: `enabled: true` becomes `live`, because
  * that is what it meant, and anything else becomes `off`.
  */
-export const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 2;
 
 /** A paper ledger's opening balance when nobody says otherwise: Rp 100 million. */
 export const DEFAULT_PAPER_CASH_IDR = 100_000_000;

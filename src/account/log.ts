@@ -23,7 +23,7 @@ export function accountLogPath(): string {
 }
 
 /** A lock older than this belongs to a process that died mid-edit. */
-export const ACCOUNT_LOCK_STALE_MS = 30_000;
+const ACCOUNT_LOCK_STALE_MS = 30_000;
 
 /**
  * One append-only line per attempt. Returns whether it was written.
@@ -31,7 +31,7 @@ export const ACCOUNT_LOCK_STALE_MS = 30_000;
  * A failed log never masks the edit it describes, but it is reported: advertising an audit trail
  * that does not exist is worse than having none.
  */
-export function logAccountMutation(entry: Record<string, unknown>): boolean {
+function logAccountMutation(entry: Record<string, unknown>): boolean {
   try {
     mkdirSync(stockbitDir(), { recursive: true });
     appendFileSync(accountLogPath(), `${JSON.stringify(redactValue(entry))}\n`, "utf8");

@@ -472,7 +472,7 @@ export interface InsiderOwnershipOptions {
 }
 
 /** Build the ownership query. Exported for the same reason as the transaction one. */
-export function buildInsiderOwnershipParams(
+function buildInsiderOwnershipParams(
   opts: InsiderOwnershipOptions,
 ): Record<string, string | number> {
   const params: Record<string, string | number> = {

@@ -45,7 +45,7 @@ const SHARES_PER_LOT = 100;
 /** The published retail schedule. Paper has no account to read a real one from. */
 export const PAPER_FEES = { buyPct: 0.15, sellPct: 0.25 } as const;
 
-export const PAPER_LEDGER_VERSION = 1;
+const PAPER_LEDGER_VERSION = 1;
 
 /** The sentence that opens every paper-served summary. Written once so they cannot drift apart. */
 export const PAPER_BANNER = "PAPER ACCOUNT — no real money.";

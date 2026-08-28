@@ -134,7 +134,7 @@ function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: num
  * enum: refusing an unknown value would make the whole vocabulary unreachable, and inventing the
  * list would make a wrong one look supported.
  */
-export const DEFAULT_EMITTEN_TYPE = "company";
+const DEFAULT_EMITTEN_TYPE = "company";
 
 /** Normalize a caller's emitten type. The transport enforces the charset; this fixes the casing. */
 function emittenTypeOf(value: string | undefined): string {
@@ -153,7 +153,7 @@ export interface CompanyProfile {
 }
 
 /** The profile block alone. */
-export async function getProfile(symbol: string): Promise<unknown> {
+async function getProfile(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   return cached(`companyProfile:${sym}`, CACHE.keystatsTtlMs, async () =>
     dataOf(await getJson("emittenProfile", { segments: { symbol: sym } }), "company profile"),
@@ -161,7 +161,7 @@ export async function getProfile(symbol: string): Promise<unknown> {
 }
 
 /** The typed view of a company, under one statement vocabulary. */
-export async function getTypedInfo(symbol: string, emittenType?: string): Promise<unknown> {
+async function getTypedInfo(symbol: string, emittenType?: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   const type = emittenTypeOf(emittenType);
   return cached(`companyTypedInfo:${sym}:${type}`, CACHE.keystatsTtlMs, async () =>
@@ -173,7 +173,7 @@ export async function getTypedInfo(symbol: string, emittenType?: string): Promis
 }
 
 /** The financial line items one statement vocabulary defines for this company. */
-export async function getFinItems(symbol: string, emittenType?: string): Promise<unknown> {
+async function getFinItems(symbol: string, emittenType?: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   const type = emittenTypeOf(emittenType);
   return cached(`companyFinItems:${sym}:${type}`, CACHE.keystatsTtlMs, async () =>

@@ -28,7 +28,7 @@ import { setTimeout as delay } from "node:timers/promises";
 export const BROWSER_START_TIMEOUT_MS = 30_000;
 
 /** The diagnostic for the failure that looks like nothing happening at all. */
-export const ALREADY_OPEN_HINT =
+const ALREADY_OPEN_HINT =
   "The browser exited immediately without opening a debugging port. This usually means a window " +
   "is already open using this profile — close every window of that browser and retry, or use " +
   "`--fresh-profile`.";

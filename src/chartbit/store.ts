@@ -110,9 +110,3 @@ export function forgetOurDrawings(symbolInput: string, entityIds: string[]): Our
   return remaining;
 }
 
-/** Attach the server-side ids to everything recorded for a symbol, once a save reveals them. */
-export function noteServerIds(symbolInput: string, ids: { layoutId?: string; chartId?: string }): void {
-  const symbol = normalizeSymbol(symbolInput);
-  const drawings = loadOurDrawings(symbol).map((d) => ({ ...d, ...ids }));
-  if (drawings.length) write(symbol, drawings);
-}

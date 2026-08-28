@@ -48,7 +48,7 @@ import { evaluateInPage } from "./evaluate.js";
 import { READINESS } from "./page-scripts.js";
 
 /** How long to wait for the widget to come up before giving up on a tab. */
-export const CHART_READY_TIMEOUT_MS = 45_000;
+const CHART_READY_TIMEOUT_MS = 45_000;
 
 /**
  * Chrome flags that stop it throttling rendering for a window that is not the OS's frontmost app.
@@ -123,7 +123,7 @@ async function probePort(port: number): Promise<string | null> {
  * without re-logging in — but it warns, since the override's likeliest outcome is a profile that
  * browser has never been logged into.
  */
-export function resolveDriverBrowser(): { path: string; warning?: string; note?: string } {
+function resolveDriverBrowser(): { path: string; warning?: string; note?: string } {
   const override = process.env.STOCKBIT_BROWSER?.trim();
   if (override) {
     return {
@@ -485,21 +485,3 @@ interface Readiness {
   readyState: string;
 }
 
-/** Whether a drivable, logged-in browser is configured at all — for `stockbit-auth doctor`. */
-export function driverAvailability(): { ok: boolean; detail: string } {
-  try {
-    const browser = resolveDriverBrowser();
-    const profile = defaultProfileDir();
-    if (!existsSync(profile)) {
-      return { ok: false, detail: `no browser profile at ${profile} — run \`stockbit-auth login\`` };
-    }
-    const why = browser.warning
-      ? " (overridden by STOCKBIT_BROWSER)"
-      : browser.note
-        ? " (your OS default; login had auto-picked another)"
-        : "";
-    return { ok: true, detail: `${browser.path}${why}` };
-  } catch (err) {
-    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
-  }
-}
