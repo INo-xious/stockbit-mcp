@@ -526,25 +526,55 @@ function keyFor(route: RouteName, params: QueryParams): string {
 /* ================================ running trade ================================ */
 
 export interface RunningTradeOptions {
-  /** Restrict to one ticker. Omitted means whatever the endpoint's market-wide default is. */
+  /** Restrict to one ticker. Omitted means the market-wide tape. */
   symbol?: string;
   action?: RunningTradeAction;
   limit?: number;
+  /**
+   * Row ordering. The endpoint REQUIRES this — see the note on the function below. `1` is the
+   * default and is what every caller wants unless it has a reason otherwise.
+   */
+  orderBy?: 1 | 2 | 3;
   /** Read the grouped view (`runningTradeGroup`) instead of the raw tape. */
   grouped?: boolean;
 }
 
 /**
- * The running-trade tape: individual prints as they cross, newest first.
+ * The running-trade tape: individual prints, with the broker on each side of them.
  *
- * `grouped` swaps to the aggregated sibling route. It is a separate route rather than a parameter,
- * so it is not passed on the query string.
+ * ## This route used to return nothing at all, for two reasons
+ *
+ * Both were found by probing the live endpoint (2026-08-28) rather than by reading anything, because
+ * the parameter names here were guessed when this file was written and recorded as unverified.
+ *
+ *   1. **`order_by` is a REQUIRED field.** Without it every call returns
+ *      `400 {"key":"OrderBy","error":"OrderBy is a required field"}`. So every call this project
+ *      has ever made to this route failed. Accepted values are `1`, `2` and `3`; `0` and `4` are
+ *      rejected.
+ *   2. **The filter parameter is `symbols`, PLURAL.** `symbol` is accepted and silently ignored —
+ *      asking for BRMS returned rows for ZONE and WINE. A filter that is quietly dropped is worse
+ *      than one that errors, because the answer looks right.
+ *
+ * `limit` is honoured but the server caps the response at 100 rows.
+ *
+ * ## What a row carries, observed
+ *
+ * `time`, `action` (`buy`/`sell` — the aggressor side), `code`, `price`, `lot`, `value {raw}`,
+ * `market_board`, and — the surprise — `buyer` and `seller` broker codes with `buyer_type` /
+ * `seller_type` marking foreign versus local, plus `buy_order_number` and `sell_order_number`.
+ *
+ * **Broker identity was observed on a CLOSED market.** IDX closed broker codes in live running trade
+ * on 6 December 2021, so whether `buyer`/`seller` stay populated while the session is open is NOT
+ * established here. `is_broker_exists` is the per-row flag to check rather than assume.
  */
 export async function getRunningTrade(opts: RunningTradeOptions = {}): Promise<unknown> {
   const params: QueryParams = {};
-  if (opts.symbol !== undefined) params.symbol = normalizeSymbol(opts.symbol);
+  // Plural. See the note above — the singular form is accepted and ignored.
+  if (opts.symbol !== undefined) params.symbols = normalizeSymbol(opts.symbol);
   if (opts.action !== undefined) params.action_type = `RUNNING_TRADE_ACTION_TYPE_${opts.action}`;
   if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+  // Always sent: omitting it is a hard 400, so there is no "unset" worth preserving here.
+  params.order_by = String(opts.orderBy ?? 1);
   const route: RouteName = opts.grouped ? "runningTradeGroup" : "runningTrade";
   return cached(keyFor(route, params), CACHE.defaultTtlMs, () =>
     readData(route, opts.grouped ? "running trade group" : "running trade", { params }),

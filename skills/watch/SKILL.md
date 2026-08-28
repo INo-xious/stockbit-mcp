@@ -1,6 +1,6 @@
 ---
 name: watch
-description: Sample live IDX turnover over one short window and answer a question about what traded — per-symbol rupiah, lot count, print count and average print size, ranked. Use when the user runs /watch, or asks what is trading right now, who is moving, or where the money is going in the Indonesian market this minute.
+description: Watch live IDX turnover and order books for unusual activity — value surges, auto-reject approach, one-sided depth, walls appearing or withdrawn, quiet stocks waking up, UMA flags — plus delayed print-by-print attribution and end-of-day broker context. Use when the user runs /watch, or asks what is trading right now, who is moving, whether anyone is dumping, or where the money is going in the Indonesian market.
 argument-hint: <stock|watchlist|all> [interval] [prompt]
 ---
 
@@ -65,6 +65,47 @@ Fall down this ladder — do not hardcode an install path, because the registere
    ```
    On a machine that already has the helper, `node "$HOME/.claude/helpers/stockbit-resolve.js" --path` prints that directory.
 3. If `dist/bin/stockbit-live.js` is missing from a clone, the source has not been compiled since it changed — `npm run build` there once.
+
+
+## The other commands
+
+`scan` measures turnover and ranks it. These do more.
+
+### `signals` — run the detectors
+
+```bash
+stockbit-live signals <scope> <interval> [prompt] --pretty
+```
+
+Takes two readings, runs every detector the prompt enabled, and puts the results through the alert
+engine (max 5 per interval, 25 per session, cooldowns, dedup). Reads order books only for symbols
+that actually traded, capped at 12 per pass — one request each.
+
+Output carries `alerts` (what to show), `suppressed` (with the reason), `marketWide` (set when one
+signal tripped across most of the universe — show that line INSTEAD of the rows), and
+`prompt.downgrades` (requests that cannot be served as asked). **Always show the downgrades.**
+
+### `explain <SYMBOL>` — what actually printed
+
+```bash
+stockbit-live explain BRMS [HH:MM:SS] [HH:MM:SS]
+```
+
+Names the individual trades: time, price, lots, value, which side crossed the spread, and the broker
+on each side. **Always `lagged: true`** — the tape runs 8-10 minutes behind, so this explains
+something that already happened. Check `brokersVisible`: IDX closes broker codes during live
+trading, so identity may be withheld while the market is open.
+
+### `brokers <SYMBOL>` — who was on each side
+
+```bash
+stockbit-live brokers BRMS
+```
+
+End-of-day broker flow. **Never an alert, always context.** The useful column is `lotsPerTrade`
+(|netLots| / freq): a broker buying in many small pieces is retail-shaped flow; one buying the same
+lots in a few large trades is institution-shaped. Those boundaries are ours — IDX publishes none —
+and the output says so. If `degraded` is true, read `degradedReason` and do not interpret the labels.
 
 ## Step 3 — read the output
 

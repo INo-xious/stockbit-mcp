@@ -298,16 +298,22 @@ test("running trade sends nothing the caller did not ask for", async () => {
   await getRunningTrade();
   const url = lastUrl("/running-trade");
   assert.equal(url.pathname, "/order-trade/running-trade");
-  assert.deepEqual(query(url), [], "an omitted optional argument must be absent, not empty");
+  // order_by is the one exception to "send nothing the caller did not ask for": the endpoint
+  // returns 400 {"key":"OrderBy","error":"OrderBy is a required field"} without it, so there is no
+  // useful "unset" state to preserve. Measured against the live endpoint 2026-08-28.
+  assert.deepEqual(query(url), ["order_by=1"], "only the required field is sent");
 });
 
 test("running trade filters are prefixed with the wire vocabulary", async () => {
   await getRunningTrade({ symbol: "bbri", action: "BUY", limit: 25 });
   const url = lastUrl("/running-trade");
+  // `symbols` is PLURAL. The singular form is accepted and silently ignored — asking for BRMS
+  // returned ZONE and WINE rows — which is worse than an error because the answer looks right.
   assert.deepEqual(query(url), [
     "action_type=RUNNING_TRADE_ACTION_TYPE_BUY",
     "limit=25",
-    "symbol=BBRI",
+    "order_by=1",
+    "symbols=BBRI",
   ]);
 });
 
@@ -315,7 +321,7 @@ test("grouped is a different route, not a query parameter", async () => {
   await getRunningTrade({ grouped: true, symbol: "BBRI" });
   const url = lastUrl("/running-trade/group");
   assert.equal(url.pathname, "/order-trade/running-trade/group");
-  assert.deepEqual(query(url), ["symbol=BBRI"]);
+  assert.deepEqual(query(url), ["order_by=1", "symbols=BBRI"]);
 });
 
 test("the running-trade cache key includes every argument", async () => {

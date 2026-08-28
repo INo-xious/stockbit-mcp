@@ -95,6 +95,16 @@ export interface TradeDelta {
   /** Seconds between the two snapshots. */
   seconds: number;
   /**
+   * Cumulative session value for this symbol at the LATER snapshot, rupiah.
+   *
+   * Carried on the delta because every detector that asks "is this window unusual FOR THIS SYMBOL"
+   * needs the symbol's own session baseline, and re-deriving it would mean handing the snapshots
+   * around alongside the deltas.
+   */
+  sessionValue: number;
+  /** Cumulative session transaction count at the later snapshot. */
+  sessionFrequency: number;
+  /**
    * How much weight `averageTradeValue` can carry.
    *
    * `single` — exactly one transaction printed, so the average IS that trade. This is the only case
@@ -167,6 +177,8 @@ export function diffSnapshots(before: MarketSnapshot, after: MarketSnapshot): Tr
       trades,
       averageTradeValue: trades > 0 ? value / trades : null,
       seconds,
+      sessionValue: now.value,
+      sessionFrequency: now.frequency,
       confidence: trades === 0 ? "none" : trades === 1 ? "single" : trades <= 5 ? "few" : "averaged",
     });
   }

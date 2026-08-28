@@ -33,6 +33,12 @@ import { StockbitError } from "../src/http/errors.js";
 import { parseInterval, describeInterval, IntervalParseError } from "../src/live/interval.js";
 import { parseScope, resolveScope, describeScope, inScope, ScopeParseError } from "../src/live/scope.js";
 import { MarketWatcher } from "../src/live/poller.js";
+import { SignalWatcher } from "../src/live/watcher.js";
+import { compilePrompt, describeSpec } from "../src/live/promptspec.js";
+import { attribute, parseTape } from "../src/live/attribution.js";
+import { readBandar } from "../src/live/bandar.js";
+import { getRunningTrade } from "../src/core/market.js";
+import { getBrokerSummary } from "../src/core/marketdetectors.js";
 
 /**
  * The longest window one `scan` may measure over.
@@ -214,10 +220,150 @@ async function scan(): Promise<void> {
   }
 }
 
+/* ------------------------------- signals -------------------------------- */
+
+/**
+ * One full detection pass: the value surge plus every order-book signal the prompt enabled.
+ *
+ * Two market readings are needed before anything can be detected, so this polls, waits the interval,
+ * and polls again — the same shape as `scan`, with the detectors and the alert engine on top.
+ */
+async function signals(): Promise<void> {
+  const [, scopeToken, intervalToken, ...promptWords] = positionals();
+
+  let scope, interval;
+  try {
+    scope = parseScope(scopeToken);
+    interval = parseInterval(intervalToken);
+  } catch (err) {
+    if (err instanceof ScopeParseError || err instanceof IntervalParseError) {
+      fail("bad-arguments", err.message, "Usage: stockbit-live signals <BBCA,ANTM|watchlist|all> <30s|5m> [prompt]");
+    }
+    throw err;
+  }
+  if (interval.ms > MAX_SCAN_MS) {
+    fail("window-too-long", `${describeInterval(interval)} is longer than one measurement can cover.`, "Use 30s, 1m or 5m.");
+  }
+
+  const spec = compilePrompt(promptWords.join(" "));
+  const clock = sessionClock();
+
+  if (!flag("always") && !isWithinPollingWindow(new Date())) {
+    fail(
+      "market-closed",
+      `IDX is shut (${clock.nowWib} WIB, ${clock.weekday}, ${clock.phase}). Two readings taken now are identical, so every detector would see a flat, silent market.`,
+      "Pass --always to run anyway.",
+    );
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveScope(scope);
+  } catch (err) {
+    if (err instanceof StockbitError && err.kind === "auth") {
+      fail("auth", err.message, "Run /stockbit-status, then /stockbit-auth.");
+    }
+    fail("scope-unresolved", err instanceof Error ? err.message : String(err));
+  }
+
+  // Trading seconds elapsed today, for the "what should this window have carried" baseline.
+  const elapsedSeconds = () => {
+    const wib = new Date(Date.now() + 7 * 3600_000);
+    const mins = wib.getUTCHours() * 60 + wib.getUTCMinutes();
+    return Math.max(60, (Math.min(mins, 16 * 60) - 9 * 60) * 60);
+  };
+
+  const watcher = new SignalWatcher({ scope: resolved, spec, elapsedSeconds });
+
+  try {
+    await watcher.pass(new Date()); // baseline; produces no deltas by design
+    process.stderr.write(
+      `watching ${describeScope(resolved)} ${describeInterval(interval)} — baseline taken, detecting in ${Math.round(interval.ms / 1000)}s\n`,
+    );
+    await sleep(interval.ms);
+    const result = await watcher.pass(new Date());
+
+    emit({
+      ok: true,
+      scope: { kind: scope.kind, described: describeScope(resolved) },
+      window: { requested: describeInterval(interval), requestedMs: interval.ms },
+      market: { nowWib: clock.nowWib, weekday: clock.weekday, phase: clock.phase },
+      prompt: { interpretation: describeSpec(spec), downgrades: spec.downgrades },
+      symbolsSeen: result.symbolsSeen,
+      booksRead: result.booksRead,
+      detected: result.signals.length,
+      alerts: result.engine?.emitted ?? [],
+      marketWide: result.engine?.marketWide ?? null,
+      suppressed: (result.engine?.suppressed ?? []).map((s) => ({
+        symbol: s.signal.symbol,
+        kind: s.signal.kind,
+        reason: s.reason,
+      })),
+      alertsSpentThisSession: watcher.alertsSpent,
+      errors: result.errors,
+      notes: [
+        ...resolved.notes,
+        "Detection runs on live aggregates. Broker-level attribution is a separate, delayed step — see the `explain` command.",
+      ],
+    });
+  } catch (err) {
+    if (err instanceof StockbitError && err.kind === "auth") {
+      fail("auth", err.message, "Run /stockbit-status, then /stockbit-auth.");
+    }
+    fail(err instanceof StockbitError ? err.kind : "failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/* ------------------------------- explain -------------------------------- */
+
+/** Feature 4: name the prints behind a move, from the (late) tape. */
+async function explain(): Promise<void> {
+  const [, symbolToken, from, to] = positionals();
+  if (!symbolToken) fail("bad-arguments", "Name a symbol.", "Usage: stockbit-live explain <SYMBOL> [HH:MM:SS] [HH:MM:SS]");
+
+  try {
+    const raw = await getRunningTrade({ symbol: symbolToken, limit: 100 });
+    const result = attribute(parseTape(raw), symbolToken, from, to);
+    emit({ ok: true, ...result, prints: result.prints.slice(0, 25) });
+  } catch (err) {
+    if (err instanceof StockbitError && err.kind === "auth") {
+      fail("auth", err.message, "Run /stockbit-status, then /stockbit-auth.");
+    }
+    fail(err instanceof StockbitError ? err.kind : "failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/* ------------------------------- brokers -------------------------------- */
+
+/** Feature 8: end-of-day broker context. Never an alert. */
+async function brokers(): Promise<void> {
+  const [, symbolToken] = positionals();
+  if (!symbolToken) fail("bad-arguments", "Name a symbol.", "Usage: stockbit-live brokers <SYMBOL>");
+
+  try {
+    const raw = await getBrokerSummary({ symbol: symbolToken });
+    const ctx = readBandar({ ...(raw as object), symbol: symbolToken.toUpperCase() });
+    if (!ctx) fail("failed", "The broker summary did not parse.");
+    emit({ ok: true, ...ctx, buyers: ctx.buyers.slice(0, 10), sellers: ctx.sellers.slice(0, 10) });
+  } catch (err) {
+    if (err instanceof StockbitError && err.kind === "auth") {
+      fail("auth", err.message, "Run /stockbit-status, then /stockbit-auth.");
+    }
+    fail(err instanceof StockbitError ? err.kind : "failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function main(): Promise<void> {
   const command = positionals()[0] ?? "scan";
   if (command === "scan") return scan();
-  fail("unknown-command", `"${command}" is not a command.`, "The only command is: scan <scope> <time-frame>");
+  if (command === "signals") return signals();
+  if (command === "explain") return explain();
+  if (command === "brokers") return brokers();
+  fail(
+    "unknown-command",
+    `"${command}" is not a command.`,
+    "Commands: scan <scope> <time-frame> · signals <scope> <time-frame> [prompt] · explain <SYMBOL> · brokers <SYMBOL>",
+  );
 }
 
 main().catch((err) => {
