@@ -341,13 +341,15 @@ async function cmdLogout(argv: string[]): Promise<void> {
 async function cmdTradingLogin(argv: string[]): Promise<void> {
   if (argv.includes("--browser")) {
     // NOT `/trade`. That path is a Stockbit USERNAME route, so it opened a stranger's profile page
-    // and the PIN form was never shown — reported by an account owner who read the page. The real
-    // trading URL is not recorded anywhere in this repo, and guessing a second one would repeat the
-    // mistake, so this opens the site and says what to do. STOCKBIT_TRADING_URL overrides it for
-    // anyone who knows the exact page.
+    // — reported by an account owner who read the page they were sent to.
+    //
+    // There is no trading PAGE to send them to instead. Confirmed by the same account owner: the
+    // PIN prompt is a MODAL that appears when a buy or sell is clicked, anywhere on the site. So
+    // this opens the site and says what to click; a URL here could only ever be wrong again.
     const startUrl = process.env.STOCKBIT_TRADING_URL || "https://stockbit.com/";
     logStderr("Opening the logged-in browser so Cloudflare sees a real one.");
-    logStderr(`Go to your trading page in that window and enter your 6-digit PIN there (opened ${startUrl}).`);
+    logStderr("Click Buy or Sell on any stock in that window — the 6-digit PIN prompt appears as a");
+    logStderr("pop-up. Enter it there. There is no separate trading page, so nothing to navigate to.");
     logStderr("The capture watches for the carina session response and closes itself when it sees one.");
     const result = await captureViaBrowserLogin({
       startUrl,

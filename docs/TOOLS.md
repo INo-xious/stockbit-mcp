@@ -168,7 +168,7 @@ Posts, news and research from Stockbit's own feed.
 |---|---|---|---|---|
 | `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Observed | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids |
 | `news` | read | News posts, market-wide or for one symbol. | Observed | symbol, keyword, from_date, to_date, limit, last_stream_id |
-| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Projected | date, limit, last_stream_id |
+| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Observed | date, limit, last_stream_id |
 | `stream_post_detail` | read | Read ONE post by id, with the whole payload the detail endpoint returns. | Projected | post_id* |
 | `stream_pinned` | read | The posts pinned to a symbol's page — what Stockbit or the company has chosen to keep at the top. | Projected | symbol* |
 | `stream_user` | read | One Stockbit user's posts, by username. | Observed | username*, limit, last_stream_id |

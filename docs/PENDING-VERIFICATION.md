@@ -21,7 +21,7 @@
 A second live pass, against a real account, with the market shut (Friday night WIB). 57 tools called
 once each; key names recorded, values never. What it settled, and what it broke open:
 
-### Settled — 18 tools moved from `projected` to `observed`
+### Settled — 19 tools moved from `projected` to `observed`
 
 `company_subsidiaries` · `index_members` · `symbol_search` · `classification` ·
 `corporate_actions` · `corporate_action_status` · `dividend_calendar` · `ipo_pipeline` ·
@@ -44,14 +44,13 @@ NOT evidence problems — the mapping cannot be settled because the request neve
 
 | Tool | What the server actually said |
 |---|---|
-| `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;` |
+| `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;`. Supplying `sort_column`/`order` changes the error to `Your request is invalid`, so the NAMES are right and the values are not: `date`, `symbol`, `company_symbol`, `earnings_date`, `period`, `name` and `id` were all refused. The vocabulary is unknown. |
 | `watchlist_search` | 400 `WatchlistID is a required field;` — the tool takes only `keyword` |
 | `order_queue` | 400 `Stock code is required` — with `symbol` supplied, so it is not being forwarded |
-| `shareholding` | 400 `Invalid company id` — a ticker is passed where a numeric company id is wanted |
-| `underwriters` | 404 `Unrecognized Command` — the route does not exist |
-| `price_market` | 400 `Silahkan Periksa permintaan` |
-| `stream_trending` | 400 `Silakan periksa konten anda` |
-| `shareholders` | schema drift: the token endpoint returned no token-shaped field (top-level keys: `message`, `data`) |
+| `shareholding` | 400 `Invalid company id`. Re-probed with the ticker as a PATH SEGMENT (the route is `/insider/shareholding/companies/:symbol`) and it still refuses, so the segment wants a numeric company id and a symbol→id resolution step is missing. |
+| `underwriters` | 404 `Unrecognized Command`, bare and with `{page,limit}` and `{symbol}` alike. `/order-trade/underwriters` does not exist. |
+| `price_market` | 400 `Silahkan Periksa permintaan`, and still 400 when re-probed correctly against `pricesMarket` with the `:symbol` segment and with/without `date`. Which parameter it wants is unknown. |
+| `shareholders` | PARTLY FIXED. The token endpoint answers `{"message":"Successfully retrieved Token","data":{"value":"<64 hex>"}}` — the token sits under `value`, which no `/token/i` key search can find, and `message` is the only string that mentions the word. Reading `data.value` on this one route settles the mint. The chart call behind it then fails differently: `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found`. How the minted token must be presented is still unknown, so the tool stays `projected`. |
 | `chart_series` | schema drift: points carry no recognisable close field. Keys present: `date`, `formatted_date`, `xlabel`, `value`, `percentage`, `change`, `open`, `high`, `low`. `raw: true` succeeds |
 
 Three more that are not errors but are not right either:
@@ -76,6 +75,7 @@ one on the result. Checked directly, `brokers` maps 112 rows and `broker_top` ma
 | `order_queue` | sent `symbol`; the endpoint wants `stock_code` | `symbol`, `code`, `emiten_code`, `stockCode` and `company` each returned 400 "Stock code is required"; `stock_code` answered. The tool had never once returned data. |
 | `chart_series` | no `close` key on the wire, so the whole series was refused | the daily route carries the price in `value`. Proven by arithmetic on the payload rather than by assumption: a BBRI point read `value: "2930"`, `change: -20`, `percentage: "-0.68"`, and 20/2930 = 0.68%. |
 | `chart_series` | flat candles with NO warning | open/high/low/volume arrive as EMPTY STRINGS. The keys are present, so `unmapped` stayed clean and the flat-candle warning never fired, while `numberish("")` returned null and every bar silently took its close for all three. A field that reads null on every row now counts as flat. |
+| `stream_trending` | dropped `date`, which the endpoint REQUIRES | 400 "Silakan periksa konten anda" without it, and 400 to `{page, limit}` too — only a date makes the route reply. An omitted date now defaults to today in WIB, which is what "trending" means when nobody named a day. Returns 30 posts. |
 | `stock_conversion` | sent no paging, and the endpoint has no default | 400 "Page is a required field;Limit is a required field;". Both are now defaulted (page 1, limit 20) rather than made mandatory on the tool: a caller asking a company for its conversions should not have to know the API needs paging to answer at all. |
 | `stream_user` | named 1 of its 4 fields | `/stream/non-login/user/:username` spells them `postid`, `created` and a FLAT `username`/`fullname`, where the per-symbol route uses `stream_id`, `created_at` and a nested `user`. All four now map. |
 
@@ -101,6 +101,10 @@ the mapping. A working request is not a settled field map.
 1. **`bin/stockbit-auth.ts` opened `https://stockbit.com/trade` for the browser trading login.**
    That path is a Stockbit *username* route, so it lands on a profile page and the PIN form is never
    shown. Reported by the account owner, who read the page.
+
+   There is **no trading page to open instead** — confirmed by the same account owner: the PIN
+   prompt is a MODAL raised by clicking buy or sell, anywhere on the site. Any URL here would have
+   been wrong again, so the command opens the site and says what to click.
 2. **The already-signed-in harvest tier was slot-blind.** `harvestFromBrowser` reads
    `credentialStorage` — the stockbit.com web session, a market-data credential by construction —
    and `accept()` wrote it to whatever slot was asked for. `trading-login --browser` therefore stored

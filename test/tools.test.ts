@@ -360,6 +360,7 @@ test("every order-entry write is in the list the instructions page measures agai
  * ------------------------------------------------------------------ */
 
 const OBSERVED = [
+  "stream_trending",
   "brokers",
   "broker_top",
   "chart_series",
@@ -446,7 +447,6 @@ const READ_BACK = [
 
 const PROJECTED = [
   "analyst_ratings",
-  "stream_trending",
   "stream_post_detail",
   "stream_pinned",
   "research",

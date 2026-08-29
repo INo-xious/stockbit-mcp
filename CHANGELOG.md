@@ -145,6 +145,15 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- **`stream_trending` and the shareholders token mint.** Trending dropped `date`, which the endpoint
+  requires — without it the answer is 400 "Silakan periksa konten anda", and `{page, limit}` is
+  refused too, so the tool had never returned a post. An omitted date now defaults to today in WIB,
+  which is what "trending" means when nobody named a day. The shareholders token endpoint answers
+  with the token under `data.value`, which no `/token/i` key search can find (`message` is the only
+  string that mentions the word), so the mint always threw `schema_drift`; it is now read narrowly
+  from that one route rather than by loosening the generic search. The chart call behind it still
+  fails for a different reason and the tool stays `projected` — a partial fix, recorded as one.
+
 - **Four endpoints that had never returned usable data now do.** Found by calling all 77 projected
   tools against a live account rather than by reading them. `order_queue` sent `symbol` where the
   endpoint wants `stock_code` and answers 400 to every other spelling. `stock_conversion` sent no

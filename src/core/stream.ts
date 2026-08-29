@@ -434,8 +434,14 @@ export interface TrendingQuery {
  */
 export async function getTrendingStream(query: TrendingQuery = {}): Promise<StreamPage> {
   const limit = positiveLimit(query.limit);
+  // `date` is REQUIRED here. Settled live on 2026-08-29: a body without it answers 400 "Silakan
+  // periksa konten anda", and {page, limit} answers 400 too — only a date makes this route reply.
+  // So an omitted date defaults to today in WIB rather than being dropped, which is what "trending"
+  // means when nobody named a day. IDX is UTC+7 year-round, so the shift is exact.
+  const wibToday = new Date(Date.now() + 7 * 60 * 60_000).toISOString().slice(0, 10);
+  const date = query.date === undefined || query.date === null ? wibToday : query.date;
   const body: Record<string, unknown> = {
-    date: query.date === undefined || query.date === null ? undefined : normalizeTradeDate(query.date, "date"),
+    date: normalizeTradeDate(date, "date"),
     last_stream_id: query.lastStreamId,
     limit,
   };

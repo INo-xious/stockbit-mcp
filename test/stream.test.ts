@@ -223,7 +223,7 @@ test("WIRE: the user stream sends the cursor and limit, and the handle as a path
   assert.equal(last().url.search, "");
 });
 
-test("WIRE: trending is a POST whose body carries only the keys that were supplied", async () => {
+test("WIRE: trending is a POST that always carries a date, and no key nobody supplied", async () => {
   await getTrendingStream({ date: "2026-08-24", limit: 4 });
   const req = last();
   assert.equal(req.url.pathname, P.trending);
@@ -233,7 +233,13 @@ test("WIRE: trending is a POST whose body carries only the keys that were suppli
 
   clearCache();
   await getTrendingStream();
-  assert.deepEqual(last().body, {});
+  // NOT `{}`. This used to assert an empty body, and that assertion was pinning a defect: the
+  // endpoint answers 400 "Silakan periksa konten anda" without a date, so trending never returned
+  // anything. Settled live on 2026-08-29. The default is today in WIB, so it is checked by shape
+  // rather than by value — a hard-coded date here would start failing tomorrow.
+  const body = last().body as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body), ["date"], "a date, and nothing the caller did not ask for");
+  assert.match(String(body.date), /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test("WIRE: a post is fetched by numeric id with no query string", async () => {
