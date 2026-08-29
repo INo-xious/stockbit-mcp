@@ -77,17 +77,37 @@ export async function createWatchlist(options: {
   requireConfirm(options.confirm, `create the watchlist "${name}"`);
 
   const before = await listIds();
-  return verifiedWrite({
+  // Explicit generic: the success branch alone would infer `id: string`, which then rejects the
+  // not-found branch that legitimately has no id.
+  return verifiedWrite<{ id?: string; name: string }>({
     action: "watchlist_create",
     target: name,
     lockKey: "watchlist",
     write: () => postJson("watchlistCreate", { body: { name, description: options.description ?? "" } }),
     invalidate,
     verify: async () => {
-      const after = await getWatchlists();
-      const fresh = after.find((list) => !before.has(list.id) && (list.name ?? "") === name);
-      const byName = after.find((list) => (list.name ?? "") === name);
-      return { verified: Boolean(fresh ?? byName), detail: { id: (fresh ?? byName)?.id, name } };
+      // Stockbit's watchlist INDEX is eventually consistent after a create. Measured 2026-08-29:
+      // the POST succeeds, an immediate read-back does not show the new list, and it appears a few
+      // seconds later. Reading once therefore reported `not-visible` on every single create while
+      // the list existed the whole time — and the danger in that is not the wrong label, it is that
+      // a caller who believes the create failed retries and ends up with duplicates. That happened
+      // during testing: two identical lists from one intended create.
+      //
+      // Only `create` needs this. Add, remove, rename and delete all verified first time.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, 600 * attempt));
+          invalidate();
+        }
+        const after = await getWatchlists();
+        const fresh = after.find((list) => !before.has(list.id) && (list.name ?? "") === name);
+        const byName = after.find((list) => (list.name ?? "") === name);
+        const found = fresh ?? byName;
+        if (found) return { verified: true, detail: { id: found.id, name } };
+      }
+      // Still nothing after ~6s. Report it honestly rather than assuming success: the caller is told
+      // the change could not be confirmed, which is true, and is warned not to simply retry.
+      return { verified: false, detail: { name } };
     },
   });
 }
