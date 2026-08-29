@@ -472,6 +472,9 @@ Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user
 | `stockbit-auth trading-logout` | End the trading session and delete its credential. |
 | `stockbit-alerts watch\|check\|test` | The alert daemon. |
 
+Every command answers `--help`/`-h` without running anything, and an unknown flag or stray argument
+is an error naming what that command accepts — never silently ignored.
+
 ## Files it writes
 
 Everything lives in one directory — `~/.stockbit`, or wherever `STOCKBIT_STORE_DIR` points. Nothing

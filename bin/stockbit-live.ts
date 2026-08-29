@@ -29,6 +29,8 @@
  * **It never places, cancels or modifies an order.** It reads one public market endpoint.
  */
 import { sessionClock, isWithinPollingWindow } from "../src/core/sessionclock.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { LIVE_BIN, LIVE_COMMANDS, LIVE_EPILOGUE } from "../src/live/cli.js";
 import { StockbitError } from "../src/http/errors.js";
 import { parseInterval, describeInterval, IntervalParseError } from "../src/live/interval.js";
 import { parseScope, resolveScope, describeScope, inScope, ScopeParseError } from "../src/live/scope.js";
@@ -353,17 +355,61 @@ async function brokers(): Promise<void> {
   }
 }
 
+const COMMANDS_HINT =
+  "Commands: scan <scope> <time-frame> · signals <scope> <time-frame> [prompt] · explain <SYMBOL> · brokers <SYMBOL>";
+
 async function main(): Promise<void> {
-  const command = positionals()[0] ?? "scan";
+  const args = process.argv.slice(2);
+  const explicit = positionals()[0];
+
+  // Help before anything else. `--help` used to be INVISIBLE here — `positionals()` skips flag
+  // tokens, so `stockbit-live --help` fell through to the default command and ran a scan (same
+  // defect class as the 2026-08-29 stockbit-auth incident; see src/live/cli.ts). Requested help is
+  // human output: plain text on stdout, exit 0 — the one deliberate exception to the JSON contract.
+  if (explicit === undefined ? args.some(isHelpToken) : isHelpToken(explicit)) {
+    process.stdout.write(formatUsage(LIVE_BIN, LIVE_COMMANDS, undefined, LIVE_EPILOGUE));
+    return;
+  }
+  if (explicit === "help") {
+    const topic = positionals()[1];
+    if (topic !== undefined && !(topic in LIVE_COMMANDS)) {
+      fail("unknown-command", `"${topic}" is not a command.`, COMMANDS_HINT);
+    }
+    process.stdout.write(formatUsage(LIVE_BIN, LIVE_COMMANDS, topic, LIVE_EPILOGUE));
+    return;
+  }
+
+  const command = explicit ?? "scan";
+
+  // The command word is the first positional and flags may come before it, so the gate sees argv
+  // with that one token removed. Every invocation passes the gate BEFORE any handler runs: an
+  // unknown flag used to be silently ignored (and its value became a stray positional), which in a
+  // measuring tool means answering a question nobody asked. Refusals keep the machine contract —
+  // `ok:false` JSON, exit 1 — because callers like the /watch skill parse that shape.
+  const rest = [...args];
+  const at = rest.indexOf(command);
+  if (at !== -1) rest.splice(at, 1);
+  let gate: "help" | "ok" | "unknown-command";
+  try {
+    gate = gateCommandLine(LIVE_BIN, LIVE_COMMANDS, command, rest, (text) => process.stdout.write(text));
+  } catch (err) {
+    if (err instanceof CliParseError) {
+      fail("bad-arguments", err.message, `Run \`stockbit-live ${command} --help\` for what ${command} accepts.`);
+    }
+    throw err;
+  }
+  if (gate === "help") return;
+  if (gate === "unknown-command") {
+    fail("unknown-command", `"${command}" is not a command.`, COMMANDS_HINT);
+  }
+
   if (command === "scan") return scan();
   if (command === "signals") return signals();
   if (command === "explain") return explain();
   if (command === "brokers") return brokers();
-  fail(
-    "unknown-command",
-    `"${command}" is not a command.`,
-    "Commands: scan <scope> <time-frame> · signals <scope> <time-frame> [prompt] · explain <SYMBOL> · brokers <SYMBOL>",
-  );
+  // Unreachable while the dispatch above covers every key in LIVE_COMMANDS; a spec entry added
+  // without a branch lands here loudly instead of silently doing nothing.
+  fail("unknown-command", `"${command}" is not a command.`, COMMANDS_HINT);
 }
 
 main().catch((err) => {

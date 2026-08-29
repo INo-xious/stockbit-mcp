@@ -7,6 +7,9 @@
  *   stockbit-auth status      # show the store backend and verify the token still works
  *   stockbit-auth logout      # clear the stored refresh token
  *
+ * Every command answers `--help`/`-h` without running, and an unknown flag or stray argument is an
+ * error, never ignored — `src/auth/cli.ts` says why that rule is load-bearing for this bin.
+ *
  * `login` opens your existing Chrome/Edge/Brave, you log into Stockbit normally, and the refresh
  * token is captured from the login response — no DevTools, no copy-paste. After that, the MCP
  * auto-refreshes indefinitely.
@@ -41,6 +44,8 @@ import { logStderr, redactValue } from "../src/redact.js";
 import { collectStatus, formatStatus } from "../src/status.js";
 import { resolveToolProfile } from "../src/tools/_profile.js";
 import { describeSurface } from "../src/tools/surface.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { AUTH_BIN, AUTH_COMMANDS } from "../src/auth/cli.js";
 
 async function promptSecret(question: string): Promise<string> {
   const rl = createInterface({ input: stdin, output: stdout, terminal: true });
@@ -83,14 +88,8 @@ async function cmdDoctor(argv: string[]): Promise<void> {
 async function cmdImportHar(argv: string[]): Promise<void> {
   const path = argv.find((a) => !a.startsWith("--"));
   if (!path) {
-    logStderr("Usage: stockbit-auth import-har <file.har> [--shred]");
-    logStderr("");
-    logStderr("  1. Open your browser's DevTools → Network panel.");
-    logStderr("  2. Turn ON 'Preserve log' (Firefox: 'Persist Logs', Safari: 'Preserve Requests').");
-    logStderr("  3. Clear the log, then log into stockbit.com with username + password.");
-    logStderr("  4. Export the log to a .har file — in Chrome/Edge use the Export (download)");
-    logStderr("     button, NOT 'Copy all as HAR' (that one omits response bodies).");
-    logStderr("  5. Run this command on the file.");
+    // The DevTools tutorial lives in the command table now, so `--help` and this branch tell one story.
+    logStderr(formatUsage(AUTH_BIN, AUTH_COMMANDS, "import-har"));
     process.exit(2);
   }
 
@@ -584,6 +583,36 @@ async function cmdTradingDisable(): Promise<void> {
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "status";
   const argv = process.argv.slice(3);
+
+  // `--help`, `-h` or `help [command]` as the command word. Requested help is the command's product,
+  // so it goes to stdout and exits 0 — the same rule that already puts `status --json` there.
+  // (`help wat` is an unknown-command error like any other.)
+  if (cmd === "help" || isHelpToken(cmd)) {
+    const topic = argv[0];
+    if (topic !== undefined && !(topic in AUTH_COMMANDS)) {
+      logStderr(formatUsage(AUTH_BIN, AUTH_COMMANDS));
+      process.exit(2);
+    }
+    stdout.write(formatUsage(AUTH_BIN, AUTH_COMMANDS, topic));
+    return;
+  }
+
+  // Every command line passes this gate before ANY handler runs. On 2026-08-29, `login --help`
+  // reached cmdLogin and opened a real browser login, because flags were read with `argv.includes()`
+  // and an unknown token was invisible. An unknown token is an error, not a shrug (the
+  // STOCKBIT_TOOLS rule) — and it is a USAGE error: exit 2, not the catch-all's 1. `--help` on a
+  // subcommand prints usage and stops right here, which for this bin is the entire point: several
+  // of these handlers log out, wipe a ledger, or launch a browser.
+  try {
+    if (gateCommandLine(AUTH_BIN, AUTH_COMMANDS, cmd, argv, (text) => stdout.write(text)) === "help") return;
+  } catch (err) {
+    if (err instanceof CliParseError) {
+      logStderr(err.message);
+      process.exit(2);
+    }
+    throw err;
+  }
+
   switch (cmd) {
     case "login":
       await cmdLogin(argv);
@@ -622,38 +651,9 @@ async function main(): Promise<void> {
       await cmdPaperReset(argv);
       break;
     default:
-      logStderr(
-        "Usage: stockbit-auth <login|import-har|doctor|bootstrap|status|logout|" +
-          "trading-login|trading-status|trading-enable|trading-disable|trading-logout|paper-reset>",
-      );
-      logStderr("  login       one-time browser login, auto-captures your session (recommended)");
-      logStderr("              --fresh-profile   use a throwaway browser profile");
-      logStderr("              --switch-account  sign the current account out first, then show a real form");
-      logStderr("  import-har  import a login captured in ANY browser via a DevTools HAR export");
-      logStderr("  doctor      diagnose browsers, token store, and the capture path");
-      logStderr("  bootstrap   paste a refresh token manually (fallback)");
-      logStderr("  status      show store backend, every session, the trading mode and the IDX clock");
-      logStderr("              --verify   spend one refresh to prove the token works — this ROTATES it");
-      logStderr("              --offline  accepted, and now the default: nothing is spent");
-      logStderr("              --json     print the whole report as JSON (redacted; safe to paste)");
-      logStderr("  logout      clear the stored refresh token AND the logged-in browser profile");
-      logStderr("              --keep-profile  keep the browser profile (still logged in)");
-      logStderr("");
-      logStderr("  trading-login    unlock Stockbit Sekuritas with your 6-digit PIN (never stored)");
-      logStderr("                   --browser  complete it in the logged-in browser (Cloudflare fallback)");
-      logStderr("  trading-status   show the trading policy and whether the session still works");
-      logStderr("                   --offline  skip the live validity check");
-      logStderr("  trading-enable   ALLOW this server to place orders. Off until you run this.");
-      logStderr("                   --paper              a local ledger. No real money, no PIN. Start here.");
-      logStderr("                   --cash N             paper starting balance (default Rp 100,000,000)");
-      logStderr("                   --live               real orders on the exchange, with real money");
-      logStderr("                   --max-order-value N  cap one order's value in IDR");
-      logStderr("                   --max-lots N         cap one order's size in lots");
-      logStderr("                   --symbols A,B        restrict trading to these tickers");
-      logStderr("                   --auto-confirm       skip per-order confirmation (live only; needs --max-order-value)");
-      logStderr("  trading-disable  turn ordering off again. The session and the ledger are left alone.");
-      logStderr("  paper-reset      start the paper ledger over. --cash N sets the new balance.");
-      logStderr("  trading-logout   end the trading session and delete its credential");
+      // Generated from the same table the gate validates against, so this text cannot drift from
+      // what the commands actually accept. Unrequested usage is a diagnostic: stderr, exit 2.
+      logStderr(formatUsage(AUTH_BIN, AUTH_COMMANDS));
       process.exit(2);
   }
 }

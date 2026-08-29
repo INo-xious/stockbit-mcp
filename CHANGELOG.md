@@ -10,6 +10,26 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--help` no longer runs the command it describes.** All three CLIs read their flags with
+  `argv.includes()`, so a token nobody asked about was treated as absent rather than as an error —
+  and on 2026-08-29 that meant `stockbit-auth login --help` opened a real browser login, harvested
+  the signed-in browser session and overwrote the stored credential. The same hole made
+  `stockbit-live --help` run a scan (flag tokens are invisible to its positional scanner, so the
+  command word defaulted) and `stockbit-alerts watch --help` start the long-lived daemon.
+
+  Every subcommand of `stockbit-auth`, `stockbit-live` and `stockbit-alerts` now validates its argv
+  against a declared table (`src/cliargs.ts`, one spec per bin) before any handler runs: an unknown
+  flag or stray argument is refused with a message naming the token and everything that command
+  accepts — the `STOCKBIT_TOOLS` rule, *an unknown token is an error, not a shrug* — and
+  `--help`/`-h` prints usage with no side effects, on every subcommand and at the top level. Usage
+  text is generated from the same table the validator reads, so help and reality cannot drift.
+  Refusals keep each bin's established contract (auth exits 2 on stderr, live answers `ok:false`
+  JSON on stdout with exit 1, alerts sets `process.exitCode` and exits naturally), so scripted
+  callers still see the failure shape they already parse. `status --offline` stays accepted, because
+  SECURITY.md tells vulnerability reporters to run it.
+
 ## [1.2.1] — 2026-08-27
 
 ### Fixed

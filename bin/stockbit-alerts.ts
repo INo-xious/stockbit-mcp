@@ -13,6 +13,7 @@
  *   stockbit-alerts check                 one pass, then exit
  *   stockbit-alerts check --dry-run       evaluate without firing or delivering
  *   stockbit-alerts test                  send a sample notification through every channel
+ *   stockbit-alerts <cmd> --help          usage for any command — asking never runs it
  *
  * Flags: --symbol BBRI, --no-desktop, --no-telegram, --webhook <url> (or STOCKBIT_ALERT_WEBHOOK).
  *
@@ -26,6 +27,8 @@ import { getBars } from "../src/core/bars.js";
 import { tick, watch, isMarketOpen, type TickResult } from "../src/alerts/daemon.js";
 import { alertLogPath, deliver, telegramTargetFromEnv } from "../src/alerts/notify.js";
 import { loadRules } from "../src/alerts/store.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { ALERTS_BIN, ALERTS_COMMANDS, ALERTS_EPILOGUE } from "../src/alerts/cli.js";
 
 function flag(name: string): boolean {
   return process.argv.includes(`--${name}`);
@@ -65,6 +68,37 @@ function report(result: TickResult): void {
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "watch";
+  const rest = process.argv.slice(3);
+
+  // `--help`, `-h` or `help [command]` as the command word: usage on stdout, natural exit 0.
+  if (command === "help" || isHelpToken(command)) {
+    const topic = rest[0];
+    if (topic !== undefined && !(topic in ALERTS_COMMANDS)) {
+      console.error(`Unknown command ${JSON.stringify(topic)}. Use watch, check or test.`);
+      process.exitCode = 2;
+      return;
+    }
+    process.stdout.write(formatUsage(ALERTS_BIN, ALERTS_COMMANDS, topic, ALERTS_EPILOGUE));
+    return;
+  }
+
+  // The gate runs before ANY dispatch. `watch --help` used to START THE DAEMON — this bin's worst
+  // case of the 2026-08-29 unknown-flags incident (see src/alerts/cli.ts): a process meant to run
+  // for weeks, started by a question. Refusals follow the house convention here: console.error and
+  // process.exitCode, never process.exit.
+  try {
+    if (gateCommandLine(ALERTS_BIN, ALERTS_COMMANDS, command, rest, (text) => process.stdout.write(text)) === "help") {
+      return;
+    }
+  } catch (err) {
+    if (err instanceof CliParseError) {
+      console.error(err.message);
+      process.exitCode = 2;
+      return;
+    }
+    throw err;
+  }
+
   const options = {
     always: flag("always"),
     symbol: value("symbol"),
