@@ -10,6 +10,8 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-08-29
+
 ### Fixed
 
 - **`--help` no longer runs the command it describes.** All three CLIs read their flags with
