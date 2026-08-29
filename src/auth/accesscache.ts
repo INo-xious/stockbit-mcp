@@ -74,7 +74,7 @@ type CacheFile = Partial<Record<TokenDomain, CachedAccess>>;
  * Read dynamically rather than captured at import, so a test can toggle it and so a user who sets it
  * in one client's environment is not surprised by another client's cached state.
  */
-export function accessCacheDisabled(): boolean {
+function accessCacheDisabled(): boolean {
   return process.env.STOCKBIT_NO_ACCESS_CACHE === "1";
 }
 

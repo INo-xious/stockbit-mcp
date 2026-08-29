@@ -25,9 +25,26 @@ import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
 import { StockbitError } from "../src/http/errors.ts";
 import { settingsPath, defaultSettings, tradingPolicy } from "../src/settings.ts";
-import { clearTickets, peek, resetClock, setClock, take, TICKET_TTL_MS } from "../src/trading/tickets.ts";
+import {
+  clearTickets,
+  issue,
+  peek,
+  resetClock,
+  setClock,
+  slotCount,
+  take,
+  TICKET_TTL_MS,
+} from "../src/trading/tickets.ts";
 import { idr, nearestTicks, previewOrder, tickSize } from "../src/trading/preview.ts";
-import { orderBody, orderLogPath, placeBuy, placeSell, cancelOrder, submitOrder } from "../src/trading/orders.ts";
+import {
+  orderBody,
+  orderLogPath,
+  placeBuy,
+  placeSell,
+  cancelOrder,
+  submitOrder,
+  verifyAgainst,
+} from "../src/trading/orders.ts";
 import { describeRemember, forgetRemember, REMEMBER_TTL_MS } from "../src/trading/remember.ts";
 import { resolveConfirmation } from "../src/trading/confirmation.ts";
 import { registerTradingTools } from "../src/tools/trading.ts";
@@ -1222,5 +1239,220 @@ test("a StockbitError from a refusal is a refusal, not an upstream failure", asy
       assert.equal(err.kind, "invalid_param", "a policy refusal is the caller's to fix, not the server's");
       return true;
     },
+  );
+});
+
+
+/* ------------------------------------------------------------------ *
+ * Ticket slots are evicted. The map used to grow for the life of the process: nothing called
+ * `delete`, `peek`/`take` only TESTED expiry, and `clearTickets()` is tests-only. Every preview in
+ * a long session left a whole ticket behind — its checks, its warnings, a copy of the policy, a
+ * market snapshot.
+ * ------------------------------------------------------------------ */
+
+function stubTicket(id: string, issuedAt: number) {
+  return issue({
+    id,
+    kind: "order" as const,
+    expiresAt: new Date(issuedAt + TICKET_TTL_MS).toISOString(),
+    checks: [],
+    summary: `ticket ${id}`,
+  });
+}
+
+test("expired ticket slots are evicted rather than held for the life of the process", () => {
+  clearTickets();
+  const start = Date.parse("2026-08-05T03:00:00Z");
+  setClock(() => start);
+  try {
+    for (let i = 0; i < 20; i++) stubTicket(`old-${i}`, start);
+    assert.equal(slotCount(), 20);
+
+    // Still inside the retention window: nothing is dropped, because `take` must still be able to
+    // say "already used" rather than "never existed".
+    let at = start + TICKET_TTL_MS * 2;
+    setClock(() => at);
+    stubTicket("mid", at);
+    assert.equal(slotCount(), 21, "a ticket only just expired is still worth a real error message");
+
+    // Past the first batch's retention but inside `mid`'s: the old twenty go, `mid` stays.
+    at = start + TICKET_TTL_MS * 7;
+    setClock(() => at);
+    stubTicket("second", at);
+    assert.equal(slotCount(), 2, "the original twenty are gone; `mid` and `second` remain");
+    assert.throws(() => take("old-0"), /No order ticket/, "an evicted slot is simply unknown");
+
+    // Past everything issued so far.
+    at = start + TICKET_TTL_MS * 40;
+    setClock(() => at);
+    stubTicket("last", at);
+    assert.equal(slotCount(), 1, "only the ticket just issued is still worth holding");
+  } finally {
+    resetClock();
+    clearTickets();
+  }
+});
+
+test("a spent ticket still reports 'already used' while it is retained", () => {
+  clearTickets();
+  const start = Date.parse("2026-08-05T03:00:00Z");
+  setClock(() => start);
+  try {
+    stubTicket("spent", start);
+    take("spent");
+    assert.throws(() => take("spent"), /already used/, "the duplicate-order guard must survive");
+
+    setClock(() => start + TICKET_TTL_MS * 2);
+    assert.throws(() => take("spent"), /already used/, "and it must survive mere expiry too");
+  } finally {
+    resetClock();
+    clearTickets();
+  }
+});
+
+
+/* ------------------------------------------------------------------ *
+ * order_preview's argument bounds, at the schema.
+ *
+ * `z.coerce.number()` on its own accepts NaN ("abc"), 0 (""), negatives and fractions, and
+ * previewOrder does five sequential network reads before anything looks at the value — so a user
+ * paid a full round trip for an argument that could never have been valid, and `tickSize(NaN)` was
+ * reached with a message that rendered as `idr(NaN)`.
+ * ------------------------------------------------------------------ */
+
+test("order_preview rejects an impossible price or lot count without a request", () => {
+  const shapes = new Map<string, Record<string, { safeParse(v: unknown): { success: boolean } }>>();
+  registerTradingTools({
+    read: (name, _d, shape) => {
+      shapes.set(name, shape as never);
+    },
+    write: () => {},
+    writeNames: () => [],
+  } as unknown as Definer);
+
+  const shape = shapes.get("order_preview");
+  assert.ok(shape, "order_preview must be a read tool");
+  const price = shape.price;
+  const lots = shape.lots;
+
+  for (const bad of ["abc", NaN, 0, -1, Infinity]) {
+    assert.equal(price.safeParse(bad).success, false, `price must reject ${String(bad)}`);
+    assert.equal(lots.safeParse(bad).success, false, `lots must reject ${String(bad)}`);
+  }
+  assert.equal(lots.safeParse(1.5).success, false, "a fractional lot cannot be sent — the wire takes shares");
+
+  // What must still get through, including the string forms an MCP client may send.
+  assert.equal(price.safeParse(4100).success, true);
+  assert.equal(price.safeParse("4100").success, true);
+  assert.equal(lots.safeParse(5).success, true);
+  assert.equal(lots.safeParse("5").success, true);
+  assert.equal(price.safeParse(undefined).success, true, "both stay optional");
+  assert.equal(lots.safeParse(undefined).success, true);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * verifyAgainst — the function that decides whether a real brokerage order landed.
+ *
+ * It had no test of its own. Every path through it was exercised only incidentally, through
+ * `submitOrder`, against a stub that always behaved. This is the code that turns "the request
+ * returned 2xx" into `ok` / `not-visible` / `rejected`, on a write that moves money and has no undo,
+ * so each branch is asserted directly.
+ * ------------------------------------------------------------------ */
+
+type VOrder = Parameters<typeof verifyAgainst>[1][number];
+
+const vOrder = (over: Partial<VOrder> = {}): VOrder =>
+  ({ readFrom: {}, unmappedKeys: [], ...over }) as VOrder;
+
+const vTicket = (over: Record<string, unknown> = {}) =>
+  ({
+    id: "t1",
+    kind: "order",
+    action: "buy",
+    symbol: "BBRI",
+    price: 4100,
+    lots: 5,
+    shares: 500,
+    uiRef: "ui-abc",
+    boardType: "RG",
+    isGtc: false,
+    timeInForce: "0",
+    ...over,
+  }) as Parameters<typeof verifyAgainst>[0];
+
+test("verifyAgainst: a buy is landed when the read-back carries its ui_ref", () => {
+  const after = [vOrder({ orderId: "o1", uiRef: "ui-abc", symbol: "BBRI", status: "open" })];
+  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: true, orderId: "o1", rejected: false });
+});
+
+test("verifyAgainst: a ui_ref match whose status says rejected is landed AND rejected", () => {
+  // Both at once, deliberately: the order reached the book and the book turned it down. Reporting
+  // only `landed` would say `ok` about an order that is not working.
+  const after = [vOrder({ orderId: "o1", uiRef: "ui-abc", status: "REJECTED — price outside band" })];
+  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: true, orderId: "o1", rejected: true });
+});
+
+test("verifyAgainst: with no ui_ref on the row it falls back to an id that was not there before", () => {
+  const before = [vOrder({ orderId: "old", symbol: "BBRI" })];
+  const after = [vOrder({ orderId: "old", symbol: "BBRI" }), vOrder({ orderId: "fresh", symbol: "BBRI" })];
+  assert.deepEqual(verifyAgainst(vTicket(), before, after), { landed: true, orderId: "fresh", rejected: false });
+});
+
+test("verifyAgainst: the fallback will not claim an order on a different symbol", () => {
+  const after = [vOrder({ orderId: "fresh", symbol: "TLKM" })];
+  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: false, rejected: false });
+});
+
+test("verifyAgainst: nothing new means not landed, and never a guess at an id", () => {
+  const before = [vOrder({ orderId: "old", symbol: "BBRI" })];
+  const result = verifyAgainst(vTicket(), before, before);
+  assert.equal(result.landed, false);
+  assert.equal(result.orderId, undefined, "a not-landed verdict must not name an order");
+});
+
+test("verifyAgainst: a cancel counts as landed when the order is gone OR says cancelled", () => {
+  const ticket = vTicket({ action: "cancel", orderId: "o1", price: null, lots: null, shares: null });
+
+  // Gone from the list entirely.
+  assert.deepEqual(verifyAgainst(ticket, [vOrder({ orderId: "o1" })], []), {
+    landed: true,
+    orderId: "o1",
+    rejected: false,
+  });
+
+  // Still listed, but marked.
+  assert.equal(verifyAgainst(ticket, [], [vOrder({ orderId: "o1", status: "Cancelled" })]).landed, true);
+
+  // Still open — the cancel did not take.
+  assert.equal(verifyAgainst(ticket, [], [vOrder({ orderId: "o1", status: "open" })]).landed, false);
+});
+
+test("verifyAgainst: an amend lands only when the target carries the NEW terms", () => {
+  const ticket = vTicket({ action: "amend", orderId: "o1", price: 4200, lots: 6, shares: 600 });
+
+  assert.equal(
+    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4200, shares: 600 })]).landed,
+    true,
+  );
+  assert.equal(
+    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4100, shares: 600 })]).landed,
+    false,
+    "the old price still standing is the amend not having happened",
+  );
+  assert.equal(
+    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4200, shares: 500 })]).landed,
+    false,
+    "and so is the old size",
+  );
+  assert.equal(verifyAgainst(ticket, [], []).landed, false, "a vanished order is not an amended one");
+});
+
+test("verifyAgainst: an amend that names only one term does not require the other to match", () => {
+  const priceOnly = vTicket({ action: "amend", orderId: "o1", price: 4200, lots: null, shares: null });
+  assert.equal(
+    verifyAgainst(priceOnly, [], [vOrder({ orderId: "o1", price: 4200, shares: 999 })]).landed,
+    true,
+    "shares were not part of the request, so they cannot falsify it",
   );
 });

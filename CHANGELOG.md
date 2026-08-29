@@ -12,6 +12,22 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Security
 
+- **`trading-login --browser` stored a MAIN token in the SECURITIES slot and called it success.**
+  The already-signed-in ladder harvests the browser's own credential out of `credentialStorage` —
+  which is the stockbit.com web session, so what it returns is a market-data token *by
+  construction*. `accept()` then wrote it to whatever slot the caller asked for. The trading login
+  asks for `securities`, so a main-domain token landed under the securities name and the CLI printed
+  "Trading session captured."; the 401 surfaced only on the test refresh that runs afterwards,
+  leaving a poisoned slot that fails every trading read until someone runs `trading-logout`.
+
+  The `slot` option's own doc stated the invariant in one direction only — "the `--browser` trading
+  login captures a carina token, which must NOT land in the main slot" — and three guards enforce
+  exactly that. Nothing guarded the reverse. The harvest tier now runs only for `main`, which is the
+  only slot it can honestly fill, and an inner-closure invariant is pinned by a test the way the
+  CDP-domain restriction above it is.
+
+  Found by running the command, not by reading it.
+
 - **`confirm: true` could skip the human entirely, and now cannot.** The order gate opened with
   `let via = options.confirm === true ? "explicit" : null`, and every later gate — including MCP
   elicitation, the only channel in this protocol that reaches a *person* rather than a model — was
@@ -66,6 +82,23 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
   The same change corrects `package-lock.json`'s root `version` field, which still read `1.1.0` two
   releases after `package.json` moved on.
 
+- **`redact()` had no rule for a bare `token=`, and one route puts its credential in the URL.** The
+  e-IPO refresh (`GET /partner/refresh_token`) is the single request in this project that carries a
+  secret in a query string, and `src/http/transport.ts` builds that URL and puts it into a
+  `StockbitError` on the policy-block path. `StockbitError`'s constructor does redact — but the
+  string path covered `Bearer`, `refresh_token`, `access_token`, `login_token`, `securities_token`,
+  the Telegram bot token and JWT shape, and not a standalone `token`. `redactValue` had dropped
+  `token` as an object KEY all along; it was the string path that missed, and a URL is a string.
+  Whether anything leaked therefore came down to the e-IPO token happening to be JWT-shaped, and
+  `test/redact.test.ts` already knew these tokens can be opaque — its `securities_token` case uses
+  one.
+
+  One pattern closes it, with `\b` so it cannot touch the five underscored names that have their own
+  rules. `CLAUDE.md` states the invariant this serves: *"a `fetch` failure quotes the URL."* No
+  demonstrated live leak — `src/http/client.ts` never has a URL in scope, and the one site that
+  definitely embeds it is documented unreachable — so this closes a latent gap rather than an open
+  one. The Telegram bot token pattern also gets its first test.
+
 ### Added
 
 - **Three switches over who gets asked, all terminal-only.** `stockbit-auth trading-enable
@@ -112,6 +145,148 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- **`stream_trending` and the shareholders token mint.** Trending dropped `date`, which the endpoint
+  requires — without it the answer is 400 "Silakan periksa konten anda", and `{page, limit}` is
+  refused too, so the tool had never returned a post. An omitted date now defaults to today in WIB,
+  which is what "trending" means when nobody named a day. The shareholders token endpoint answers
+  with the token under `data.value`, which no `/token/i` key search can find (`message` is the only
+  string that mentions the word), so the mint always threw `schema_drift`; it is now read narrowly
+  from that one route rather than by loosening the generic search. The chart call behind it still
+  fails for a different reason and the tool stays `projected` — a partial fix, recorded as one.
+
+- **Four endpoints that had never returned usable data now do.** Found by calling all 77 projected
+  tools against a live account rather than by reading them. `order_queue` sent `symbol` where the
+  endpoint wants `stock_code` and answers 400 to every other spelling. `stock_conversion` sent no
+  paging to an endpoint that has no default and refuses without it. `chart_series` refused every
+  series because `/charts/:symbol/daily` carries no `close` key at all — it carries the price in
+  `value`, settled by arithmetic on the payload rather than assumption (a point read `value "2930"`,
+  `change -20`, `percentage "-0.68"`, and 20/2930 = 0.68%). `stream_user` named one of its four
+  fields out of sixty wire keys, because the user route spells them `postid`, `created` and a flat
+  username where the per-symbol route nests them.
+
+  The chart route also sends open, high, low and volume as EMPTY STRINGS, which is worse than
+  absent: the keys are present so `unmapped` stayed clean, the flat-candle warning never fired, and
+  `numberish("")` returns null so every bar silently took its close for all three. A caller could
+  run candlestick patterns on a series of flat candles and be told nothing. A field that reads null
+  on every row now counts as flat.
+
+- **The browser trading login opened a stranger's profile page.** `startUrl` was
+  `https://stockbit.com/trade`, and `/trade` is a Stockbit *username* route — so the window landed on
+  whichever account owns that handle, the PIN form was never shown, and the capture then sat waiting
+  for a carina response that could not arrive. Reported by an account owner who simply read the page
+  they were sent to. The real trading URL is recorded nowhere in this repo and guessing a second one
+  would repeat the mistake, so the command now opens the site, says in words to go to the trading
+  page and enter the PIN there, and takes `STOCKBIT_TRADING_URL` from anyone who knows the exact page.
+
+- **`bandar_detector` was wrong on real data, and the test suite was hiding it.** The Stockbit
+  broker wire signs the sell side negative — every one of the 25 sell rows in the captured
+  `test/fixtures/broker_summary_BBRI.json` carries `sval: "-7.5689625e+10"` and the like, and
+  `test/core.test.ts` has asserted that since the fixture was committed. `getBandarDetector` read
+  those figures as positive magnitudes, and four separate defects fell out of the one assumption.
+  `netValueIdr = buyValueIdr - sellValueIdr` turned `(+) − (−)` into the SUM of both sides, so the
+  flagship reading was 104× out: 5.8856e11 where the answer is 5.6838e9, and 1,947,760 lots where
+  the answer is 18,690. `topDistributors` was exactly inverted, because a descending sort over
+  negative numbers puts the *least* negative first — the tool returned the five SMALLEST sellers
+  under the label "Largest net sellers first", and `skills/bandar-check` sends the model there "for
+  a ranked read". And `topSellerShare`, `top3SellerShare` and `sellHerfindahl` were `null` on every
+  real call, because a share of a negative total is refused — which the description told the model
+  meant nothing had traded on the sell side, for every stock on IDX.
+
+  1,411 green tests missed all of it because the only bandar tests ran on a hand-made fixture with
+  POSITIVE sell values, three directories from the captured response that contradicts it. The suite
+  proved the code agreed with itself. That is the failure mode this project's own `CLAUDE.md` warns
+  about for the `WRITES` list — *"deriving it would make the test agree with the code"* — and it
+  happened one directory over.
+
+  The wire's signs are kept rather than laundered, and now documented at the top of
+  `marketdetectors.ts` instead of being incidental. Ranking is by size of flow, so a sign cannot
+  invert it. Concentration runs on magnitudes, as `excessConcentration` in `analysis/analyze.ts`
+  already did — that function was sign-safe throughout and is why `analyze` was never affected.
+  `netValueIdr` subtracts the MAGNITUDE of the sell total, which is right under either convention.
+  The synthetic fixture now carries the real one's signs, and four new tests in `test/core.test.ts`
+  assert the corrected numbers against the captured response itself rather than against a fixture
+  written to agree.
+
+- **The broker reader invented zeros, and could emit `NaN` typed as a number.** `num()` was
+  `(s) => (s == null ? 0 : Number(s))`. `CLAUDE.md` states the rule it broke verbatim: *"Never
+  invent a number. If a field could not be read, it is absent — not zero, not a default."* A broker
+  whose net value could not be read was reported as having netted exactly zero, indistinguishable
+  from one that genuinely netted zero, by the one tool whose job is telling those apart. And
+  `Number("n/a")` is `NaN`, which poisons a sum, makes every share `null`, and serialises to `null`
+  in JSON — the model received `"buyValueIdr": null` with no explanation.
+
+  It now refuses rather than guesses, modelled on `asNumber` in `src/trading/account.ts`, with one
+  deliberate difference: this wire is scientific notation (`"1.01635016e+11"`), which `asNumber`'s
+  pattern rejects, so copying it verbatim would have turned every figure in the captured fixture
+  into `undefined`. A separated number is still refused rather than parsed under a guessed decimal
+  convention.
+
+  **This changes the `./core` export surface.** `NormalizedBroker.netLots` and `.netValueIdr` are
+  now optional. Anything summing them without a guard gets `NaN` where it used to get a number —
+  which is the point: the number it used to get was made up. `BrokerSummary.unreadable` reports what
+  was dropped, per side, so a total that covered 15 of 16 listed brokers says so instead of looking
+  complete.
+
+- **The evidence ladder was inferred from prose, and failed in both directions.** A regex over the
+  description decided each tool's provenance. `screener_save` wrote its caveat as "has NEVER been
+  observed" where the pattern knew only "has NOT been observed", so it registered as `read-back`
+  with no error — the silent widening the ladder exists to prevent. In the other direction, because
+  the pattern matches anywhere in free prose, a sentence about the `eligibility` FIELD's key names
+  demoted `company_overview` to `projected`. Underneath both sat a fallback to `"observed"`: the
+  strongest claim on the ladder was what a tool got for saying nothing at all.
+
+  Evidence is declared now — on the tool or on its family — and a tool that declares neither fails
+  to register. The regex survives only as a cross-check that raises when a declaration and a
+  description disagree. All 139 tools carry exactly the evidence they carried before; the whole map
+  is now written out by hand in `test/tools.test.ts`, beside `WRITES` and for the same reason.
+
+- **The alerts daemon leaked one abort listener per tick.** `{ once: true }` removes a listener when
+  the event FIRES, not when the timer resolves normally — which is what happens on every tick but
+  the last. `bin/stockbit-alerts.ts` creates one `AbortController` for the life of the process, so
+  the listeners accumulated on it: measured at ticks 1/5/10/15 the count went 0, 4, 9, 14, which at
+  the default 60-second interval is about 1,440 a day and Node's `MaxListenersExceededWarning`
+  eleven minutes in. Now `await delay(interval, undefined, { signal })` from `node:timers/promises`
+  — the idiom `src/util/dirlock.ts` already imports. Measured at 0 across the same ticks, and a test
+  pins it.
+
+- **Paper and live disagreed about what `verified` means, and about what `write-failed` claims.** A
+  paper rejection returned `verified: true`, though `OrderResult.verified` is documented as *"True
+  only when the read-back actually showed the intended state"* and the live path returns `false` for
+  the same class. ADR-0008's argument is that the outcome classes are precisely the part paper
+  exists to rehearse, so the two reading differently is the rehearsal teaching the wrong thing.
+  Separately, a `saveLedger` failure — a full disk, a read-only home — was caught by the same
+  `catch` as the ledger's own refusals and reported as `rejected`, telling the user their order was
+  turned down on its merits and giving them no reason to look at the filesystem.
+
+  `write-failed`'s own definition was also wrong, and interestingly so: it read *"a synchronous
+  client-side rejection, nothing was sent to the exchange"* while `performOrder`, `src/eipo/order.ts`
+  and `src/account/log.ts` all return it for a 4xx the server answered — a request that demonstrably
+  was sent. Three modules against one sentence, so the sentence changed rather than the
+  classification. What the class actually asserts is true on both roads and is the part a user acts
+  on: nothing landed, and the read-back agrees.
+
+- **Order tickets were never evicted.** Nothing called `delete`; `peek` and `take` only *tested*
+  expiry, and `clearTickets()` is tests-only. Every preview in a long-lived server left a whole
+  ticket behind — its checks, its warnings, a copy of the policy in force, a market snapshot. Swept
+  on issue now, after a retention window rather than on consumption: `take`'s "already used — an
+  order may already have been placed from it" message is what stands between a person and a
+  duplicate order, and it needs the spent slot to still be there.
+
+- **The route table was built twice, and the guard sat beside the copy nobody used.** `ROUTES` was
+  an object spread — which resolves a duplicate name by silently keeping the last, the exact failure
+  the guard exists to catch — while `mergeRoutes(...)` was called underneath purely for its throw,
+  its return value discarded. It builds the table now. Verified byte-identical: the same 153 routes,
+  and `RouteName` is still the full literal union.
+
+- **Smaller, each with a test.** `autoConfirm` without a value cap refused with advice to *"pass
+  `confirm: true`"*, from a branch that runs before `confirm` is read — a caller following it looped
+  forever. `order_preview` accepted `NaN`, `0`, negative and fractional `price`/`lots`, and did five
+  sequential network reads before anything looked at them. The market cache key sorted `[k, v]` pairs
+  by their string coercion, so it sorted on `"key,value"` rather than by key. `bollinger` took its
+  variance about `sma`'s already-rounded mean, against the argument the same file makes for
+  `highest` a few lines up. `stockbit-alerts --interval abc` gave `NaN`, which Node clamps to 1 ms —
+  a typo turned a once-a-minute daemon into a tight polling loop.
+
 - **The order dialog had been falling back to generic wording.** `passGates` called
   `options.elicit(ticket.summary)` with one argument, so every order and every IPO subscription got
   `_define.ts`'s defaults rather than words of its own. Orders, paper orders and subscriptions now
@@ -122,6 +297,65 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
   it had no guard for a commitment with no value, and it had lost "Do not set it on their behalf" —
   the single most load-bearing sentence in the refusal. One gate now serves both, so there is one
   wording and one test surface.
+
+### Changed
+
+- **14 tools moved from `projected` to `observed`, settled by live calls on 2026-08-29.**
+  `company_subsidiaries`, `index_members`, `symbol_search`, `classification`, `corporate_actions`,
+  `corporate_action_status`, `dividend_calendar`, `ipo_pipeline`, `insider_transactions`,
+  `screener_favorites`, `screener_finitems`, `stream` and `news`. The bar was not "the route
+  answered" but "rows came back and every field the tool names was read out of them" — `index_members`
+  returning exactly 45 rows for LQ45 is the kind of agreement that settles a mapping. Six tools that
+  answered with an empty page stayed `projected`, because an empty page proves a route and not a
+  field name.
+
+  `analyst_ratings` was promoted and then demoted again before this landed. It fetches two halves and
+  its own note said "neither response shape has been observed"; the probe found an array of three
+  rows and nothing in the result says which half produced it. A claim that cannot be distinguished
+  from the wrong claim is not evidence.
+
+  The same pass found ten tools that fail on their own documented arguments — four of them naming the
+  exact missing parameter in the server's reply — plus three that succeed while extracting almost
+  nothing, and confirmed the three e-IPO routes return 404. All of it is written down in
+  [`docs/PENDING-VERIFICATION.md`](docs/PENDING-VERIFICATION.md) with the server's own words, because
+  the next person to look should not have to re-run the account to find out.
+
+- **The tool surface stopped restating itself.** Forty-six sentences appeared verbatim in more than
+  one tool description — 28,237 characters, about 7,000 tokens, spent saying the same eight things
+  over and over. The source was already DRY: `PROJECTION_NOTE`, `LOGIN_NOTE` and `UNVERIFIED` are
+  shared constants. The cost was in the payload, where each is interpolated into ten, ten and seven
+  descriptions and shipped on every connection.
+
+  The conventions that are the same everywhere — what `readFrom`, `unmappedKeys`, `rowsFrom` and
+  `source` mean, that an absent field is not a zero, what the evidence words mean, the order-outcome
+  vocabulary, that nothing here rolls back — are stated once in the server `instructions`, which is
+  exactly the place the protocol provides for them. A tool description now carries what changes the
+  CALL; the skills carry what shapes the INTERPRETATION, which is why `bandar_detector`'s essay on
+  what broker flow does not prove now lives in `skills/bandar-check`, where it is loaded at the
+  point of use rather than on every connection forever.
+
+  Measured with a real MCP client over the transport, not estimated: `STOCKBIT_TOOLS=all` went from
+  ~58,100 to ~53,200 tokens of fixed context, and the default `core` profile from ~19,300 to
+  ~18,700. Repeated prose fell from 28,237 characters to 14,314. That is short of the ~35,000 an
+  outside review estimated for `all`, and the gap is worth naming: what is left is not duplication
+  but each tool's own content, and cutting to that number means deciding a model needs less guidance
+  at call time, which is a different judgement from removing something said nine times.
+
+  Nothing was dropped silently. A test caught the one real loss while it was happening — every
+  account read must say HOW to get a trading session, and a shortened note had left out the command
+  name.
+
+- **Seven dead symbols, and 39 exports that no longer widen the API.** Five were deleted outright,
+  three of them carrying doc comments naming a consumer that never called them. `byFamily` and
+  `dominantEvidence` were not deleted: `toolsdoc.ts` and `instructions.ts` each re-implemented the
+  same grouping by hand, so the exported pair was simply the copy nobody used. They are generalised
+  and wired up, and the generated reference is byte-identical afterwards. Two of the forty-two
+  exports stay exported on purpose — they live in modules `src/core/index.ts` re-exports as the
+  public `./core` entry point, where "widens the API for nothing" does not apply.
+
+  `verifyAgainst` — the function that decides whether an order landed on the exchange — had no test
+  naming it, only incidental coverage through `submitOrder` against a stub that always behaved. It
+  has eight now, one per branch.
 
 ## [1.2.1] — 2026-08-27
 

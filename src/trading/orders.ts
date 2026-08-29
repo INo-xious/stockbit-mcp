@@ -28,8 +28,17 @@
  * | `landed-despite-error` | The request errored and the order is there anyway |
  * | `not-found-after-error` | The request errored and the read-back is clean |
  * | `outcome-unknown` | The request errored and the read-back also failed. The worst case, and it is reported as itself. |
- * | `write-failed` | A synchronous client-side rejection. Nothing was sent to the exchange. |
+ * | `write-failed` | Nothing is on the book and nothing was recorded. Either the write never left this process (a client-side refusal, or the paper ledger failing to save), or the server answered 4xx without naming a rejection and the read-back came back clean. See the note below. |
  * | `aborted-no-snapshot` | Thrown before the request: the before-state could not be read, so no comparison would have been possible. |
+ *
+ * `write-failed` covers two roads to the same place, and it used to claim only the first. It read
+ * "a synchronous client-side rejection, nothing was sent to the exchange" while `performOrder`
+ * also returned it for a 4xx the server answered — a request that demonstrably *was* sent — and
+ * `src/eipo/order.ts` and `src/account/log.ts` classify the same way. Three modules against one
+ * sentence: the sentence was the outlier, so it is the sentence that changed. What the class
+ * actually asserts is the part a user acts on, and it is true on both roads: nothing landed, and
+ * the read-back agrees. The distinction that is NOT safe to blur is `write-failed` against
+ * `not-found-after-error` and `outcome-unknown`, which are about whether anyone looked.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -50,6 +59,7 @@ import {
   placePaperOrder,
   saveLedger,
   PAPER_BANNER,
+  type PaperLedger,
   type PaperMarket,
   type PaperPlacementResult,
 } from "./paper.js";
@@ -83,7 +93,7 @@ export function orderLogPath(): string {
 }
 
 /** A lock older than this belongs to a process that died mid-order. */
-export const ORDER_LOCK_STALE_MS = 60_000;
+const ORDER_LOCK_STALE_MS = 60_000;
 
 export type OrderOutcomeKind =
   | "ok"
@@ -443,11 +453,33 @@ async function performPaperOrder(
     } as OrderResult;
   };
 
+  /**
+   * The ledger write, kept apart from the ledger's own refusals.
+   *
+   * `saveLedger` throwing is a disk problem — ENOSPC, EACCES, a read-only home — and it is not the
+   * ledger saying no. Classifying it as `rejected` told the user their order was refused on its
+   * merits and left them with no reason to look at the filesystem. Nothing was committed, so
+   * `write-failed` is the honest class: this one is literally a synchronous client-side failure
+   * with nothing sent anywhere, which is what that word means.
+   */
+  const persist = (next: PaperLedger): OrderResult | null => {
+    try {
+      saveLedger(next);
+      return null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return finish("write-failed", false, {
+        error: `The paper ledger could not be written, so nothing was recorded: ${message}`,
+      });
+    }
+  };
+
   try {
     if (ticket.action === "cancel") {
       const orderId = ticket.orderId as string;
       const result = cancelPaperOrder(ledger, orderId);
-      saveLedger(result.ledger);
+      const failed = persist(result.ledger);
+      if (failed) return failed;
       return finish("ok", true, {
         orderId: result.order.id,
         reason: `${PAPER_BANNER} Paper order ${result.order.id} is cancelled in the ledger.`,
@@ -464,7 +496,8 @@ async function performPaperOrder(
         market,
         now,
       );
-      saveLedger(result.ledger);
+      const failed = persist(result.ledger);
+      if (failed) return failed;
       return finish("ok", true, {
         orderId: result.order.id,
         reason: `${PAPER_BANNER} ${result.reason}`,
@@ -483,7 +516,8 @@ async function performPaperOrder(
       market,
       now,
     );
-    saveLedger(result.ledger);
+    const failed = persist(result.ledger);
+    if (failed) return failed;
     return finish("ok", true, {
       orderId: result.order.id,
       reason: `${PAPER_BANNER} ${result.reason}`,
@@ -492,8 +526,14 @@ async function performPaperOrder(
   } catch (err) {
     // A refusal from the ledger (no cash, no position, no such order) is a rejection, which is
     // exactly the class the real path would use for the same refusal from the exchange.
+    //
+    // `verified: false`, like the live path. `verified` means "the read-back actually showed the
+    // intended state", and a rejected order never reached that state — there is nothing to have
+    // shown. Paper returning `true` here made the one field that says whether anything was
+    // confirmed read differently from the mode it exists to rehearse. ADR-0008: the outcome classes
+    // are the part being practised.
     const message = err instanceof Error ? err.message : String(err);
-    return finish("rejected", true, { error: message });
+    return finish("rejected", false, { error: message });
   }
 }
 

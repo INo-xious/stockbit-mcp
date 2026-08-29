@@ -55,7 +55,7 @@ import {
 import { getChartDrawings } from "./api.js";
 
 /** Chart types the widget accepts, by the name a caller would use. Values are TradingView's. */
-export const CHART_TYPES = {
+const CHART_TYPES = {
   bar: 0,
   candle: 1,
   line: 2,

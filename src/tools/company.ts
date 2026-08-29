@@ -13,16 +13,9 @@ import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
 /** The paragraph every row-set tool ends with. One wording, so the contract cannot drift per tool. */
-const ROW_SOURCE_NOTE =
-  "Rows come back verbatim under `rows`. `source` says where they were found in the response: " +
-  '"data" when the payload was a bare array, "data.<key>" when it was wrapped, and **null when no ' +
-  "row array could be found at all** — in that case `extra` holds what the response did carry, and " +
-  "an empty `rows` means the lookup failed rather than that the answer was empty. `rows: []` with a " +
-  "non-null `source` is a genuine zero.";
+const ROW_SOURCE_NOTE = "When `source` is null, `extra` holds what the response did carry.";
 
-const PENDING_NOTE =
-  "Pending verification: this endpoint has not been observed live, so nothing is renamed or " +
-  "projected — you are reading the fields the API sent.";
+const PENDING_NOTE = "PENDING VERIFICATION: this endpoint has not been observed live.";
 
 export function registerCompanyTools(define: Definer): void {
   define.read(
@@ -97,12 +90,13 @@ export function registerCompanyTools(define: Definer): void {
     "The subsidiaries and associates Stockbit lists for a ticker.\n" +
       "This is corporate structure, not ownership OF the company — for who owns the shares use " +
       "`shareholders`.\n" +
-      ROW_SOURCE_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      ROW_SOURCE_NOTE,
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
     async (a) => runTool(() => core.getSubsidiaries(a.symbol as string)),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "shareholders",
@@ -147,9 +141,7 @@ export function registerCompanyTools(define: Definer): void {
       "filtered by symbol: there is no symbol argument because the endpoint takes none.\n" +
       "For the IDX sector list with ids and parents, use the `sectors` tool instead; this is a " +
       "different taxonomy and the two are not interchangeable.\n" +
-      ROW_SOURCE_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      ROW_SOURCE_NOTE,
     {
       scope: z
         .enum(core.CLASSIFICATION_SCOPES)
@@ -157,7 +149,10 @@ export function registerCompanyTools(define: Definer): void {
         .describe('"taxonomy" for the scheme (default), "company" for every issuer\'s assignment'),
     },
     async (a) => runTool(() => core.getClassification(a.scope as core.ClassificationScope | undefined)),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "index_members",
@@ -171,9 +166,7 @@ export function registerCompanyTools(define: Definer): void {
       " is rejected before any request is made.\n" +
       "`symbols` is the tickers taken from the rows that carried one; `rowsWithoutSymbol` above zero " +
       "means that list is incomplete and you should read `rows`.\n" +
-      ROW_SOURCE_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      ROW_SOURCE_NOTE,
     {
       index_code: z.string().describe("Uppercase index or board code, e.g. IDX30, LQ45"),
       limit: z.coerce
@@ -181,7 +174,10 @@ export function registerCompanyTools(define: Definer): void {
         .describe(`Max rows, 1..${core.INDEX_MEMBERS_MAX_LIMIT}. Required — the endpoint has no default`),
     },
     async (a) => runTool(() => core.getIndexMembers(a.index_code as string, a.limit as number)),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "sector_companies",
@@ -205,12 +201,11 @@ export function registerCompanyTools(define: Definer): void {
       "rather than ignoring them, so a paged call cannot silently collapse to page 1.\n" +
       "Matches are not only companies — people and other entities can appear — so `symbols` holds " +
       "just the rows that carried a ticker and can be shorter than `rows`.\n" +
-      "The type and insider_category vocabularies have not been observed; an unrecognised value is " +
+      "The accepted values for type and insider_category are not settled — those two ARGUMENT " +
+      "vocabularies, not this route. An unrecognised value is " +
       "more likely to narrow the result to nothing than to raise an error. A blank keyword is " +
       "rejected here and never sent.\n" +
-      ROW_SOURCE_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      ROW_SOURCE_NOTE,
     {
       keyword: z.string().describe("What to search for: a ticker fragment, company name or person"),
       variant: z
@@ -233,5 +228,8 @@ export function registerCompanyTools(define: Definer): void {
           insiderCategory: a.insider_category as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 }

@@ -379,7 +379,7 @@ export function toShapeRequests(annotations: DrawableAnnotation[], context: Shap
  * charting library, and the failure for an unknown one is a silent no-op. A caller asking for
  * "Bolinger Bands" would be told it worked.
  */
-export const STUDIES = {
+const STUDIES = {
   rsi: "Relative Strength Index",
   macd: "MACD",
   atr: "Average True Range",

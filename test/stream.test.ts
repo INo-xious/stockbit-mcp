@@ -223,7 +223,7 @@ test("WIRE: the user stream sends the cursor and limit, and the handle as a path
   assert.equal(last().url.search, "");
 });
 
-test("WIRE: trending is a POST whose body carries only the keys that were supplied", async () => {
+test("WIRE: trending is a POST that always carries a date, and no key nobody supplied", async () => {
   await getTrendingStream({ date: "2026-08-24", limit: 4 });
   const req = last();
   assert.equal(req.url.pathname, P.trending);
@@ -233,7 +233,13 @@ test("WIRE: trending is a POST whose body carries only the keys that were suppli
 
   clearCache();
   await getTrendingStream();
-  assert.deepEqual(last().body, {});
+  // NOT `{}`. This used to assert an empty body, and that assertion was pinning a defect: the
+  // endpoint answers 400 "Silakan periksa konten anda" without a date, so trending never returned
+  // anything. Settled live on 2026-08-29. The default is today in WIB, so it is checked by shape
+  // rather than by value — a hard-coded date here would start failing tomorrow.
+  const body = last().body as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body), ["date"], "a date, and nothing the caller did not ask for");
+  assert.match(String(body.date), /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test("WIRE: a post is fetched by numeric id with no query string", async () => {
@@ -491,4 +497,31 @@ test("a post that carries its replies under `stream` returns the POST, not the f
   const detail = await getPost("15731234");
   assert.equal(detail.source, "data");
   assert.equal(detail.post?.id, "15731234", "the reply list was mistaken for the post");
+});
+
+test("the user route's own spellings map, not just its content", async () => {
+  // /stream/non-login/user/:username sends `postid`, `created` and a FLAT username — where the
+  // per-symbol route sends `stream_id`, `created_at` and a nested `user`. Settled live on
+  // 2026-08-29: before this, a user row matched ONE of the four named fields out of sixty wire
+  // keys, and the other three read as absent rather than as "spelled differently here".
+  clearCache();
+  bodies.set(P.user, {
+    data: [
+      {
+        postid: 35259019,
+        content: "EMAS: Rugi Bersih US$14,9",
+        content_original: "EMAS: Rugi Bersih US$14,9",
+        created: "2026-08-28 19:53:36",
+        username: "Stockbit",
+        fullname: "Stockbit Official",
+      },
+    ],
+  });
+  const page = await getUserStream("budi.trader");
+  assert.equal(page.items.length, 1);
+  const item = page.items[0];
+  assert.equal(item.id, "35259019");
+  assert.equal(item.createdAt, "2026-08-28 19:53:36");
+  assert.equal(item.author, "Stockbit");
+  assert.ok(item.content?.startsWith("EMAS"));
 });

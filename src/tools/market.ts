@@ -13,10 +13,7 @@ import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
 /** Appended where the row shape has not been observed live, so a caller does not over-trust it. */
-const PENDING =
-  "PENDING VERIFICATION: this response shape has not been observed live. The payload is returned " +
-  "as Stockbit sent it, unprojected, rather than reduced to guessed field names — read the keys off " +
-  "the result instead of assuming them.";
+const PENDING = "PENDING VERIFICATION: this response shape has not been observed live.";
 
 export function registerMarketTools(define: Definer): void {
   define.read(
@@ -32,10 +29,10 @@ export function registerMarketTools(define: Definer): void {
       "This tool ERRORS instead of returning an empty series — including when the response parses " +
       "but holds no points. An empty result would be indistinguishable from a broken fast path, so " +
       "on an error fall back to the paged bars tools rather than concluding the symbol has no data.\n" +
-      "Check `unmapped` and `warnings` on the result before using the numbers. Field names are " +
-      "projected defensively from a shape that has not been observed live: if open/high/low are " +
-      "unmapped every candle is flat and candlestick patterns are meaningless, and if volume is " +
-      "unmapped it is 0 on every bar and that 0 is not real. `mapped`, `extraKeys` and `sample` show " +
+      "Check `unmapped` and `warnings` on the result before using the numbers. On the daily route " +
+      "the close arrives as `value` and open/high/low/volume arrive EMPTY, so every candle is flat " +
+      "and `warnings` says so: candlestick patterns and high/low indicators are meaningless on this " +
+      "series, and the 0 volume is not a real zero. `mapped`, `extraKeys` and `sample` show " +
       "which wire keys were used and what else the point carried.\n" +
       "raw=true returns the sibling chart endpoint's payload untouched instead of bars. Use it only " +
       "to discover real field spellings when `unmapped` or `extraKeys` is non-empty; it is not a " +
@@ -56,7 +53,10 @@ export function registerMarketTools(define: Definer): void {
           ? core.getChartRaw(a.symbol as string, a.timeframe as string)
           : core.getSeriesBars(a.symbol as string, a.timeframe as string),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "running_trade",

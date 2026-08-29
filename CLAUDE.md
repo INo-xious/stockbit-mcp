@@ -57,9 +57,11 @@ versions.
 - **Never invent a number.** If a field could not be read, it is absent — not zero, not a default.
   `readFrom` names the wire key a value came from; `unmappedKeys` names what was not recognised, and
   on account data the *values* are dropped because an unmapped field there may be an account number.
-- **Never widen an evidence claim.** A tool whose description says the route has never been observed
-  is `projected`, and saying otherwise throws at registration. Settling one takes a live call, not
-  an edit.
+- **Never widen an evidence claim.** Every tool DECLARES its evidence — `{ evidence }` on the tool
+  or on `define.family()` — and one that declares nothing fails to register rather than defaulting
+  to `observed`. A description that says the route has never been observed while the declaration
+  claims more throws at registration. The full map is hand-written in `test/tools.test.ts` beside
+  `WRITES`, and for the same reason. Settling one takes a live call, not an edit.
 - **Never write a secret anywhere.** Tokens, PINs and bot tokens are matched by shape as well as by
   key. When adding an error path, ask what the message could contain: a `fetch` failure quotes the
   URL, and a Telegram URL contains the bot token.

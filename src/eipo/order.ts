@@ -96,7 +96,7 @@ export interface EipoTicket extends TicketBase {
   createdAt: string;
 }
 
-export function fingerprintOfEipo(ticket: EipoTicket): string {
+function fingerprintOfEipo(ticket: EipoTicket): string {
   const material = {
     emitenCode: ticket.emitenCode,
     price: ticket.price,

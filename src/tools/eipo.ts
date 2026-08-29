@@ -8,7 +8,7 @@
 import { z } from "zod";
 import * as eipo from "../eipo/api.js";
 import { placeEipoOrder, previewEipoOrder } from "../eipo/order.js";
-import { runTool } from "./_format.js";
+import { COMMITMENT_CONFIRM, runTool } from "./_format.js";
 import { elicitationNote } from "../trading/confirmation.js";
 import type { Definer } from "./_define.js";
 
@@ -17,10 +17,8 @@ const SESSION_NOTE =
   "extra step. If it cannot be minted the error says to run `stockbit-auth login`.";
 
 const PROJECTION_NOTE =
-  "PENDING VERIFICATION: nothing on this host has been observed live. Offering data is returned as " +
-  "the server sent it; anything describing THIS account's money is projected, with `readFrom` naming " +
-  "the wire key each value came from and `unmappedKeys` listing the names — not the values — of the " +
-  "fields that were not recognised.";
+  "PENDING VERIFICATION: nothing on this host has been observed live. Offering data comes back as " +
+  "the server sent it; only what describes THIS account's money is projected.";
 
 export function registerEipoTools(define: Definer): void {
   define.read(
@@ -147,11 +145,7 @@ export function registerEipoTools(define: Definer): void {
       confirm: z
         .boolean()
         .optional()
-        .describe(
-          "Must be true, and only after the user has agreed to this ticket. Where the client " +
-            "supports MCP elicitation the user is ALSO asked directly and their answer decides it: " +
-            "a declined dialog refuses the subscription however this is set. Never set it on their behalf.",
-        ),
+        .describe(COMMITMENT_CONFIRM),
     },
     async (a) =>
       runTool(async () => {

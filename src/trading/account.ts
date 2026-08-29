@@ -412,7 +412,7 @@ export async function getPortfolio(): Promise<Portfolio> {
 }
 
 /** The account-level totals on their own. Separate so a caller that only needs them pays for one request. */
-export async function getPortfolioTotals(): Promise<PortfolioTotals> {
+async function getPortfolioTotals(): Promise<PortfolioTotals> {
   return cached("carina:portfolio:summary", TTL.position, async () => {
     const body = await getJson("portfolioSummary");
     const payload = payloadOf(body, "portfolio summary");

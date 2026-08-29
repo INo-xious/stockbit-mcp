@@ -197,7 +197,7 @@ async function harvestSelfTest(browserPath?: string): Promise<Check[]> {
  * Drive the real capture path against the fixture. Nothing is persisted: `persist:false` means a
  * successful self-test cannot overwrite the user's real stored token.
  */
-export async function captureSelfTest(browserPath?: string): Promise<Check[]> {
+async function captureSelfTest(browserPath?: string): Promise<Check[]> {
   const checks: Check[] = [];
   let fixture: { server: Server; origin: string } | undefined;
   const profile = mkdtempSync(join(tmpdir(), "stockbit-selftest-"));

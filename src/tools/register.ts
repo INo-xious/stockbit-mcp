@@ -165,22 +165,26 @@ export function registerTools(
    * The sections were already there as comment banners; this makes them mean something — it is
    * what `STOCKBIT_TOOLS` filters on and what `docs/TOOLS.md` groups by.
    */
-  const defBandar = define.family("bandarmology");
-  const defAlerts = define.family("alerts");
-  const defPine = define.family("pine");
-  const defChartbit = define.family("chartbit");
-  const defAnalysis = define.family("analysis");
-  const defMarket = define.family("market");
-  const defFundamentals = define.family("fundamentals");
+  //
+  // Every scope DECLARES its evidence. It is not inferred from the prose any more: a description is
+  // where a caveat about one field lives as readily as a claim about a whole route, and a regex
+  // could not tell them apart in either direction. See `resolveEvidence` in `_define.ts`.
+  const defBandar = define.family("bandarmology", { evidence: "observed" });
+  const defAlerts = define.family("alerts", { evidence: "observed" });
+  const defPine = define.family("pine", { evidence: "observed" });
+  const defChartbit = define.family("chartbit", { evidence: "observed" });
+  const defAnalysis = define.family("analysis", { evidence: "observed" });
+  const defMarket = define.family("market", { evidence: "observed" });
+  const defFundamentals = define.family("fundamentals", { evidence: "observed" });
   // Account READS were confirmed live on 2026-08-09 (the index/detail split, the screener GET).
   // The account WRITES are Read-back and get their own scope where they register.
-  const defAccount = define.family("account");
-  const defWorkflows = define.family("workflows");
+  const defAccount = define.family("account", { evidence: "observed" });
+  const defWorkflows = define.family("workflows", { evidence: "observed" });
 
   /* ---------------------------------- the server ---------------------------------- */
   // `status`, `login`, `logout`. Registered first so they exist even when a profile has filtered
   // everything else out — they are how a user finds out why.
-  registerSystemTools(define.family("system"), {
+  registerSystemTools(define.family("system", { evidence: "observed" }), {
     // `all` when there is no profile at all: `registerTools` with no options filters nothing, and
     // `createServer()` (the package's own export) is exactly that case. Reporting `core` beside a
     // toolCount of 138 is self-refuting for anyone embedding this server.
@@ -201,7 +205,13 @@ export function registerTools(
       "multi-month range is as cheap as one day. For a single past day pass the same date twice. " +
       "Both ends are required; a half-specified range is rejected because the API would silently " +
       "return the latest session instead.\n" +
-      "An empty result for a weekend or public holiday is expected, not an error.",
+      "An empty result for a weekend or public holiday is expected, not an error.\n" +
+      "SIGNS: sell-side rows carry NEGATIVE `netLots` and `netValueIdr`, because that is how " +
+      "Stockbit sends them. Do not negate them again.\n" +
+      "A row omits `netLots` or `netValueIdr` when that figure could not be read — missing on the " +
+      "wire, empty, or in a format this server refuses to guess at. Absent is NOT zero, it means " +
+      "unknown, so do not sum these rows without checking. `unreadable` on the envelope names the " +
+      "wire keys and counts, per side, how many listed brokers a total over these rows would miss.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`."),
@@ -1521,15 +1531,21 @@ export function registerTools(
   /* ------------------------------- tool families ------------------------------- */
   // One module per section of the Stockbit UI. They register through `define`, so a read joins the
   // workflow handler map and a write never does.
-  registerStreamTools(define.family("stream"));
-  registerCompanyTools(define.family("company"));
-  registerFundamentalsTools(define.family("fundamentals"));
-  registerInsiderTools(define.family("insider"));
-  registerMarketTools(define.family("market"));
-  registerBrokerTools(define.family("bandarmology"));
-  registerCorpactionTools(define.family("corpaction"));
-  registerScreenerTools(define.family("screener"));
-  registerChartbitTools(define.family("chartbit"));
+  // Where a family appears both here and above, the two scopes are the split: the tools whose route
+  // was seen answering register against the one declared `observed`, and the ones read off
+  // Stockbit's web bundle register here. `chartbit` is the exception — it is `observed` in both,
+  // and appears twice only because its tools are registered from two modules.
+  // `bandar_detector` is the single tool that opts out of its scope's default; it computes on
+  // `broker_summary`, which IS observed, and makes no request of its own.
+  registerStreamTools(define.family("stream", { evidence: "projected" }));
+  registerCompanyTools(define.family("company", { evidence: "projected" }));
+  registerFundamentalsTools(define.family("fundamentals", { evidence: "projected" }));
+  registerInsiderTools(define.family("insider", { evidence: "projected" }));
+  registerMarketTools(define.family("market", { evidence: "projected" }));
+  registerBrokerTools(define.family("bandarmology", { evidence: "projected" }));
+  registerCorpactionTools(define.family("corpaction", { evidence: "projected" }));
+  registerScreenerTools(define.family("screener", { evidence: "projected" }));
+  registerChartbitTools(define.family("chartbit", { evidence: "observed" }));
   registerTradingTools(define.family("trading", { evidence: "projected" }));
   registerEipoTools(define.family("eipo", { evidence: "projected" }));
   registerAccountWriteTools(define.family("account", { evidence: "read-back" }));

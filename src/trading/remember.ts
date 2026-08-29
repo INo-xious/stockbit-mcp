@@ -99,7 +99,7 @@ let grant: RememberGrant | null = null;
  * deliberately NOT in here — it is checked separately in `rememberCovers`, so that a revocation
  * reads as a revocation rather than as an incidental fingerprint change.
  */
-export function policyKey(policy: TradingPolicy): string {
+function policyKey(policy: TradingPolicy): string {
   return JSON.stringify([
     policy.mode,
     policy.autoConfirm,

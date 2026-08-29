@@ -173,7 +173,7 @@ function unverified(name: string, detail: string): OrderCheck {
 }
 
 /** Read a session label out of a payload whose shape is not mapped. Null when nothing looks like one. */
-export function sessionLabel(payload: unknown): string | null {
+function sessionLabel(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const row = payload as Record<string, unknown>;
   for (const key of ["status", "session", "state", "phase", "market_status", "session_name", "name"]) {
@@ -592,7 +592,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
  * Written here rather than at the tool boundary so there is one wording, and so the numbers in it
  * come from the same object the request is built from. A model relaying this is relaying the ticket.
  */
-export function summarize(ticket: OrderTicket): string {
+function summarize(ticket: OrderTicket): string {
   const failed = ticket.checks.filter((c) => !c.ok);
   const unverifiedCount = ticket.checks.filter((c) => c.unverified).length;
   const parts: string[] = [];

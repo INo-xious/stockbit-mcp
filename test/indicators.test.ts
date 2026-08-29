@@ -239,3 +239,30 @@ test("latest skips trailing nulls and returns null for an empty or all-null seri
   assert.equal(latest([null, null]), null);
   assert.equal(latest([]), null);
 });
+
+
+/* ------------------------------------------------------------------ *
+ * Bollinger's variance is taken about the EXACT window mean.
+ *
+ * It used to read `middle[i]`, which `sma` has already put through `round(_, 4)` — a rounded mean
+ * feeding a standard deviation. The file's own `highest` comment argues the principle a few lines
+ * up: round the output, never the input to the next calculation. The series below is one where the
+ * difference survives the output rounding, so this is a real guard and not a restatement.
+ * ------------------------------------------------------------------ */
+
+test("Bollinger centres its variance on the exact mean, not sma's rounded output", () => {
+  // mean of [3,1,3] is 2.333…, which round(_, 4) turns into 2.3333.
+  const b = bollinger([3, 1, 3], 3, 2);
+  assert.equal(b.upper[2], 4.219, "the rounded-mean variance gave 4.2189 here");
+  assert.equal(b.middle[2], 2.3333);
+
+  const c = bollinger([1, 3, 1], 3, 2);
+  assert.equal(c.lower[2], -0.219, "and 0.4477 / -0.2189 on the way down");
+
+  // Recomputed from first principles, independently of the implementation.
+  const window = [3, 1, 3];
+  const mean = window.reduce((a, v) => a + v, 0) / 3;
+  const sd = Math.sqrt(window.reduce((a, v) => a + (v - mean) ** 2, 0) / 3);
+  assert.equal(b.upper[2], Number((mean + 2 * sd).toFixed(4)));
+  assert.equal(b.lower[2], Number((mean - 2 * sd).toFixed(4)));
+});

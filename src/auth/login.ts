@@ -683,7 +683,13 @@ export async function captureViaBrowserLogin(
         const url = await stockbitPageUrl();
         if (!url || isLoginPage(url)) continue;
 
-        if (!harvestTried && !options.switchAccount) {
+        // Only the MAIN slot may be filled this way. `credentialStorage` is the stockbit.com web
+        // session, so what this tier reads is a market-data credential BY CONSTRUCTION. Accepting it
+        // for another slot stores the wrong domain's token under the right name and reports success:
+        // `trading-login --browser` did exactly that, and the 401 only surfaced on the test refresh
+        // afterwards. The guard at `slot` was one-directional — it kept a carina token out of main,
+        // and left the reverse open.
+        if (!harvestTried && !options.switchAccount && (options.slot ?? "main") === "main") {
           harvestTried = true;
           dbg("landed signed-in at", url, "— harvesting the browser's own session");
           const token = await harvestFromBrowser();

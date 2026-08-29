@@ -284,73 +284,8 @@ export async function captureWebSession(
   return { capturedAt: new Date().toISOString(), cookies, origins };
 }
 
-/**
- * Write a stored session back into whatever browser this cdp is driving.
- *
- * Cookies go in first and unconditionally. Local Storage needs a document on the origin to write
- * into, so it is injected with `Page.addScriptToEvaluateOnNewDocument` — which runs before the
- * page's own scripts on the NEXT navigation, so the app reads a populated store on first paint
- * rather than booting logged-out and being corrected afterwards.
- */
-export async function restoreWebSession(cdp: CDP, session: WebSession): Promise<boolean> {
-  try {
-    await cdp.send("Storage.setCookies", { cookies: session.cookies }, undefined, 8_000);
-  } catch {
-    return false;
-  }
-
-  for (const origin of session.origins) {
-    // Built by JSON-encoding the pairs and concatenating — never by interpolating values into
-    // source. A Local Storage value is attacker-influenced content as far as this process is
-    // concerned, and it must land as data on both the capture and the restore leg.
-    const script =
-      "(function () { try { var pairs = " +
-      JSON.stringify(origin.local) +
-      "; if (location.origin !== " +
-      JSON.stringify(origin.origin) +
-      ") return; for (var i = 0; i < pairs.length; i++) { try { localStorage.setItem(pairs[i][0], pairs[i][1]); } catch (e) {} } } catch (e) {} })()";
-    try {
-      await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: script }, undefined, 5_000);
-    } catch {
-      // Browser-level add is not available on every build; the cookies may still be enough.
-    }
-  }
-  return true;
-}
-
-/**
- * Write one origin's Local Storage into a document that is ALREADY on that origin.
- *
- * The sibling path in `restoreWebSession` uses `addScriptToEvaluateOnNewDocument`, which is right
- * when the caller is about to navigate anyway. It is wrong for seeding a profile: that registration
- * lives on the CDP session and dies with it, so nothing would be left on disk. Local Storage is
- * per-origin and only reachable from a document on it, so seeding means actually opening the origin
- * and writing — and then closing the browser gracefully, which is what commits it to the profile.
- *
- * Returns how many keys were written, so the caller can report a restore that silently wrote nothing.
- */
-export async function writeOriginStorage(cdp: CDP, sessionId: string, origin: StoredOrigin): Promise<number> {
-  const script =
-    "(function () { var pairs = " +
-    JSON.stringify(origin.local) +
-    "; if (location.origin !== " +
-    JSON.stringify(origin.origin) +
-    ") return 0; var n = 0; for (var i = 0; i < pairs.length; i++) { try { localStorage.setItem(pairs[i][0], pairs[i][1]); n++; } catch (e) {} } return n; })()";
-  try {
-    const r = (await cdp.send(
-      "Runtime.evaluate",
-      { expression: script, returnByValue: true },
-      sessionId,
-      8_000,
-    )) as { result?: { value?: number } };
-    return typeof r.result?.value === "number" ? r.result.value : 0;
-  } catch {
-    return 0;
-  }
-}
-
 /** Put the stored cookies into whatever browser this cdp drives. Cookies alone persist in a profile. */
-export async function writeCookies(cdp: CDP, session: WebSession): Promise<boolean> {
+async function writeCookies(cdp: CDP, session: WebSession): Promise<boolean> {
   try {
     await cdp.send("Storage.setCookies", { cookies: session.cookies }, undefined, 8_000);
     return true;
@@ -576,14 +511,6 @@ export function sessionAgeHours(session: WebSession): number | null {
  * the website logs out while `status` still reports a healthy token, and why the two must be reported
  * as separate things rather than as one "are you logged in".
  */
-/**
- * The ACCESS token's life, which is NOT the session's life.
- *
- * Measured on the real `credentialStorage` cookie: `state.access` carries `exp = iat + 24h`. That
- * number used to stand in for the whole session, and that was the bug — see `webSessionHealth`.
- */
-export const ACCESS_TOKEN_LIFETIME_HOURS = 24;
-
 /** The two expiries carried inside the credential cookie, and who it belongs to. Safe to log. */
 export interface WebSessionCredential {
   /** ISO timestamp the 24h access token dies. Expiring is normal and not fatal — the SPA renews it. */
@@ -600,7 +527,7 @@ export interface WebSessionCredential {
  * construction: every failure is `null` rather than a throw, because `collectStatus` requires a
  * health probe that cannot fail.
  */
-export function readSessionCredential(session: WebSession): WebSessionCredential | null {
+function readSessionCredential(session: WebSession): WebSessionCredential | null {
   const parsed = parseCredentialCookie(session);
   if (!parsed) return null;
   const state = (parsed.payload as { state?: Record<string, unknown> } | null)?.state;

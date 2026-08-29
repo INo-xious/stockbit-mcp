@@ -12,6 +12,7 @@ import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { getBrokerSummary, clearCache } from "../src/core/index.ts";
 import { brokerSummaryTtlFor } from "../src/core/marketdetectors.ts";
+import { getBandarDetector } from "../src/core/brokers.ts";
 import { extractBands } from "../src/core/pricefeed.ts";
 import { CACHE } from "../src/config.ts";
 import { StockbitError } from "../src/http/errors.ts";
@@ -93,6 +94,112 @@ test("getBrokerSummary normalizes the real BBRI fixture (XL & XC are net sellers
   assert.ok(codes.get("XC")!.netValueIdr < 0);
   // Foreign/local classification survives.
   assert.ok(["Asing", "Lokal", "Pemerintah"].includes(codes.get("XL")!.investorType ?? ""));
+});
+
+/* ------------------------------------------------------------------ *
+ * The bandar reading, against the CAPTURED fixture rather than a hand-made one.
+ *
+ * These numbers were wrong in shipped code for as long as the only bandar tests ran on a synthetic
+ * fixture with POSITIVE sell values. The suite was green because the fixture agreed with the code;
+ * both disagreed with the response committed three directories away. Every assertion here is a
+ * quantity computed from that real response.
+ * ------------------------------------------------------------------ */
+
+test("bandar: the real fixture nets ~5.68e9, not the ~5.89e11 the sign bug produced", async () => {
+  clearCache();
+  const reading = await getBandarDetector({ symbol: "BBRI", limit: 50 });
+
+  assert.equal(reading.buyValueIdr, 297_122_545_000);
+  assert.equal(reading.sellValueIdr, -291_438_712_000, "the wire signs the sell side negative");
+
+  // buy - |sell|. The old `buy - sell` turned (+) - (-) into the SUM of both sides: 5.8856e11.
+  assert.equal(reading.netValueIdr, 5_683_833_000);
+  assert.ok(
+    Math.abs(reading.netValueIdr) < reading.buyValueIdr,
+    "the net must be small beside either side's total, never their sum",
+  );
+
+  assert.equal(reading.buyLots, 983_225);
+  assert.equal(reading.sellLots, -964_535);
+  assert.equal(reading.netLots, 18_690); // was 1,947,760 — the same 104x error in lots
+});
+
+test("bandar: topDistributors really is largest-seller-first on the real fixture", async () => {
+  clearCache();
+  const reading = await getBandarDetector({ symbol: "BBRI", limit: 50, top: 5 });
+
+  // Descending over negative numbers put the SMALLEST seller first, so this list used to read
+  // BQ, KI, HP, XA, DX — the five smallest — under the label "Largest net sellers first".
+  assert.deepEqual(
+    reading.topDistributors.map((b) => b.code),
+    ["SQ", "XL", "CC", "OD", "DH"],
+  );
+  assert.equal(reading.topDistributors[0].netValueIdr, -75_689_625_000);
+  assert.deepEqual(
+    reading.topAccumulators.map((b) => b.code),
+    ["YU", "ZP", "AK", "BB", "RX"],
+  );
+
+  // Ranked by size of flow, so each side is monotonically non-increasing in magnitude.
+  for (const side of [reading.topDistributors, reading.topAccumulators]) {
+    for (let i = 1; i < side.length; i++) {
+      assert.ok(
+        Math.abs(side[i].netValueIdr!) <= Math.abs(side[i - 1].netValueIdr!),
+        "a ranked list must not step back up",
+      );
+    }
+  }
+});
+
+test("bandar: sell-side concentration is a number on real data, not a permanent null", async () => {
+  clearCache();
+  const reading = await getBandarDetector({ symbol: "BBRI", limit: 50 });
+  const c = reading.concentration;
+
+  // All three were null on every real call, because the denominator was negative. The tool
+  // description tells the model a null share means nothing traded on that side.
+  assert.ok(c.topSellerShare !== null && Math.abs(c.topSellerShare - 0.2597) < 1e-4);
+  assert.ok(c.top3SellerShare !== null && Math.abs(c.top3SellerShare - 0.4876) < 1e-4);
+  assert.ok(c.sellHerfindahl !== null && Math.abs(c.sellHerfindahl - 0.1138) < 1e-4);
+  assert.ok(c.topBuyerShare !== null && Math.abs(c.topBuyerShare - 0.3421) < 1e-4);
+
+  for (const share of [c.topSellerShare, c.top3SellerShare, c.topBuyerShare, c.top3BuyerShare]) {
+    assert.ok(share !== null && share > 0 && share <= 1, "a share is a fraction of one side");
+  }
+  assert.ok(c.top3SellerShare! >= c.topSellerShare!, "top-3 cannot be smaller than top-1");
+
+  assert.equal(c.buyersListed, 16);
+  assert.equal(c.sellersListed, 25);
+  assert.equal(reading.unreadable, undefined, "every figure in the captured response parses");
+});
+
+test("bandar: the reading agrees with the RAW fixture, recomputed independently", async () => {
+  // Deliberately computed from the parsed JSON rather than from `getBrokerSummary`, and without
+  // reusing any helper the implementation uses. An assertion written as
+  // `netValueIdr === buyValueIdr - Math.abs(sellValueIdr)` restates the line it is checking and
+  // cannot fail; this recomputes the quantities from the bytes on disk.
+  clearCache();
+  const reading = await getBandarDetector({ symbol: "BBRI", limit: 50 });
+  const rows = fixture.data.broker_summary as {
+    brokers_buy: Array<Record<string, string>>;
+    brokers_sell: Array<Record<string, string>>;
+  };
+
+  let expectedBuy = 0;
+  for (const r of rows.brokers_buy) expectedBuy += Number(r.bval);
+  let expectedSell = 0;
+  for (const r of rows.brokers_sell) expectedSell += Number(r.sval);
+
+  assert.equal(reading.buyValueIdr, expectedBuy);
+  assert.equal(reading.sellValueIdr, expectedSell);
+  assert.ok(expectedSell < 0, "the fixture's sell side is negative — that is the whole point");
+  assert.equal(reading.netValueIdr, expectedBuy + expectedSell, "buy minus the sell side's size");
+
+  // And the ordering, straight off the raw rows.
+  const biggestSeller = [...rows.brokers_sell].sort(
+    (a, b) => Math.abs(Number(b.sval)) - Math.abs(Number(a.sval)),
+  )[0];
+  assert.equal(reading.topDistributors[0].code, biggestSeller.netbs_broker_code);
 });
 
 test("schema drift throws a typed StockbitError", async () => {
