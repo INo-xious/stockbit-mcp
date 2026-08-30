@@ -183,9 +183,57 @@ export function timeoutMessage(url: string | null, timeoutMs: number): string {
   );
 }
 
+/**
+ * How a credential was obtained — and therefore how far it can be trusted without checking.
+ *
+ * `intercepted` means the token came out of a live login RESPONSE: the server minted it, seconds
+ * ago, for the refresh route. There is a real basis for assuming it works, which is why the login
+ * deliberately does not spend a rotating test refresh proving it.
+ *
+ * `harvested` means it was read out of the browser's own `credentialStorage` because the profile
+ * was already signed in. No login happened and the refresh route never issued it. Measured on
+ * 2026-08-29 and 2026-08-30: four harvested credentials in a row returned HTTP 401 on their first
+ * use while `login`, `doctor` and `status` all reported them healthy; six intercepted ones in the
+ * same hours worked. The distinction decides whether verification is optional, so it is typed
+ * rather than left buried in a display string.
+ */
+export type CaptureMethod = "intercepted" | "harvested";
+
 export interface LoginResult {
   captured: boolean;
   refresh?: string;
+  /** Set whenever `captured` is true. Callers MUST branch on it — see `CaptureMethod`. */
+  method?: CaptureMethod;
+}
+
+/**
+ * Must this capture be proven against the API before the CLI may call it a success?
+ *
+ * Extracted from `bin/stockbit-auth.ts` for the reason `src/cliargs.ts` was: a decision that lives
+ * inline in a bin is a decision no test can reach, and this one is load-bearing enough that its
+ * truth table should be written down and checked.
+ *
+ * The rule, and why it is asymmetric:
+ *
+ * - An INTERCEPTED token came out of a live login response seconds ago. Proving it costs a refresh,
+ *   refreshes ROTATE, and rotation invalidates the browser session the login just established —
+ *   measured, and the reason the default proof was removed in the first place. So: trust it.
+ * - A HARVESTED token was read out of a cookie because the profile was already signed in. Nothing
+ *   logged in and the refresh route never issued it. Four of them in a row were rejected with HTTP
+ *   401 on first use while every diagnostic reported healthy. So: prove it, and accept the rotation
+ *   as the price of not shipping a credential that does not work.
+ * - `--verify` always proves, whatever the method: an explicit request outranks the heuristic.
+ *
+ * An absent method is treated as needing proof. It should not happen — `captureViaBrowserLogin`
+ * always sets one alongside `captured: true` — but "unknown provenance" is exactly the case where
+ * assuming the happy path is how this bug existed.
+ */
+export function captureNeedsProof(
+  method: CaptureMethod | undefined,
+  explicitVerify: boolean,
+): boolean {
+  if (explicitVerify) return true;
+  return method !== "intercepted";
 }
 
 export interface CaptureOptions {
@@ -479,7 +527,7 @@ export async function captureViaBrowserLogin(
       void cleanup().finally(() => resolve(result));
     };
 
-    const accept = (refresh: string, via: string) => {
+    const accept = (refresh: string, via: string, method: CaptureMethod) => {
       if (done) return;
       // Persistence is separated from recognition because both callers sit inside a catch that
       // logs "getResponseBody failed" at debug level. A store write that throws there — a locked
@@ -511,7 +559,7 @@ export async function captureViaBrowserLogin(
       // are deliberately not pinned: there is nothing to come back to.
       if (persist && !profileIsDisposable && (options.slot ?? "main") === "main") writeBrowserProfile(bin);
       if (!options.quiet) logStderr(`Session captured (${via}). You can close the browser window.`);
-      finish({ captured: true, refresh });
+      finish({ captured: true, refresh, method });
     };
 
     /**
@@ -590,7 +638,7 @@ export async function captureViaBrowserLogin(
           const res = await cdp.send("Fetch.getResponseBody", { requestId }, sid);
           const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
           dbg("fetch-intercepted", status, url, "-> refresh found:", Boolean(refresh));
-          if (refresh) accept(refresh, "intercepted");
+          if (refresh) accept(refresh, "intercepted", "intercepted");
         } catch (e) {
           dbg("Fetch.getResponseBody failed", url, String(e));
         } finally {
@@ -612,7 +660,7 @@ export async function captureViaBrowserLogin(
         const res = await cdp.send("Network.getResponseBody", { requestId }, sid);
         const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
         dbg("checked body", info.url, "-> refresh found:", Boolean(refresh));
-        if (refresh) accept(refresh, "network");
+        if (refresh) accept(refresh, "network", "intercepted");
       } catch (e) {
         dbg("getResponseBody failed", info.url, String(e));
       }
@@ -647,7 +695,7 @@ export async function captureViaBrowserLogin(
       if (!payload || !payload.includes("eyJ")) return;
       const refresh = refreshFromRawBody(payload, false);
       dbg("ws frame scanned -> refresh found:", Boolean(refresh));
-      if (refresh) accept(refresh, "socket");
+      if (refresh) accept(refresh, "socket", "intercepted");
     };
     cdp.on("Network.webSocketFrameReceived", (p) => scanWsFrame(p));
     cdp.on("Network.webSocketFrameSent", (p) => scanWsFrame(p));
@@ -694,7 +742,7 @@ export async function captureViaBrowserLogin(
           dbg("landed signed-in at", url, "— harvesting the browser's own session");
           const token = await harvestFromBrowser();
           if (token) {
-            accept(token, "harvested from the already-signed-in browser");
+            accept(token, "harvested from the already-signed-in browser", "harvested");
             return;
           }
           dbg("nothing usable in credentialStorage");

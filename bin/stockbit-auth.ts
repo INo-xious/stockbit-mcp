@@ -38,7 +38,7 @@ import {
   type ElicitationPolicy,
 } from "../src/settings.js";
 import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
-import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
+import { captureNeedsProof, captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { clearWebSession } from "../src/auth/websession.js";
 import { clearAccessCache } from "../src/auth/accesscache.js";
@@ -83,6 +83,17 @@ async function cmdDoctor(argv: string[]): Promise<void> {
     failed.length
       ? `\n${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`
       : "\nAll checks passed.",
+  );
+  // Say what "all checks passed" does NOT cover, because it has already been read as more than it
+  // means. On 2026-08-30 doctor printed that line while the stored credential was being rejected
+  // by the API with HTTP 401 on every request — truthfully, since every check here exercises the
+  // login MACHINERY (can a browser be driven, can a token be intercepted, can a cookie be read and
+  // cleared) and none of them spends the stored token. A summary that omits the distinction lets a
+  // green run be taken as proof of something it never tested.
+  logStderr(
+    "\nNote: these check the login machinery, not the stored credential. Whether the API actually\n" +
+      "accepts your token is unproven here — proving it costs a refresh, which rotates the token and\n" +
+      "ends the website session. Run `stockbit-auth status --verify` when you want that answer.",
   );
   if (failed.length) process.exit(1);
 }
@@ -169,14 +180,45 @@ async function cmdLogin(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  if (argv.includes("--verify")) {
+  // A HARVESTED credential does not get the benefit of the reasoning above, and must be proven.
+  //
+  // The argument for skipping the round trip is specifically that the token "arrived seconds ago in
+  // a live /auth/v1/login response". That is true of an intercepted capture and false of a
+  // harvested one: nothing logged in, and the token was read out of the browser's own
+  // `credentialStorage` because the profile was already signed in. The refresh route never issued
+  // it, and measurement says the refresh route will not accept it either — 2026-08-29 and
+  // 2026-08-30, four harvested credentials, four HTTP 401s on first use, while this command printed
+  // "you're set", `doctor` printed "All checks passed" and `status` showed six days remaining.
+  // Every layer reporting healthy while nothing works is worse than a plain failure, because it
+  // sends the next hour of diagnosis somewhere else entirely.
+  //
+  // Yes, verifying rotates, and rotation is what the comment above rightly avoids. The trade is
+  // still clearly worth it here: an unverified harvested token is worthless with high probability,
+  // so there is almost nothing to protect, and if it does verify the rotation hands back a token
+  // the refresh route itself just issued — strictly better than the cookie we started with.
+  const harvested = result.method === "harvested";
+  if (captureNeedsProof(result.method, argv.includes("--verify"))) {
     resetSession();
     try {
       await forceRefresh();
       logStderr("Test refresh: OK ✓ — note this ROTATED the token, so the browser session is now stale.");
     } catch (err) {
-      logStderr("Captured a token but the test refresh failed:", String(err));
-      logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+      if (harvested) {
+        logStderr("The captured session does NOT work — the API rejected it on first use.");
+        logStderr(String(err));
+        logStderr("");
+        logStderr("Why: nothing was logged in. The browser profile was already signed in, so the");
+        logStderr("token was read out of its cookie rather than issued by a login. Those are bound");
+        logStderr("to the browser and the refresh route refuses them.");
+        logStderr("");
+        logStderr("Fix: clear the profile so the next login has to show a real login form —");
+        logStderr("  stockbit-auth logout      (clears the token AND the logged-in profile)");
+        logStderr("  stockbit-auth login       (sign in when the window appears)");
+        logStderr("Look for 'Session captured (intercepted)'. '(harvested…)' means it happened again.");
+      } else {
+        logStderr("Captured a token but the test refresh failed:", String(err));
+        logStderr("The captured token may use a different refresh path — tell the maintainer this message.");
+      }
       process.exit(1);
     }
   } else {
