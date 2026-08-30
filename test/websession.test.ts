@@ -33,9 +33,11 @@ import {
   webSessionLaunchBlocker,
   readSessionAccessToken,
   alignStoredCredential,
+  recordWebSessionRejection,
   type StoredCookie,
   type WebSession,
 } from "../src/auth/websession.ts";
+import { clearSessionHealth, readHealthJournal } from "../src/auth/health.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
 
@@ -457,4 +459,76 @@ test("allowOlder is the explicit escape hatch, so nothing is permanently stuck",
 
   const left = webSessionHealth().accessHoursLeft;
   assert.ok(left !== null && left < 2, "an explicit older write must land");
+});
+
+/* ------------------------- a session Stockbit has actually refused ------------------------- */
+
+/**
+ * The fourth credential could be PROVED dead and still be reported as healthy.
+ *
+ * `webSessionHealth` judged the refresh token's expiry and nothing else, so a revoked session —
+ * unexpired payload, every byte unchanged — kept reading as "alive, ~6.0d left" while the browser
+ * opened a chart, got Stockbit's empty shell, and threw. The observation died with the process that
+ * made it. The token slots had a journal recording exactly this; the website session was the one
+ * credential with no way to say what had happened to it.
+ *
+ * These pin the two halves that make the record worth trusting: a rejection is believed over the
+ * clock, and a rejection about a session the user has since replaced is not.
+ */
+test("a REFUSED website session outranks the days left on its refresh token", () => {
+  clearWebSession();
+  clearSessionHealth("websession");
+  saveWebSession(session([pairCookie(HOUR, 6 * DAY)]));
+  assert.equal(webSessionHealth().likelyValid, true, "precondition: the clock says this is fine");
+
+  recordWebSessionRejection("chart shell rendered nothing for BBRI");
+
+  const health = webSessionHealth();
+  assert.equal(health.rejected, true);
+  assert.equal(health.basis, "rejected");
+  assert.equal(health.likelyValid, false, "a refused session is not 'probably alive'");
+  assert.ok(
+    health.refreshHoursLeft !== null && health.refreshHoursLeft > (5 * DAY) / HOUR,
+    "the refresh token is still unexpired — which is the whole point",
+  );
+  assert.match(health.hint, /REFUSED/);
+  assert.match(health.hint, /stockbit-auth login/, "the hint must name the way out");
+});
+
+test("a rejection recorded against a REPLACED session says nothing about the new one", () => {
+  // The fingerprint check: what stops the journal shouting about a credential the user has already
+  // replaced by logging in again.
+  clearWebSession();
+  clearSessionHealth("websession");
+  saveWebSession(session([pairCookie(HOUR, 6 * DAY)]));
+  recordWebSessionRejection("stale");
+  assert.equal(webSessionHealth().rejected, true, "precondition");
+
+  saveWebSession(session([pairCookie(2 * HOUR, 7 * DAY)]));
+
+  const health = webSessionHealth();
+  assert.equal(health.rejected, false, "the recorded failure was about a token that is gone");
+  assert.equal(health.likelyValid, true);
+});
+
+test("recording a rejection with nothing stored is a no-op, not a throw", () => {
+  // It runs on the way to throwing an error the user is about to read, and must never replace it.
+  clearWebSession();
+  clearSessionHealth("websession");
+  assert.doesNotThrow(() => recordWebSessionRejection("nothing stored"));
+  assert.equal(webSessionHealth().present, false);
+});
+
+test("the rejection record carries a fingerprint and no part of any token", () => {
+  clearWebSession();
+  clearSessionHealth("websession");
+  saveWebSession(session([pairCookie(HOUR, 6 * DAY)]));
+  const stored = readCredentialStorage(loadWebSession()!) as { refresh?: { token?: string } } | null;
+  recordWebSessionRejection("stale");
+
+  const serialised = JSON.stringify(readHealthJournal().websession);
+  assert.ok(serialised.includes("sha256:"), "the record identifies the credential by digest");
+  assert.doesNotMatch(serialised, /eyJ/, "nothing JWT-shaped may reach the journal");
+  const token = stored?.refresh?.token;
+  if (token) assert.ok(!serialised.includes(token.slice(0, 24)), "no substring of the token either");
 });

@@ -56,7 +56,18 @@ export interface SlotHealth {
   lastFailure?: RefreshRecord;
 }
 
-export type HealthJournal = Partial<Record<StoreSlot, SlotHealth>>;
+/**
+ * What this journal can hold an entry for.
+ *
+ * A superset of `StoreSlot`, and deliberately: the website session is NOT a token slot — it lives in
+ * `websession.enc` and is never served by `getStore` — but it fails the same way, is judged the same
+ * way, and until it was recorded here the browser could prove it dead while `status` went on
+ * reporting "~6.0d left". The journal already answered "what happened the last time this credential
+ * was used" for every other credential; the website session was the one that had no way to say.
+ */
+export type HealthKey = StoreSlot | "websession";
+
+export type HealthJournal = Partial<Record<HealthKey, SlotHealth>>;
 
 /**
  * What `status` can say about a slot without spending anything.
@@ -95,7 +106,7 @@ function write(journal: HealthJournal): void {
 }
 
 /** Record that a refresh with `token` succeeded. Never throws. */
-export function recordRefreshOk(slot: StoreSlot, token: string): void {
+export function recordRefreshOk(slot: HealthKey, token: string): void {
   const journal = readHealthJournal();
   const entry = journal[slot] ?? {};
   entry.lastOk = { at: new Date().toISOString(), token: tokenFingerprint(token) };
@@ -111,7 +122,7 @@ export function recordRefreshOk(slot: StoreSlot, token: string): void {
  * a user pasting it into a public issue.
  */
 export function recordRefreshFailure(
-  slot: StoreSlot,
+  slot: HealthKey,
   token: string,
   status: number | undefined,
   reason: string,
@@ -129,7 +140,7 @@ export function recordRefreshFailure(
 }
 
 /** Forget everything recorded for a slot, or for all of them. Called by `logout`. */
-export function clearSessionHealth(slot?: StoreSlot): void {
+export function clearSessionHealth(slot?: HealthKey): void {
   if (!slot) {
     try {
       if (existsSync(sessionHealthPath())) writeFileAtomic(sessionHealthPath(), Buffer.alloc(0));
@@ -158,7 +169,7 @@ export function clearSessionHealth(slot?: StoreSlot): void {
  *     ordinary state on a fresh install, and it is reported as ignorance rather than as health.
  */
 export function slotHealthState(
-  slot: StoreSlot,
+  slot: HealthKey,
   token: string | null,
   expired: boolean,
   journal: HealthJournal = readHealthJournal(),
@@ -180,7 +191,7 @@ export function slotHealthState(
 }
 
 /** The recorded event that explains a slot's state, so `status` can quote a time. */
-export function lastEventFor(slot: StoreSlot, journal: HealthJournal = readHealthJournal()): RefreshRecord | null {
+export function lastEventFor(slot: HealthKey, journal: HealthJournal = readHealthJournal()): RefreshRecord | null {
   const entry = journal[slot];
   if (!entry) return null;
   const { lastOk, lastFailure } = entry;

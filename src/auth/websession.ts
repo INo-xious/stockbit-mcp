@@ -39,6 +39,7 @@ import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileDir, writeFileAtomic } from "./store.js";
 import { extractRefresh, looksLikeJwt } from "./capture.js";
+import { lastEventFor, recordRefreshFailure, slotHealthState } from "./health.js";
 import type { CDP } from "./cdp.js";
 
 /** One cookie, in the shape `Storage.setCookies` will take straight back. */
@@ -543,6 +544,43 @@ function readSessionCredential(session: WebSession): WebSessionCredential | null
 }
 
 /**
+ * The website session's REFRESH token — for FINGERPRINTING, never for presenting.
+ *
+ * The health journal identifies a credential by a digest of it, so that a recorded rejection can be
+ * told from one about a token the user has since replaced. The refresh token is the right one to
+ * fingerprint here for the same reason it is the one `webSessionHealth` judges: it is the session's
+ * real identity, and it survives the 24h access token turning over underneath it.
+ */
+function readSessionRefreshToken(session: WebSession): string | null {
+  const parsed = parseCredentialCookie(session);
+  const state = (parsed?.payload as { state?: Record<string, unknown> } | null)?.state;
+  if (!state || typeof state !== "object") return null;
+  return slotToken(state.refresh);
+}
+
+/**
+ * Write down that the browser proved this website session stale.
+ *
+ * Called from the one place that can know it — the chart opened, Stockbit returned its shell, and
+ * the shell rendered nothing. Before this existed that discovery died with the process, so the next
+ * `status` went on quoting the refresh token's expiry and reporting a dead session as healthy.
+ *
+ * Best-effort and silent by design: it runs on the way to throwing an error the user is about to
+ * read, and a diagnostics file that cannot be written must not replace that error with its own.
+ */
+export function recordWebSessionRejection(reason: string): void {
+  try {
+    const session = loadWebSession();
+    if (!session) return;
+    const token = readSessionRefreshToken(session);
+    if (!token) return;
+    recordRefreshFailure("websession", token, 401, reason);
+  } catch {
+    /* best effort — see above */
+  }
+}
+
+/**
  * The ACCESS token the browser is currently holding.
  *
  * Separate from `readSessionCredential`, which returns expiries only and must stay safe to log.
@@ -577,9 +615,18 @@ export interface WebSessionHealth {
   likelyValid: boolean;
   /** PROVABLY dead: the refresh token's expiry was read and has passed. Only this blocks a launch. */
   expired: boolean;
+  /**
+   * PROVABLY refused: the browser opened a chart and Stockbit served a shell that rendered nothing,
+   * which is what it does when this session is stale. Recorded in the health journal, so it survives
+   * the process that discovered it and costs nothing to read back.
+   *
+   * Distinct from `expired`: an unexpired credential can still be revoked, and no byte of the
+   * payload changes when it is. This is the only field that can tell that story.
+   */
+  rejected: boolean;
   hint: string;
   /** What the verdict rests on. `unknown` means nothing is claimed either way. */
-  basis: "refresh-token" | "unknown" | "absent";
+  basis: "refresh-token" | "unknown" | "absent" | "rejected";
   /** Hours until the ~7d refresh token dies — the session's real deadline. Null if unreadable. */
   refreshHoursLeft: number | null;
   refreshExpiresAt: string | null;
@@ -620,6 +667,7 @@ export function webSessionHealth(): WebSessionHealth {
     ageHours: null,
     likelyValid: false,
     expired: false,
+    rejected: false,
     refreshHoursLeft: null,
     refreshExpiresAt: null,
     accessHoursLeft: null,
@@ -649,6 +697,26 @@ export function webSessionHealth(): WebSessionHealth {
     refreshHoursLeft,
     accessHoursLeft,
   };
+
+  // Rejected outranks every clock-based verdict below, because it is the only one backed by an
+  // actual answer from Stockbit. An expiry that is still in the future says nothing about a session
+  // that has been revoked — and that combination, "~6.0d left" printed over a session the browser
+  // had already proved dead, is exactly what this rung exists to stop.
+  const refreshToken = readSessionRefreshToken(session);
+  if (refreshToken && slotHealthState("websession", refreshToken, false) === "failing") {
+    const at = lastEventFor("websession")?.at;
+    return {
+      ...shared,
+      basis: "rejected" as const,
+      rejected: true,
+      hint:
+        "The stored website session was REFUSED by Stockbit" +
+        (at ? ` at ${new Date(at).toLocaleTimeString()}` : "") +
+        " — a chart loaded and rendered nothing, which is what a stale session looks like. Its " +
+        "refresh token has not expired, so no expiry check can see this. Run `stockbit-auth login`. " +
+        "The REST tools use a separate credential and may still be fine.",
+    };
+  }
 
   // Unknown. Say so, and do not stand in the way — the chart's own logged-out detection is a better
   // answer than a guess made from here.

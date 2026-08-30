@@ -36,7 +36,7 @@ import type { ChildProcess } from "node:child_process";
 import { CDP } from "../auth/cdp.js";
 import { launchDebuggableBrowser } from "../auth/launch.js";
 import { defaultProfileDir } from "../auth/login.js";
-import { seedWebSession, webSessionHealth } from "../auth/websession.js";
+import { recordWebSessionRejection, seedWebSession, webSessionHealth } from "../auth/websession.js";
 import { pinnedBrowserExists, readBrowserProfile } from "../auth/browserprofile.js";
 import { defaultBrowserPath, familyForPath } from "../auth/browsers.js";
 import { fileDir } from "../auth/store.js";
@@ -432,7 +432,14 @@ export class ChartbitSession {
       // The document arrived and rendered nothing. That is not "not signed in" and not "still
       // loading" — it is an app whose own API calls are being refused, which on Stockbit means the
       // browser profile's session has gone stale even though the CLI's API token is fine. Those are
-      // two different credentials and only one of them is being reported by `status`.
+      // two different credentials.
+      //
+      // Write it down BEFORE building the message, so the hint quoted below is the new verdict
+      // rather than the stale "alive, ~Nd left" it would otherwise still be reading off an expiry.
+      // This is the only place in the codebase that can observe a website session being refused;
+      // until it recorded that, the observation died with the process and `status` kept reporting a
+      // session the browser had just proved dead as healthy.
+      recordWebSessionRejection(`chart shell rendered nothing for ${symbol}`);
       throw new StockbitError(
         "auth",
         `The chart page for ${symbol} loaded but rendered nothing: the markup is there and its height ` +
