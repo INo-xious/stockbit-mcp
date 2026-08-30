@@ -29,7 +29,7 @@
  */
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getStore, type StoreSlot, type StoreState } from "./auth/store.js";
+import { getStore, type StoreSlot, type StoreState, fallenBackSlots } from "./auth/store.js";
 import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
 import {
   lastEventFor,
@@ -535,15 +535,53 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
+  // Presence is not health, and reporting it as though it were is actively misleading. This used
+  // to answer "is a token on disk, and is its clock still in the future", printing a bare
+  // "Stored." beside "main session: fail" for the SAME credential — because that one consults the
+  // refresh journal and this one did not. One report of one state, disagreeing with itself, and
+  // the reassuring half is where a reader stops. The journal already knows Stockbit rejected the
+  // token; asking it costs nothing and rotates nothing.
+  const mainRejected = auth.main.health === "failing";
   checks.push({
     name: "market-data session",
-    status: auth.main.stored && !auth.main.expired ? "ok" : "fail",
-    detail: auth.main.stored
-      ? auth.main.expired
+    status: auth.main.stored && !auth.main.expired && !mainRejected ? "ok" : "fail",
+    detail: !auth.main.stored
+      ? "Not stored. Nothing can be read until you log in."
+      : auth.main.expired
         ? "Stored, but its expiry has passed."
-        : "Stored."
-      : "Not stored. Nothing can be read until you log in.",
+        : mainRejected
+          ? "Stored and unexpired, but Stockbit REJECTED it the last time it was used. An expiry " +
+            "date cannot see that; only having spent the token can."
+          : "Stored.",
   });
+
+  // A login whose credential could not be stored has not succeeded, whatever it captured. The
+  // login tool cannot report this at its own call site — it deliberately returns before the person
+  // has finished typing their password — so it has to be unmissable HERE, which is exactly where
+  // that tool's closing message sends the user.
+  const lastLogin = loginStatus().lastResult;
+  if (lastLogin && lastLogin.startsWith("error:")) {
+    checks.push({
+      name: "last login",
+      status: "fail",
+      detail: `${lastLogin} — the browser step may have looked fine; the credential did not land.`,
+    });
+  }
+
+  // A recorded fallback is a security downgrade the user did not choose, so it is restated every
+  // time rather than mentioned once as it happened.
+  const fellBack = fallenBackSlots();
+  if (fellBack.length) {
+    checks.push({
+      name: "credential store",
+      status: "warn",
+      detail:
+        `${fellBack.join(", ")} held in the encrypted FILE store, not the Keychain, because a ` +
+        "Keychain write was refused. That file is protected by a key derived from hostname and " +
+        "username rather than by the OS. `stockbit-auth doctor` says whether the Keychain would " +
+        "accept a write now.",
+    });
+  }
 
   if (options.profileError) {
     checks.push({

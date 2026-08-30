@@ -28,6 +28,7 @@ import {
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { KEYCHAIN } from "../config.js";
 import { stockbitDir } from "../paths.js";
+import { logStderr } from "../redact.js";
 
 /**
  * What the store can say about a slot.
@@ -393,7 +394,26 @@ function keychainStore(slot: StoreSlot): TokenStore {
       // -U updates an existing item without resetting its trusted-application ACL. The token goes
       // in on stdin when `security` will take it there, and only falls back to `argv` — where `ps`
       // can see it — when a read-back proves the safe form did not land. See `keychainWrite`.
-      keychainWrite(token, slot);
+      try {
+        keychainWrite(token, slot);
+        return;
+      } catch (err) {
+        // The Keychain refused. Reported from the field on 2026-08-30: a background MCP server
+        // cannot display the macOS authorisation prompt, `security` is killed at the timeout, and
+        // every login since threw here. The old behaviour let that be non-fatal, so the captured
+        // token lived in memory for about ninety seconds and the server then fell back to the
+        // STORED refresh token — revoked, because the login had just superseded it. Worse, refresh
+        // tokens rotate and are single-use, so every retry SPENT a good token to mint a
+        // replacement that was then discarded: retrying degraded the auth state rather than
+        // repairing it.
+        //
+        // So keep the credential. The file backend is not a new security posture — it is the
+        // documented `STOCKBIT_FORCE_FILE_STORE` mode, and it demonstrably works in the same
+        // operation (websession.enc lands while the Keychain write fails). It IS a downgrade
+        // though, from an OS-ACL-protected item to a key derived from hostname and username, so it
+        // is announced and recorded rather than done quietly.
+        fallbackToFile(slot, token, err);
+      }
     },
     clear() {
       // Bounded like the rest. `delete-generic-password` prompts on a locked Keychain exactly as the
@@ -536,6 +556,119 @@ function fileStore(slot: StoreSlot): TokenStore {
   };
 }
 
+/* -------------------------------- backend fallback -------------------------------- */
+//
+// A fallback that is not remembered is worse than no fallback at all.
+//
+// The backend is chosen per process and cached only in memory, so a one-off write to the file
+// store would be invisible to the very next process: it would build a Keychain store, read the
+// STALE item still sitting there, and report it as present. Nothing would look at the file. The
+// marker below makes the choice durable, and the stale Keychain item is deleted so there is
+// nothing left to read by accident.
+//
+// It also keeps `reflock` honest: lock paths differ by backend, so two processes disagreeing about
+// which store is live would hold no effective lock over one credential.
+
+/** Records slots that have fallen back from the Keychain to the encrypted file store. */
+function backendMarkerPath(): string {
+  return join(fileDir(), "backend.json");
+}
+
+function readBackendOverrides(): Record<string, string> {
+  try {
+    const path = backendMarkerPath();
+    if (!existsSync(path)) return {};
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    // A corrupt marker must not stop the process starting; the worst case is that it tries the
+    // Keychain again, which is the behaviour it would have had anyway.
+    return {};
+  }
+}
+
+/** Which slots are on the file backend because the Keychain refused. For `status` to report. */
+export function fallenBackSlots(): StoreSlot[] {
+  return Object.entries(readBackendOverrides())
+    .filter(([, backend]) => backend === "file")
+    .map(([slot]) => slot as StoreSlot);
+}
+
+/**
+ * Which backend a slot should use, given whether the Keychain is usable at all.
+ *
+ * Pure and exported so the precedence can be tested off a Mac — the same reason
+ * `keychainWriteDecision` is. The rule that matters: a RECORDED fallback outranks platform
+ * detection, because the live credential is in the file store and a Keychain read would find a
+ * stale item and call it present.
+ */
+export function backendFor(
+  slot: StoreSlot,
+  keychainUsable: boolean,
+  overrides: Record<string, string> = readBackendOverrides(),
+): StoreBackend {
+  if (overrides[slot] === "file") return "file";
+  return keychainUsable ? "keychain" : "file";
+}
+
+export function recordBackendFallback(slot: StoreSlot): void {
+  const overrides = readBackendOverrides();
+  overrides[slot] = "file";
+  mkdirSync(fileDir(), { recursive: true, mode: 0o700 });
+  writeFileAtomic(backendMarkerPath(), Buffer.from(`${JSON.stringify(overrides, null, 2)}\n`));
+}
+
+/** Undo the fallback for a slot, so a later login tries the Keychain again. */
+export function clearBackendFallback(slot: StoreSlot): void {
+  const overrides = readBackendOverrides();
+  if (!(slot in overrides)) return;
+  delete overrides[slot];
+  writeFileAtomic(backendMarkerPath(), Buffer.from(`${JSON.stringify(overrides, null, 2)}\n`));
+  cached.delete(slot);
+}
+
+/**
+ * Persist a credential the Keychain refused, and remember that we had to.
+ *
+ * Rethrows if the file write ALSO fails. At that point nothing has the credential and the caller
+ * must be told — a login that cannot store anything has not succeeded, whatever it captured.
+ */
+function fallbackToFile(slot: StoreSlot, token: string, cause: unknown): void {
+  const file = fileStore(slot);
+  try {
+    file.set(token);
+  } catch (fileErr) {
+    throw new Error(
+      `Keychain write failed and the encrypted file store also failed: ` +
+        `${fileErr instanceof Error ? fileErr.message : String(fileErr)} ` +
+        `(Keychain: ${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+  }
+
+  recordBackendFallback(slot);
+  cached.set(slot, file);
+
+  // Delete the superseded Keychain item. Leaving it would give a future reader a revoked token
+  // that reports as present — the exact shape of the bug this fallback exists to end.
+  try {
+    keychainStore(slot).clear();
+  } catch {
+    // Best effort: the marker already routes reads to the file store.
+  }
+
+  logStderr(
+    `Keychain write failed for the ${slot} credential, so it was stored in the encrypted file ` +
+      `store instead (${filePath(slot)}).\n` +
+      `  This is a downgrade: that file is protected by a key derived from your hostname and ` +
+      `username, not by the Keychain's access controls.\n` +
+      `  Cause: ${cause instanceof Error ? cause.message : String(cause)}\n` +
+      `  Common cause is a background process that cannot show the macOS authorisation prompt.\n` +
+      `  Run \`stockbit-auth doctor\` to see whether the Keychain would accept a write here.\n` +
+      `  The choice is remembered in ${backendMarkerPath()}; delete that entry to try the ` +
+      `Keychain again.`,
+  );
+}
+
 /* ----------------------------------- selector ----------------------------------- */
 
 const cached = new Map<StoreSlot, TokenStore>();
@@ -548,7 +681,11 @@ const cached = new Map<StoreSlot, TokenStore>();
 export function getStore(slot: StoreSlot = "main"): TokenStore {
   const hit = cached.get(slot);
   if (hit) return hit;
-  const store = keychainAvailable() ? keychainStore(slot) : fileStore(slot);
+  // A recorded fallback outranks platform detection. Without this the next process would build a
+  // Keychain store over a slot whose live credential is in the file store, read the stale item,
+  // and report it as present.
+  const store =
+    backendFor(slot, keychainAvailable()) === "keychain" ? keychainStore(slot) : fileStore(slot);
   cached.set(slot, store);
   return store;
 }
