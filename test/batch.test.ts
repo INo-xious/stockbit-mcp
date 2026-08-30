@@ -9,11 +9,12 @@
  * The one spawned test is the `--help` gate, for the reason `src/cliargs.ts` documents: this bin's
  * worst case of that bug is `broker --help` starting an overnight run against Darren's own session.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 const STORE = mkdtempSync(join(tmpdir(), "stockbit-batch-test-"));
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
@@ -290,7 +291,19 @@ test("`broker --help` returns immediately instead of starting an overnight drip"
   // The spawned proof. If the gate were removed this would attempt a real backfill and the child
   // would run until the timeout killed it — a loud failure, and no requests either way because the
   // temp store holds no session.
-  const bin = new URL("../bin/stockbit-batch.ts", import.meta.url).pathname.replace(/^\//, "");
+  // `fileURLToPath`, never `.pathname`. `.pathname` returns `/C:/Users/...` on Windows but
+  // `/home/runner/...` on POSIX, so stripping the leading slash to repair the Windows form DELETES
+  // THE ROOT everywhere else: the absolute path becomes relative, resolves against the repo
+  // directory, and the child dies with ERR_MODULE_NOT_FOUND for
+  // `<repo>/home/runner/work/stockbit-mcp/stockbit-mcp/bin/stockbit-batch.ts`. That is exactly how
+  // this shipped — green on both Windows runners, red on Ubuntu and macOS, which blocked the 1.2.3
+  // publish. `fileURLToPath` is the conversion that knows the difference, and it percent-decodes,
+  // so a checkout path containing a space survives too.
+  const bin = fileURLToPath(new URL("../bin/stockbit-batch.ts", import.meta.url));
+  // Checked here rather than left to the child, because the child's complaint was an
+  // ERR_MODULE_NOT_FOUND stack fifteen frames deep inside tsx's resolver, which says nothing about
+  // the path having been mangled by the caller.
+  assert.ok(existsSync(bin), `the CLI to spawn does not exist at ${bin}`);
   const { stdout } = await execFileAsync(
     process.execPath,
     ["--import", "tsx", bin, "broker", "--help"],

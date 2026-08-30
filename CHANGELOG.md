@@ -12,6 +12,26 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [1.2.4] — 2026-08-31
 
+> **1.2.3 was never published.** Its commits landed on `main`, but the release run failed at
+> `npm test` before reaching `npm publish`, so no tarball, tag or GitHub Release was produced and
+> the registry goes straight from 1.2.2 to 1.2.4. The 1.2.3 section below records what those
+> commits changed; all of it ships here. The test that failed is fixed in this release.
+
+### Fixed
+
+- **A file URL was turned into a path with `.pathname`, which deleted the root on POSIX.**
+  `test/batch.test.ts` built the path to the CLI it spawns as
+  `new URL(...).pathname.replace(/^\//, "")`. `.pathname` yields `/C:/Users/...` on Windows and
+  `/home/runner/...` everywhere else, so stripping the leading slash — correct for the Windows
+  form — turned every POSIX absolute path into a relative one. The child then died with
+  `ERR_MODULE_NOT_FOUND` for `<repo>/home/runner/work/.../bin/stockbit-batch.ts`.
+
+  It passed on both Windows runners and failed on Ubuntu and macOS across node 22 and 24, which is
+  exactly what blocked the 1.2.3 publish. Now `fileURLToPath`, which knows the difference and
+  percent-decodes as well, so a checkout path containing a space works too. The test also asserts
+  the file exists before spawning, because the original symptom was a resolver stack from inside
+  tsx that said nothing about the caller having mangled the path.
+
 ### Changed
 
 - **The package is published under Darren Wang.** The `author` field in `package.json`, the plugin
