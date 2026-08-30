@@ -12,6 +12,38 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- **A login that captured a dead credential reported success.** Measured on 2026-08-29 and
+  2026-08-30: four consecutive logins printed `Session captured (harvested from the
+  already-signed-in browser)` and then `Session stored (valid ~6 day(s)) — you're set`, while the
+  stored token was refused by the API with HTTP 401 on its very first request. `doctor` said
+  "All checks passed" and `status` showed six days remaining at the same moment. Six *intercepted*
+  captures in the same hours worked first time. Every layer agreeing that a broken credential is
+  healthy is worse than a plain failure, because it sends the next hour of diagnosis elsewhere.
+
+  The cause is that a harvested credential is read out of the browser's own `credentialStorage`
+  because the profile was already signed in: nothing logged in, the refresh route never issued it,
+  and the refresh route will not accept it. The login already knew which path had run and threw the
+  fact away — the capture method reached the console as a display string and `LoginResult` carried
+  only `{ captured, refresh }`.
+
+  The fix is deliberately asymmetric, because the existing argument against a default proof is
+  correct and is kept: proving costs a refresh, refreshes ROTATE, and rotation invalidates the
+  browser session the login just established. But that argument rests on the token having arrived
+  seconds ago in a live login response — true of an interception, false of a harvest. So an
+  intercepted capture is trusted exactly as before, a harvested one is proven before success is
+  claimed, `--verify` proves either, and a capture of unknown provenance is proven rather than
+  assumed. A failed proof now names the cause and the remedy (`logout` clears the profile, so the
+  next login must show a real form) instead of "the test refresh failed".
+
+  The decision lives in `captureNeedsProof` rather than inline in the bin, for the reason
+  `src/cliargs.ts` was extracted: a decision inside a bin is one no test can reach. Validation
+  reads the store *after* `captureViaBrowserLogin` resolves, which matters — cleanup runs
+  `syncStoreFromBrowser` and can adopt a different token after "Session captured" has printed.
+
+- **`doctor` claimed more than it tested.** "All checks passed" now carries what it does not cover:
+  its checks exercise the login machinery — drivable browser, interception, cookie read and clear —
+  and none of them spends the stored token.
+
 - **A revoked session was reported as no session at all.** A 401 from the refresh endpoint appended
   the no-token-at-all sentence — "No Stockbit session stored. Run `stockbit-auth login` first." — to
   a failure whose whole meaning is that a token *is* stored and Stockbit refused it. `status`, which
@@ -30,6 +62,14 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
   three token slots; its key now covers the website session too, the refusal is recorded where it is
   detected, and a recorded rejection outranks the clock. The fingerprint check comes with it, so a
   rejection about a session the user has since replaced stays quiet.
+
+### Not changed
+
+- The browser-preference behaviour from 1.2.2 is **not** the cause of the harvested-credential
+  failure above, and was left alone. The first hypothesis was that the OS-default browser harvests
+  while another intercepts; a Chrome login against a signed-in profile harvested too, and its token
+  failed identically. What decides harvest-versus-intercept is whether the profile already holds a
+  Stockbit session, not which browser holds it — which is why `logout` is the remedy.
 
 ## [1.2.2] — 2026-08-29
 
