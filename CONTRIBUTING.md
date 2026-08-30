@@ -30,6 +30,27 @@ is not enough.
 CI runs typecheck, test, build, smoke, check:pack and a `docs/TOOLS.md` freshness check on Ubuntu,
 macOS and Windows against Node 22 and 24.
 
+### `npx stockbit-mcp` does not work *inside this checkout*
+
+Every `npx` invocation in this project's own docs — `.mcp.json`, and the `npx -y -p stockbit-mcp
+stockbit-auth login` that `status` prints — fails here and only here:
+
+```
+$ npx -y stockbit-mcp@^1
+sh: stockbit-mcp: command not found
+```
+
+npx reads the `package.json` in the working directory, finds a package *named* `stockbit-mcp` whose
+version already satisfies the spec, concludes it is installed, and execs the bin from
+`./node_modules/.bin/` — where it is absent, because a package does not link its own bins. It is not
+a packaging fault and installers never hit it: the same command works from any other directory.
+
+In the checkout, run the local build instead — `node dist/bin/stockbit-mcp.js`, or `npm start` /
+`npm run dev:mcp`. The same goes for the auth CLI: `node dist/bin/stockbit-auth.js login`.
+
+`.mcp.json` must keep pointing at npm regardless (`test/distribution.test.ts` asserts it): it is the
+Claude Code plugin's config, and a plugin checkout has no `dist/` to point at.
+
 ## The tests are offline, and must stay that way
 
 `fetch` is stubbed. Nothing in the suite touches the network, a real Keychain, a real browser or a
