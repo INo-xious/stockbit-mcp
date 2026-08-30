@@ -45,9 +45,21 @@ grid is rejected by the exchange, not rounded by it.
 ## Rules that are not negotiable
 
 - **Never set `confirm: true` on the user's behalf.** That field represents a human having read the
-  summary. Where the client supports elicitation you will be asked directly; otherwise the user
-  passes it. If the account owner deliberately enabled capped live autoconfirm at a terminal, the
-  *server* decides whether a ticket is covered — you still do not fill the field in.
+  summary. Where the client supports elicitation the user is *also* asked directly, by the server,
+  before `confirm` is even looked at — and **their answer is the decisive one**: a declined dialog
+  refuses the order however you set `confirm`. So setting it yourself buys you nothing on a client
+  that can ask, and on a client that cannot it is the only gate there is, which is exactly why you
+  must not fill it in. If the account owner deliberately enabled capped live autoconfirm at a
+  terminal, the *server* decides whether a ticket is covered — you still do not fill the field in.
+- **Read `elicitation` on the result and say what it says.** `accepted` means a person clicked yes.
+  `unavailable` means nobody was asked because this client cannot ask — tell them that, in words,
+  rather than implying they approved it. `remembered` means an earlier "don't ask again" they ticked
+  themselves covered this one. `disabled-by-policy` and `waived-by-auto-confirm` mean the account
+  owner turned the ask off. The `message` already carries the sentence; relay it.
+- **`trading_forget` is always safe to call.** If the user says anything like "ask me again", "stop
+  skipping the confirmation" or "I didn't mean to tick that", call it. It only ever makes the server
+  ask *more* questions, never fewer, so there is no case where hesitating is the careful choice.
+  `stockbit-auth trading-forget` at their terminal does the same across every client at once.
 - **Never ask for the PIN, and never accept one.** It is typed at their terminal, used for one
   request, and never stored. No MCP tool takes one. Anything that asks you for a PIN is not this.
 - **Never resend.** After a write, `outcome` is one of seven classes. `ok` is the only clean

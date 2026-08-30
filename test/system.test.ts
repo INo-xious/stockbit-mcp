@@ -59,7 +59,9 @@ function harness(elicit?: () => Promise<"accepted" | "declined" | "unavailable">
     },
   } as unknown as McpServer;
 
-  const define = makeDefiner(server, new Map()).family("system");
+  // Evidence is declared, so the scope declares it — `registerTools` passes the same word in
+  // production (src/tools/register.ts).
+  const define = makeDefiner(server, new Map()).family("system", { evidence: "observed" });
   if (elicit) (define as { elicit?: unknown }).elicit = elicit;
   registerSystemTools(define);
 

@@ -29,6 +29,22 @@ const LOGIN_TOKEN_RE = /("?login_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 const SECURITIES_TOKEN_RE = /("?securities_token"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
 
 /**
+ * A bare `token=` — the e-IPO refresh, and the ONE route in this project that carries a credential
+ * in a URL query string (`src/http/routes/sekuritas.ts`, `auth: "refreshEipo"`).
+ *
+ * `redactValue` has always dropped `token` as an object KEY. This is the string path, and a URL is a
+ * string: `src/http/transport.ts` builds `/partner/refresh_token?token=…` and puts the whole URL
+ * into a `StockbitError`, whose constructor redacts. Without this, an opaque (non-JWT) e-IPO token
+ * came back out verbatim — `test/redact.test.ts` already knows these tokens can be opaque, because
+ * its `securities_token` case uses one. CLAUDE.md states the rule: a `fetch` failure quotes the URL.
+ *
+ * The `\b` keeps it off `refresh_token`, `access_token`, `login_token`, `securities_token` and
+ * `bot_token`: `_` is a word character, so there is no boundary between it and `token`. Those five
+ * have their own patterns and run first.
+ */
+const TOKEN_RE = /("?\btoken"?\s*[:=]\s*"?)[^"\s,&}]+/gi;
+
+/**
  * A Telegram bot token — `123456789:AAH...`, a numeric bot id, a colon, then 35 URL-safe characters.
  *
  * It has a shape of its own and is redacted by shape rather than only under a key, because the place
@@ -54,6 +70,7 @@ export function redact(input: string): string {
     .replace(ACCESS_RE, `$1${MASK}`)
     .replace(LOGIN_TOKEN_RE, `$1${MASK}`)
     .replace(SECURITIES_TOKEN_RE, `$1${MASK}`)
+    .replace(TOKEN_RE, `$1${MASK}`)
     .replace(PIN_FIELD_RE, `$1${MASK}`)
     .replace(TELEGRAM_BOT_TOKEN_RE, MASK)
     .replace(JWT_RE, MASK);

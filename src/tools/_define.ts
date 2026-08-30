@@ -28,12 +28,20 @@
  * Every tool carries one of three words — see `CONTEXT.md`. It rides on `_meta` so a client, the
  * generated reference and a reviewer all read the same value rather than three drifting copies.
  *
- * The default is **derived from the description**, because the description is where the fact
- * already lives: dozens of tools say "PENDING VERIFICATION: this route has not been observed live"
- * and a second, hand-maintained flag saying the same thing would be a second thing to forget. An
- * explicit `evidence` still wins — except that claiming a tool is Observed while its own
- * description says it has never been observed throws at registration, which is a contradiction
- * nobody should be able to ship.
+ * It is **declared** — on the tool, or on its family — and never inferred. It used to be derived
+ * from the description, on the reasoning that the description is where the fact already lives and a
+ * second hand-maintained flag would be a second thing to forget. That reasoning was wrong in a way
+ * only visible from both ends at once: prose cannot distinguish a claim about a ROUTE from a caveat
+ * about one FIELD, so `company_overview` was demoted to `projected` by a sentence about
+ * `eligibility`'s key names, while `screener_save` widened itself to `read-back` by writing "has
+ * NEVER been observed" where the pattern knew only "has NOT been observed". A regex arbitrating the
+ * project's central provenance claim was the wrong shape for the job.
+ *
+ * A tool that declares nothing, in a family that declares nothing, now fails to register: the old
+ * fallback handed it `"observed"`, the strongest word on the ladder, for saying nothing at all.
+ * `NEVER_OBSERVED` survives as a cross-check that raises when a declaration and a description
+ * disagree — and `test/tools.test.ts` carries the whole map, hand-written, for the same reason
+ * `WRITES` is.
  *
  * ## Annotations
  *
@@ -83,11 +91,21 @@ export const EVIDENCE_META_KEY = "stockbit-mcp/evidence";
 /**
  * A description that says, in this project's own words, that nobody has seen this route answer.
  *
+ * This is a CROSS-CHECK, not the source of truth. It used to be both, and it failed in both
+ * directions at once. `screener_save` said "has NEVER been observed" where this pattern only knew
+ * "has NOT been observed", so it registered as `read-back` and nothing complained — the silent
+ * widening the evidence ladder exists to prevent. And because it matches anywhere in free prose, a
+ * sentence about one FIELD downgraded a whole tool: `company_overview` was `projected` on the
+ * strength of a caveat about `eligibility`'s key names, not because its route was unseen.
+ *
+ * Evidence is declared now, so this only raises when a declaration and a description disagree — and
+ * a description that means one field rather than the route has to say so in words that do not read
+ * as a claim about the whole tool.
+ *
  * Kept broad on purpose: the phrasing varies across modules ("PENDING VERIFICATION", "Pending
- * verification", "PENDING:", "has not been observed live"), and a marker that only matched one
- * spelling would silently let the others through as Observed.
+ * verification", "PENDING:", "has not been observed live", "has never been observed").
  */
-const NEVER_OBSERVED = /PENDING[ _]?VERIFICATION|PENDING:|(has|have) not been observed/i;
+const NEVER_OBSERVED = /PENDING[ _]?VERIFICATION|PENDING:|(has|have) (not|never) been observed/i;
 
 /** What a registered handler looks like once the schema has been applied and the type forgotten. */
 export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -101,6 +119,25 @@ export type TypedHandler<S extends ZodRawShape> = (
 export interface ToolOptions extends ToolAnnotations {
   evidence?: Evidence;
 }
+
+/** What a person can answer. `unavailable` is neither a yes nor a no — nobody was reached. */
+export type ElicitAnswer = "accepted" | "declined" | "unavailable";
+
+/**
+ * The elicitation channel, with the second box and the answer to it.
+ *
+ * `elicit()` returns only the verdict, which is all `login` needs. Order entry needs one more fact
+ * — whether the person also ticked "don't ask again" — and a boolean cannot be smuggled through a
+ * three-member string union without inventing a fourth member that means two things. So this is a
+ * record, and `elicit()` is the same call with the record's `answer` field taken off the front.
+ *
+ * `prompt.remember`, when present, is the LABEL of the second box. Omitting it means no box, which
+ * is how a caller says "this one is not waivable" — see `trading.elicitation: "required"`.
+ */
+export type ElicitDecision = (
+  message: string,
+  prompt?: { title?: string; description?: string; remember?: string },
+) => Promise<{ answer: ElicitAnswer; remember: boolean }>;
 
 /**
  * Which families and tools a server instance registers.
@@ -176,18 +213,24 @@ export interface Definer {
    * Ask the human directly, when the client can.
    *
    * MCP elicitation is the only channel in this protocol that reaches a person rather than a model.
-   * For an order that matters: `confirm: true` says a model decided the user agreed, and this says
-   * the user themselves clicked yes. Both are required — this is an additional gate, never a
-   * replacement for the confirmation the caller passes.
+   * `confirm: true` says a model decided the user agreed; this says the user themselves clicked
+   * yes, and the two are not the same evidence. Where both exist, the person's answer is the
+   * decisive one — a declined dialog refuses whatever the caller passed. See ADR-0010.
    *
    * Optional so a caller can be constructed without one (tests build a Definer by hand), and it
    * answers "unavailable" rather than throwing when the client advertises no elicitation support,
    * because a client that cannot ask must not become a client that cannot trade.
    */
-  elicit?(
-    message: string,
-    prompt?: { title?: string; description?: string },
-  ): Promise<"accepted" | "declined" | "unavailable">;
+  elicit?(message: string, prompt?: { title?: string; description?: string }): Promise<ElicitAnswer>;
+
+  /**
+   * The same channel, able to offer "don't ask again" and to report whether it was taken.
+   *
+   * One implementation, two entry points: `elicit()` is this with the record flattened to its
+   * `answer`. A second implementation is how the two would end up disagreeing about what counts as
+   * a yes, which is the class of drift this whole change is about.
+   */
+  elicitDecision?: ElicitDecision;
 }
 
 /** Everything the definers of one server share. */
@@ -226,19 +269,34 @@ export function makeDefiner(
 }
 
 function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence | undefined): Definer {
+  /**
+   * Evidence is DECLARED — per tool, or by the tool's family — and never inferred.
+   *
+   * There used to be two fallbacks under this and both were wrong. Reading it off the description
+   * meant a caveat about a single field could downgrade an entire tool, while a caveat phrased one
+   * word differently ("never" for "not") widened one silently. And falling through to `"observed"`
+   * meant the strongest claim on the ladder was what a tool got for saying nothing at all, which is
+   * exactly backwards for a default. A tool that declares nothing now fails to register.
+   */
   const resolveEvidence = (name: string, description: string, explicit?: Evidence): Evidence => {
-    const looksUnobserved = NEVER_OBSERVED.test(description);
-    if (explicit) {
-      if (looksUnobserved && explicit !== "projected") {
-        throw new Error(
-          `Tool ${JSON.stringify(name)} is declared evidence "${explicit}" but its own description ` +
-            `says it has not been observed live. One of the two is wrong.`,
-        );
-      }
-      return explicit;
+    const evidence = explicit ?? familyEvidence;
+    if (!evidence) {
+      throw new Error(
+        `Tool ${JSON.stringify(name)} declares no evidence, and its family ` +
+          `${JSON.stringify(familyName)} sets no default. Evidence is declared, not inferred: pass ` +
+          "{ evidence } on the tool, or on define.family(). CONTEXT.md defines the three words, and " +
+          "settling one takes a live call rather than an edit.",
+      );
     }
-    if (looksUnobserved) return "projected";
-    return familyEvidence ?? "observed";
+    if (NEVER_OBSERVED.test(description) && evidence !== "projected") {
+      throw new Error(
+        `Tool ${JSON.stringify(name)} is declared evidence "${evidence}" but its own description ` +
+          "says it has not been observed live. One of the two is wrong — and if the description " +
+          "means one FIELD rather than the route, say so in words this check cannot read as a claim " +
+          "about the whole tool.",
+      );
+    }
+    return evidence;
   };
 
   const shapeInputs = (shape: ZodRawShape): ToolRecord["inputs"] =>
@@ -353,33 +411,75 @@ function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence
     },
 
     async elicit(message, prompt) {
-      const inner = (shared.server as unknown as { server?: ElicitCapableServer }).server;
-      if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) return "unavailable";
-      try {
-        const result = await inner.elicitInput({
-          message,
-          requestedSchema: {
-            type: "object",
-            properties: {
-              confirm: {
-                type: "boolean",
-                title: prompt?.title ?? "Place this order?",
-                description: prompt?.description ?? "Yes places it on the exchange. There is no undo.",
-              },
-            },
-            required: ["confirm"],
-          },
-        });
-        // Anything short of an explicit yes is a no. A cancelled dialog is not an agreement, and
-        // neither is an accept whose content did not actually carry the box being ticked.
-        return result.action === "accept" && result.content?.confirm === true ? "accepted" : "declined";
-      } catch {
-        // The client claimed the capability and then failed to answer. Treating that as consent
-        // would be the worst reading of it.
-        return "unavailable";
-      }
+      return (await ask(shared, message, prompt)).answer;
+    },
+
+    async elicitDecision(message, prompt) {
+      return ask(shared, message, prompt);
     },
   };
+}
+
+/**
+ * The one place a person is actually asked.
+ *
+ * `elicit()` and `elicitDecision()` are both this; the first throws the `remember` half away. Two
+ * bodies would be two answers to "what counts as a yes", and the rule below — that anything short
+ * of an explicit tick is a no — is exactly the rule that must not exist in two versions.
+ */
+async function ask(
+  shared: Shared,
+  message: string,
+  prompt?: { title?: string; description?: string; remember?: string },
+): Promise<{ answer: ElicitAnswer; remember: boolean }> {
+  const inner = (shared.server as unknown as { server?: ElicitCapableServer }).server;
+  if (!inner?.getClientCapabilities?.()?.elicitation || !inner.elicitInput) {
+    return { answer: "unavailable", remember: false };
+  }
+  try {
+    const result = await inner.elicitInput({
+      message,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: {
+            type: "boolean",
+            title: prompt?.title ?? "Place this order?",
+            description: prompt?.description ?? "Yes places it on the exchange. There is no undo.",
+          },
+          // Deliberately NOT in `required`: a client that renders only the required fields, or that
+          // drops one it does not understand, must still be able to return a usable yes or no. An
+          // absent second box reads as an unticked one, which is the safe direction.
+          ...(prompt?.remember
+            ? {
+                remember: {
+                  type: "boolean",
+                  title: prompt.remember,
+                  description:
+                    "Optional, and separate from the answer above. Yes skips this dialog for later " +
+                    "commitments of the same value or smaller, for a short while, in this server " +
+                    "process only — never on disk and never past a restart.",
+                },
+              }
+            : {}),
+        },
+        required: ["confirm"],
+      },
+    });
+    // Anything short of an explicit yes is a no. A cancelled dialog is not an agreement, and
+    // neither is an accept whose content did not actually carry the box being ticked.
+    const accepted = result.action === "accept" && result.content?.confirm === true;
+    return {
+      answer: accepted ? "accepted" : "declined",
+      // The same rule, applied to the second box: it is a waiver of future questions, so it needs
+      // the same explicit tick rather than any truthy value that happens to come back.
+      remember: accepted && result.content?.remember === true,
+    };
+  } catch {
+    // The client claimed the capability and then failed to answer. Treating that as consent
+    // would be the worst reading of it.
+    return { answer: "unavailable", remember: false };
+  }
 }
 
 /** The slice of the low-level server this module uses, so the SDK's shape is named in one place. */

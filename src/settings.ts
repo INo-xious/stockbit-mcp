@@ -1,7 +1,7 @@
 /**
  * `~/.stockbit/settings.json` — the file that decides whether this server may place an order at all.
  *
- * ## Two switches, and why neither is enough alone
+ * ## Three switches, and why none is enough alone
  *
  * `trading.enabled` is the master. Off by default, and turning it on is a deliberate act at a
  * terminal (`stockbit-auth trading-enable`) rather than something a model can do. With it off,
@@ -14,6 +14,16 @@
  * owner's deliberate exception to that rule, and it is guard-railed rather than trusted — it is
  * honoured **only when `maxOrderValueIdr` is set**, so "I trust it for small orders" cannot silently
  * become "I trust it for any order". With no cap the policy reports itself as ignored and says why.
+ *
+ * `trading.elicitation` is the third, and it is about a different question from the other two: not
+ * *may* an order be placed, but *who has to agree first*. ADR-0010. It is a tri-state rather than a
+ * pair of booleans for the same reason `TradingMode` is — see the note on that type — and it
+ * contradicts `autoConfirm` at one value, `required`, where the contradiction is resolved in favour
+ * of the switch that produces a question and reported through `autoConfirmIgnored`.
+ *
+ * `trading.confirmationsRevokedAt` is not a switch at all but a moment: it is how a terminal reaches
+ * into a server process that is already running, since the in-memory "don't ask again" grants a
+ * person makes for themselves cannot be reached any other way.
  *
  * ## Precedence
  *
@@ -50,6 +60,22 @@ export interface PaperSettings {
   startingCashIdr: number;
 }
 
+/**
+ * How hard this account leans on being asked a question by a person. ADR-0010.
+ *
+ * Three values rather than two booleans, for the reason `TradingMode` is three values rather than
+ * `enabled` plus a flag: "required" and "never" are opposite ends of one dial, and a pair of
+ * booleans can be set to a combination that says nothing — or, worse, to a combination each half of
+ * which reads as the opposite of the truth.
+ *
+ *  - `required` — refuse rather than send when no person can be reached. The strictest.
+ *  - `when-available` — ask whenever the client can, and fall back to `confirm: true` when it
+ *    cannot. The default, and the one that honours ADR-0004's rule that a client which cannot ask
+ *    must not become a client that cannot trade.
+ *  - `never` — do not ask, whatever the client supports. `confirm: true` is then the only gate.
+ */
+export type ElicitationPolicy = "required" | "when-available" | "never";
+
 export interface TradingSettings {
   /** Master switch. `off` unless the account owner chose otherwise at a terminal. */
   mode: TradingMode;
@@ -61,6 +87,16 @@ export interface TradingSettings {
   allowedSymbols: string[];
   /** Ceiling on lots in one order, whatever the value. */
   maxLotsPerOrder: number;
+  /** Whether a person must be asked directly, may be asked, or is never asked. */
+  elicitation: ElicitationPolicy;
+  /**
+   * When the account owner last said "forget every standing confirmation", as an ISO timestamp.
+   *
+   * The only way a terminal can reach into a server process that is already running: the CLI writes
+   * a moment into this file, every order re-reads the policy, and an in-memory "don't ask again"
+   * granted before that moment stops covering anything. `null` means it has never been used.
+   */
+  confirmationsRevokedAt: string | null;
   paper: PaperSettings;
 }
 
@@ -81,7 +117,7 @@ export interface Settings {
  * 2 since paper trading. A v1 file is migrated on read: `enabled: true` becomes `live`, because
  * that is what it meant, and anything else becomes `off`.
  */
-export const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 2;
 
 /** A paper ledger's opening balance when nobody says otherwise: Rp 100 million. */
 export const DEFAULT_PAPER_CASH_IDR = 100_000_000;
@@ -96,6 +132,11 @@ export function defaultSettings(): Settings {
       maxOrderValueIdr: null,
       allowedSymbols: [],
       maxLotsPerOrder: 50_000,
+      // Ask whenever a person can be reached, and do not brick a client that cannot be asked. Not
+      // `required`, because that would break every existing install on the day it shipped; not
+      // `never`, because the whole point is that the ask happens.
+      elicitation: "when-available",
+      confirmationsRevokedAt: null,
       paper: { startingCashIdr: DEFAULT_PAPER_CASH_IDR },
     },
     chartbit: { headless: false, keepBrowserOpen: true },
@@ -125,6 +166,39 @@ function readMode(trading: Partial<TradingSettings> & { enabled?: unknown }): Tr
   if (trading.mode === "live" || trading.mode === "paper" || trading.mode === "off") return trading.mode;
   if (trading.mode === undefined && trading.enabled === true) return "live";
   return "off";
+}
+
+/**
+ * Read the elicitation switch, whitelisted the way the mode is.
+ *
+ * Anything unrecognised — a typo, a boolean, an absent field on a file written before this existed
+ * — is the DEFAULT rather than the strictest or the loosest value. That is the deliberate
+ * difference from `readMode`, whose fallback is `off` because an unreadable *permission* is no
+ * permission. This is not a permission: `never` would silently weaken an account and `required`
+ * would silently brick one, so an unreadable value means the same thing it means when the field is
+ * missing entirely.
+ */
+function readElicitation(value: unknown): ElicitationPolicy {
+  if (value === "required" || value === "when-available" || value === "never") return value;
+  return "when-available";
+}
+
+/**
+ * The revocation moment: any non-empty string, or null.
+ *
+ * Deliberately NOT "a parseable timestamp, or null". This field is a *revocation*, not a
+ * permission, so the two failure directions are not symmetric: reading a bad value as "never
+ * revoked" silently keeps a standing confirmation alive, while reading it as "revoked" only means
+ * the user is asked again. A non-empty string that is not a date is somebody having written
+ * something here, and `rememberCovers` treats an unparseable moment as revoking everything — which
+ * is why the string is passed through rather than dropped on the way past.
+ *
+ * Only the CLI ever writes this, and it writes `new Date().toISOString()`, so an unparseable value
+ * means a hand-edited file. `trading-status` prints it back, so a typo is visible rather than
+ * merely inert.
+ */
+function coerceRevokedAt(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
 /**
@@ -161,6 +235,8 @@ export function loadSettings(): Settings {
           typeof trading.maxLotsPerOrder === "number" && trading.maxLotsPerOrder > 0
             ? Math.floor(trading.maxLotsPerOrder)
             : base.trading.maxLotsPerOrder,
+        elicitation: readElicitation(trading.elicitation),
+        confirmationsRevokedAt: coerceRevokedAt(trading.confirmationsRevokedAt),
         paper: {
           startingCashIdr:
             coerceNumberOrNull((trading.paper as Partial<PaperSettings> | undefined)?.startingCashIdr) ??
@@ -219,6 +295,20 @@ export interface TradingPolicy {
   maxOrderValueIdr: number | null;
   allowedSymbols: string[];
   maxLotsPerOrder: number;
+  /**
+   * Whether a person must be asked, may be asked, or is never asked. ADR-0010.
+   *
+   * Carried in every mode, including `off` and `paper`, because paper rehearses the live protocol
+   * and a rehearsal that skips the human rehearses the wrong thing.
+   */
+  elicitation: ElicitationPolicy;
+  /**
+   * When the owner last revoked every standing "don't ask again". ISO, or null.
+   *
+   * A non-empty string that is not a parseable moment is carried through rather than dropped, and
+   * revokes everything — see `coerceRevokedAt`. A revocation read wrongly must fail towards asking.
+   */
+  confirmationsRevokedAt: string | null;
   /** Where the decision came from, so a refusal can be acted on. */
   source: "env-off" | "env-paper" | "settings" | "default-off";
   /** Plain-language reason, always present. Relayed verbatim by the tools. */
@@ -249,6 +339,11 @@ export function tradingPolicy(env: NodeJS.ProcessEnv = process.env): TradingPoli
     maxOrderValueIdr: t.maxOrderValueIdr,
     allowedSymbols: t.allowedSymbols,
     maxLotsPerOrder: t.maxLotsPerOrder,
+    // In `shared` rather than in each branch, so all four return sites carry them. A corrupt file
+    // has already been replaced wholesale by `defaultSettings()`, so these are the defaults there
+    // too — `when-available` and "never revoked", which is what a file nobody could read says.
+    elicitation: t.elicitation,
+    confirmationsRevokedAt: t.confirmationsRevokedAt,
     settingsPath: path,
     ...(corrupt ? { corrupt: true as const } : {}),
   };
@@ -315,20 +410,34 @@ export function tradingPolicy(env: NodeJS.ProcessEnv = process.env): TradingPoli
   // autoConfirm is honoured only with a value cap, and only when it is real money — in paper it is
   // pointless, and skipping the confirmation would rehearse the wrong habit.
   const capMissing = t.autoConfirm && t.maxOrderValueIdr === null;
+  // ...and never against an owner who asked to be asked every time. Two switches that contradict
+  // each other are resolved in favour of the one that produces a question, and reported through the
+  // channel that already exists for "you set this and it is not doing anything" rather than through
+  // a new field nobody reads.
+  const contradicted = t.autoConfirm && t.elicitation === "required";
   return {
     ...shared,
     mode: "live",
     live: true,
     enabled: true,
-    autoConfirm: t.autoConfirm && !capMissing,
+    autoConfirm: t.autoConfirm && !capMissing && !contradicted,
     source: "settings",
     reason: `LIVE trading is enabled in ${path}. Orders reach the exchange and move real money.`,
-    ...(capMissing
+    ...(contradicted
       ? {
           autoConfirmIgnored:
-            "autoConfirm is set but is NOT in effect: it is honoured only when maxOrderValueIdr is also set. " +
-            "Every order still needs confirm: true. Set a cap with `stockbit-auth trading-enable --live --max-order-value N`.",
+            "autoConfirm is set but is NOT in effect: trading.elicitation is `required`, which says a person " +
+            "must be asked directly about every order, and autoConfirm says nobody is asked. The ask wins. " +
+            "Orders proceed when the user accepts the dialog, and are refused — rather than auto-confirmed — " +
+            "on a client that cannot ask, whatever confirm: true says. Run `stockbit-auth trading-enable " +
+            "--live --elicitation when-available` if autoConfirm is what you actually want.",
         }
-      : {}),
+      : capMissing
+        ? {
+            autoConfirmIgnored:
+              "autoConfirm is set but is NOT in effect: it is honoured only when maxOrderValueIdr is also set. " +
+              "Every order still needs confirm: true. Set a cap with `stockbit-auth trading-enable --live --max-order-value N`.",
+          }
+        : {}),
   };
 }

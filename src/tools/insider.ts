@@ -21,9 +21,9 @@ const LAG =
 
 /** Also repeated: what an unverified shape means for the caller. */
 const PENDING =
-  "PENDING VERIFICATION: this endpoint has not been observed live from this server. Field names " +
-  "are projected defensively and the raw row is included alongside them, so read a field you do " +
-  "not see here straight off the raw row rather than assuming it is missing.";
+  "PENDING VERIFICATION: this endpoint has not been observed live, so field names are projected " +
+  "ALONGSIDE the row's own keys, which are kept rather than replaced — read a field you do not see " +
+  "here straight off the row.";
 
 export function registerInsiderTools(define: Definer): void {
   define.read(
@@ -50,8 +50,7 @@ export function registerInsiderTools(define: Definer): void {
       "When you pass `action_type`, check `actionFilterHonored` in the result: false means the " +
       "server ignored the filter and the rows are unfiltered.\n" +
       "`insiderId` on a row is the handle for insider_ownership and shareholding(mode=investors).\n" +
-      "Share counts are shares, not lots. " +
-      PENDING,
+      "Share counts are shares, not lots. ",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for market-wide."),
       insider: z
@@ -84,7 +83,10 @@ export function registerInsiderTools(define: Definer): void {
           sourceType: a.source_type as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "insider_ownership",

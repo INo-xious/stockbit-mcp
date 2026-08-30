@@ -860,10 +860,6 @@ export function hasStoredSession(domain: TokenDomain): boolean {
   return Boolean(currentRefreshToken(domain));
 }
 
-/** The store slot backing a domain, so the CLI can report its backend without duplicating the table. */
-export function storeSlotFor(domain: TokenDomain): StoreSlot {
-  return DOMAINS[domain].slot;
-}
 
 /** The "you have no session" message for a domain, so callers do not each invent their own. */
 export function missingSessionMessage(domain: TokenDomain): string {

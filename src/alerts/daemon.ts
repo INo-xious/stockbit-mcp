@@ -25,6 +25,7 @@
  * blip is worse than no daemon, because the user believes it is still watching — the same reason
  * the delivery log is written before any other channel is attempted.
  */
+import { setTimeout as delay } from "node:timers/promises";
 import type { Bar } from "../core/bars.js";
 import { evaluateRule, warmupBars, type AlertEvaluation, type AlertRule } from "./rules.js";
 import { loadRules, updateRule } from "./store.js";
@@ -163,12 +164,18 @@ export async function watch(
         errors: [err instanceof Error ? err.message : String(err)],
       });
     }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, interval);
-      options.signal?.addEventListener("abort", () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
-    });
+    // `{ once: true }` on an abort listener removes it when the event FIRES — not when the timer
+    // resolves normally, which is what happens on every tick but the last. The listener stayed
+    // registered on the caller's signal, which `bin/stockbit-alerts.ts` creates once for the whole
+    // process: one leaked closure per tick, ~1,440 a day at the default interval, and Node's
+    // MaxListenersExceededWarning about eleven minutes in. `timers/promises` takes the signal
+    // itself and cleans up after itself; `src/util/dirlock.ts` already imports the same idiom.
+    try {
+      await delay(interval, undefined, { signal: options.signal });
+    } catch {
+      // The only rejection here is the abort. The loop is over; the check at the top of the next
+      // iteration would return anyway.
+      return;
+    }
   }
 }

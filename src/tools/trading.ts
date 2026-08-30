@@ -31,8 +31,10 @@ import {
 import { TICKET_TTL_MS } from "../trading/tickets.js";
 import { hasStoredSession } from "../auth/session.js";
 import { tradingPolicy } from "../settings.js";
-import { runTool } from "./_format.js";
-import type { Definer } from "./_define.js";
+import { COMMITMENT_CONFIRM, runTool } from "./_format.js";
+import type { Definer, ElicitDecision } from "./_define.js";
+import { elicitationNote } from "../trading/confirmation.js";
+import { describeRemember, forgetRemember, REMEMBER_TTL_MS } from "../trading/remember.js";
 import {
   loadLedger,
   paperLedgerPath,
@@ -47,26 +49,14 @@ import { getQuote } from "../core/emitten.js";
 import { getIntradayPrices } from "../core/pricefeed.js";
 
 /** The sentence every description ends with. Written once so all ten agree word for word. */
-const PROJECTION_NOTE =
-  "PENDING VERIFICATION: this endpoint has not been observed live, so field names are projected. " +
-  "`readFrom` names the wire key each value was read from; a field that is absent was not " +
-  "recognised on the response, which is NOT the same as it being zero. `unmappedKeys` lists the " +
-  "names of fields this server did not recognise — their values are deliberately dropped rather " +
-  "than returned, because an unmapped field on a brokerage response may be an account number.";
+const PROJECTION_NOTE = "PENDING VERIFICATION: this endpoint has not been observed live.";
 
-const LOGIN_NOTE =
-  "Requires the trading session: if it is not set up the error says to run `stockbit-auth " +
-  "trading-login`, which asks the user for their 6-digit PIN at their own terminal. Never ask the " +
-  "user for that PIN here — no tool accepts one and this server never stores one.";
+// Names the command deliberately: `test/trading-account.test.ts` asserts every account read says
+// how to GET a session, and a tool that only says it needs one leaves the user stuck. The rest of
+// what this used to say — the PIN is typed at their terminal, never asked for here — is in the
+// server instructions now, once.
+const LOGIN_NOTE = "Requires the trading session (`stockbit-auth trading-login`).";
 
-/**
- * The sentence every paper-served tool carries.
- *
- * It says three things a model must relay rather than paraphrase: which account this is, that no
- * session is needed, and that the numbers are local. `mode: "paper"` on the result is the machine
- * form of the same fact, and `summary` opens with the banner — three redundant statements, because
- * the failure being prevented is a user believing a paper fill was real.
- */
 /**
  * For the three reads paper mode CANNOT answer.
  *
@@ -81,12 +71,20 @@ const NO_PAPER_NOTE =
   "will accept — so it needs a live trading session even when `trading_status` says paper. If there " +
   "is none, say that rather than reporting a paper figure in its place.";
 
+/**
+ * The sentence every paper-served tool carries.
+ *
+ * It says three things a model must relay rather than paraphrase: which account this is, that no
+ * session and no PIN are needed, and that the numbers are local. The second matters most, because
+ * this note is appended BESIDE `LOGIN_NOTE` — without it a paper user is sent to a terminal to type
+ * a PIN for a call that reads a local file. `mode: "paper"` on the result is the machine form of
+ * the same fact and `summary` opens with the banner; three redundant statements, because the
+ * failure being prevented is a user believing a paper fill was real.
+ */
 const PAPER_NOTE =
-  "IN PAPER MODE this reads a LOCAL LEDGER, not the brokerage. The result carries `mode: \"paper\"` " +
-  "and its summary opens with \"PAPER ACCOUNT — no real money.\" — say so, every time, rather than " +
-  "reporting these figures as the user's actual account. No trading session and no PIN are needed " +
-  "in paper mode. Turn it on with `stockbit-auth trading-enable --paper`; `trading_status` says " +
-  "which mode is in force.";
+  "IN PAPER MODE this reads a LOCAL LEDGER, not the brokerage, so NO trading session and NO PIN are " +
+  "needed however the line above reads — do not send the user to a terminal. The result says " +
+  "\"PAPER ACCOUNT\"; say so rather than reporting these figures as the user's actual account.";
 
 /**
  * The reads that paper mode answers from the ledger instead of the brokerage.
@@ -562,7 +560,12 @@ export function registerTradingTools(define: Definer): void {
       "and no argument to any tool can override it.\n" +
       "`policy.reason` is written for the user — relay it rather than paraphrasing. " +
       "`policy.autoConfirmIgnored`, when present, means autoConfirm was configured but is not being " +
-      "honoured because no per-order value cap is set.\n" +
+      "honoured, and says why.\n" +
+      "`policy.elicitation` says whether a person is asked directly before an order: `required` " +
+      "refuses rather than send when no person can be reached, `when-available` (the default) asks " +
+      "wherever the client supports it, `never` does not ask at all. `rememberGrant` is the live " +
+      "\"don't ask again\" in THIS server process, if the user made one — it is held in memory, so " +
+      "no file can answer that question and this is the only place it is visible.\n" +
       "This tool reads local configuration and makes no request, so it works with no trading session.",
     {},
     async () =>
@@ -573,12 +576,15 @@ export function registerTradingTools(define: Definer): void {
           mode: policy.mode,
           sessionStored: hasStoredSession("securities"),
           ticketTtlSeconds: TICKET_TTL_MS / 1000,
+          rememberGrant: describeRemember(policy),
           orderLog: orderLogPath(),
           protocol:
             "Two steps, always: order_preview builds a ticket and returns its `summary`; the user reads that " +
             "summary and agrees to THAT order; order_buy/order_sell/order_amend/order_cancel take the ticket " +
             "id and confirm: true. The write tools take no price and no quantity, so what is placed is what " +
-            "was shown. Paper mode uses the identical protocol on purpose — it is a rehearsal, not a shortcut.",
+            "was shown. Paper mode uses the identical protocol on purpose — it is a rehearsal, not a shortcut. " +
+            "Where the client supports MCP elicitation the user is asked directly as well, before confirm is " +
+            "even looked at, and a declined dialog refuses the order whatever confirm said.",
         };
         if (policy.mode !== "paper") return base;
 
@@ -641,8 +647,23 @@ export function registerTradingTools(define: Definer): void {
     {
       action: z.enum(["buy", "sell", "amend", "cancel"]).describe("What the order would do"),
       symbol: z.string().optional().describe("IDX ticker. Required for buy and sell; read from the order otherwise."),
-      price: z.coerce.number().optional().describe("Limit price in rupiah. Must sit on the IDX tick grid."),
-      lots: z.coerce.number().optional().describe("Lots — 1 lot is 100 shares. The wire takes shares; this does the arithmetic."),
+      // Bounded at the schema, not only downstream. `z.coerce.number()` alone accepts NaN ("abc"),
+      // 0 (""), negatives and fractions, and previewOrder does five sequential network reads before
+      // anything looks at the value — so the user paid a full round trip for an argument that could
+      // never have been valid. The preview's own checks stay: they give a better message, and they
+      // are what a value read off an existing order goes through.
+      price: z.coerce
+        .number()
+        .finite()
+        .positive()
+        .optional()
+        .describe("Limit price in rupiah. Must sit on the IDX tick grid."),
+      lots: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Lots — 1 lot is 100 shares. The wire takes shares; this does the arithmetic."),
       order_id: z.string().optional().describe("The order to amend or cancel, from the `orders` tool"),
     },
     async (a) =>
@@ -672,20 +693,20 @@ export function registerTradingTools(define: Definer): void {
     confirm: z
       .boolean()
       .optional()
-      .describe("Must be true. The user must have agreed to THIS ticket's summary, in words, first."),
+      .describe(COMMITMENT_CONFIRM),
   };
 
   const submit = (
-    run: (options: { ticketId: string; confirm?: boolean; elicit?: Definer["elicit"] }) => Promise<OrderResult>,
+    run: (options: { ticketId: string; confirm?: boolean; elicit?: ElicitDecision }) => Promise<OrderResult>,
   ) =>
     async (a: Record<string, unknown>) =>
       runTool(async () => {
         const result = await run({
           ticketId: String(a.ticket_id),
           confirm: a.confirm === true,
-          // Passed through, not called here: when the client supports it the human is asked directly,
-          // on top of the confirmation the caller already had to pass.
-          elicit: define.elicit ? define.elicit.bind(define) : undefined,
+          // Passed through, not called here. The gate calls it BEFORE it looks at `confirm`, so a
+          // client that can reach a person always reaches them — see src/trading/confirmation.ts.
+          elicit: define.elicitDecision ? define.elicitDecision.bind(define) : undefined,
         });
         return { ...result, message: describeOutcome(result), ...auditNote(result) };
       });
@@ -696,6 +717,9 @@ export function registerTradingTools(define: Definer): void {
       "Step two of two. Call `order_preview` first, relay its `summary` to the user in words, ask " +
       "them, and pass `confirm: true` only after they have agreed to that specific order. Setting " +
       "confirm without asking is placing an order the user did not agree to.\n" +
+      "Where the client supports MCP elicitation the user is ALSO asked directly, before `confirm` " +
+      "is looked at, and their answer is the decisive one: a declined dialog refuses the order " +
+      "however confirm was set. On a client that cannot ask, confirm is the only gate there is.\n" +
       "This tool takes a ticket id and nothing else — no price, no quantity — so what reaches the " +
       "exchange is exactly what the user was shown.\n" +
       "READ `outcome` BEFORE REPORTING ANYTHING. `ok` is the only class that means the order is on " +
@@ -713,6 +737,8 @@ export function registerTradingTools(define: Definer): void {
       "is no undo.\n" +
       "Same two-step protocol as `order_buy`: preview, relay the summary, ask, then pass the ticket " +
       "id with `confirm: true`. The ticket is what defines the order; this tool takes no terms.\n" +
+      "Where the client supports MCP elicitation the user is ALSO asked directly and their answer " +
+      "decides it — a declined dialog refuses the order however confirm was set.\n" +
       "READ `outcome` before reporting. Anything other than `ok` means the state is uncertain — " +
       "relay `message` verbatim and never resend.",
     writeArgs,
@@ -724,7 +750,9 @@ export function registerTradingTools(define: Definer): void {
     "order_amend",
     "CHANGE a working order's price or size on the exchange. Preview it first with " +
       "`action: \"amend\"` and the `order_id`, relay the summary, ask, then pass the ticket id with " +
-      "`confirm: true`.\n" +
+      "`confirm: true`. Where the client supports MCP elicitation the user is ALSO asked directly " +
+      "and their answer decides it. An amend is never covered by a \"don't ask again\" — that only " +
+      "ever covers new orders — so the user is always asked.\n" +
       "An amend can fill at the new terms the instant it is accepted, so it is a real order " +
       "decision and not an edit, and there is no undo. If `outcome` is not `ok`, the order may " +
       "still be working at its OLD terms or at the new ones — relay `message`, read `orders` " +
@@ -737,7 +765,9 @@ export function registerTradingTools(define: Definer): void {
   define.write(
     "order_cancel",
     "CANCEL a working order. Preview it first with `action: \"cancel\"` and the `order_id`, then " +
-      "pass the ticket id with `confirm: true`.\n" +
+      "pass the ticket id with `confirm: true`. Where the client supports MCP elicitation the user " +
+      "is ALSO asked directly and their answer decides it. A cancel is never covered by a " +
+      "\"don't ask again\" — that only ever covers new orders — so the user is always asked.\n" +
       "A cancel races the market: an order can fill between the preview and the cancel arriving, in " +
       "which case there is nothing to cancel and the fill stands — which is why a cancel has no " +
       "undo either. `outcome: \"ok\"` means the order is gone from the book or marked cancelled; " +
@@ -745,6 +775,51 @@ export function registerTradingTools(define: Definer): void {
     writeArgs,
     submit(cancelOrder),
     { destructiveHint: true, idempotentHint: false },
+  );
+
+  define.write(
+    "trading_forget",
+    "Cancel the user's standing \"don't ask again\", so the next order asks them directly again.\n" +
+      "The confirmation dialog can carry a second box the user ticks themselves, which waives the " +
+      "dialog for later orders of the same value or smaller, for " +
+      `${REMEMBER_TTL_MS / 60_000} minutes, in this server process only. This ends that immediately.\n` +
+      "Call it whenever the user says anything like \"ask me again\", \"stop skipping the " +
+      "confirmation\" or \"I didn't mean to tick that\" — it only ever makes this server ask MORE " +
+      "questions, never fewer, so there is no case where calling it is the risky choice.\n" +
+      "It is safe to call when there is no grant: `hadGrant: false` says so and nothing changes. " +
+      "It touches no settings and makes no request.\n" +
+      "This clears memory in THIS process. `stockbit-auth trading-forget` at a terminal does the " +
+      "same across every server process, including ones already running, by stamping the settings " +
+      "file — use that when the user has more than one client open.",
+    {},
+    async () =>
+      runTool(async () => {
+        // Read before clearing, against the CURRENT policy, so the answer distinguishes two facts
+        // that are not the same: whether anything was held in memory, and whether it was still in
+        // force. A grant whose policy has moved on, or that a terminal already revoked, is held but
+        // covers nothing — reporting that as "a permission was removed" would overstate what this
+        // call did.
+        const before = describeRemember(tradingPolicy());
+        forgetRemember();
+        const held = before.active || before.stale === true;
+        return {
+          hadGrant: held,
+          wasInForce: before.active,
+          ...(before.capIdr === undefined ? {} : { clearedCapIdr: before.capIdr }),
+          message: before.active
+            ? "The standing \"don't ask again\" is cleared. The next order asks the user directly again, " +
+              "wherever this client supports it."
+            : held
+              ? "A standing \"don't ask again\" was held but was already out of force — the trading policy had " +
+                "changed under it, or it had been revoked at a terminal. It is gone now, and nothing about " +
+                "what gets asked has changed."
+              : "There was no standing \"don't ask again\" to clear. Every order already asks the user directly, " +
+                "wherever this client supports it.",
+        };
+      }),
+    // It only ever tightens: the state it removes is a permission, and removing it cannot place,
+    // amend or cancel anything. Running it twice is running it once, which is what idempotent means.
+    { destructiveHint: false, idempotentHint: true },
   );
 }
 
@@ -758,13 +833,23 @@ export function registerTradingTools(define: Definer): void {
  */
 function describeOutcome(result: OrderResult): string {
   const what = `${result.action.toUpperCase()} ${result.shares ?? ""} shares of ${result.symbol}`.replace(/\s+/g, " ");
+  // Appended rather than folded in, so the outcome sentence — the one a model is told to relay
+  // verbatim — keeps saying exactly what it said before, and the fact about WHO agreed rides
+  // alongside it. ADR-0003: this is where the words for a person live.
+  const note = elicitationNote(result.elicitation);
+  const suffix = note ? ` ${note}` : "";
   switch (result.outcome) {
     case "ok":
-      return `${what} is on the book${result.orderId ? ` as order ${result.orderId}` : ""}, confirmed by reading the orders back.`;
+      return (
+        `${what} is on the book${result.orderId ? ` as order ${result.orderId}` : ""}, confirmed by reading the orders back.` +
+        suffix
+      );
     case "rejected":
       return `${what} was REJECTED and is not working. ${result.error ?? ""}`.trim();
     case "write-failed":
-      return `${what} was refused before it reached the exchange, so nothing is on the book. ${result.error ?? ""}`.trim();
+      // Deliberately does not say WHERE it failed. This class covers both a refusal that never left
+      // this process and a 4xx from the server, and the old wording asserted the first for both.
+      return `${what} did not go through, so nothing is on the book. ${result.error ?? ""}`.trim();
     case "not-found-after-error":
       return (
         `The request for ${what} errored (${result.error}) and the order list read back clean, so it does not ` +
@@ -772,7 +857,9 @@ function describeOutcome(result: OrderResult): string {
       );
     default:
       // Every remaining class is an uncertain one, and each carries its own sentence already.
-      return result.outcomeUnknown ?? `The outcome of ${what} could not be established. Do not resend it.`;
+      return (
+        (result.outcomeUnknown ?? `The outcome of ${what} could not be established. Do not resend it.`) + suffix
+      );
   }
 }
 

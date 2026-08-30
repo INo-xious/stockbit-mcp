@@ -719,7 +719,7 @@ export async function getFundachart(): Promise<Fundachart> {
  * default question and the documented vocabulary, never a validator. `normalizeFeature` accepts any
  * well-formed `PAYWALL_FEATURE_*` name.
  */
-export const KNOWN_PAYWALL_FEATURES = [
+const KNOWN_PAYWALL_FEATURES = [
   "PAYWALL_FEATURE_CHARTBIT",
   "PAYWALL_FEATURE_KEYSTATS",
   "PAYWALL_FEATURE_FINANCIALS",
@@ -731,7 +731,7 @@ const FEATURE_PREFIX = "PAYWALL_FEATURE_";
 const FEATURE_RE = /^PAYWALL_FEATURE_[A-Z0-9_]{1,64}$/;
 
 /** Accept `CHARTBIT` or `PAYWALL_FEATURE_CHARTBIT`; send the full name Stockbit expects. */
-export function normalizeFeature(input: string): string {
+function normalizeFeature(input: string): string {
   const upper = String(input).trim().toUpperCase().replace(/[\s-]+/g, "_");
   const full = upper.startsWith(FEATURE_PREFIX) ? upper : `${FEATURE_PREFIX}${upper}`;
   if (!FEATURE_RE.test(full)) {

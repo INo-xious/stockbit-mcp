@@ -16,6 +16,101 @@
 | `/charts/{SYMBOL}` | **Resolved: the spelling was the problem.** The web client calls `/charts/{SYM}/daily?timeframe=1w\|1m\|3m\|ytd\|1y\|3y\|5y` — LOWERCASE, with `is_include_previous_historical=true` on `ytd` and `1w`. Every earlier probe sent an uppercase spelling (`1D`, `DAILY`, `TIMEFRAME_DAILY`) and was rejected, which is why the route looked real-but-unusable for months. Wired and covered by tests; a whole series now costs one request instead of the 12-row paged walk. |
 | Screener | **Confirmed and wired.** Running a saved screen is a plain GET, not the POST an earlier pass assumed. Custom screens exist on the probed account and run. |
 
+## Probed live on 2026-08-29
+
+A second live pass, against a real account, with the market shut (Friday night WIB). 57 tools called
+once each; key names recorded, values never. What it settled, and what it broke open:
+
+### Settled — 19 tools moved from `projected` to `observed`
+
+`company_subsidiaries` · `index_members` · `symbol_search` · `classification` ·
+`corporate_actions` · `corporate_action_status` · `dividend_calendar` · `ipo_pipeline` ·
+`insider_transactions` · `screener_favorites` · `screener_finitems` · `stream` · `news`
+
+The bar was not "the route answered". It was: rows came back AND every field the tool names was read
+out of them. `index_members` returning exactly 45 rows for LQ45 is the kind of agreement that settles
+a mapping; a 200 with an empty page is not, and six tools that answered emptily stayed `projected`
+(`company_contact`, `stream_pinned`, `prices_batch`, `broker_activity`, `research`, `calendar_today`).
+
+`analyst_ratings` was promoted and then DEMOTED again before the commit. It returns two halves and
+its own note said "neither response shape has been observed"; the probe found an array of three, and
+nothing in that result says which half it was. A claim that cannot be told apart from the wrong claim
+is not evidence.
+
+### Broken, and not previously known to be
+
+Every one of these is a live 4xx or a parse failure on the tool's own documented arguments. They are
+NOT evidence problems — the mapping cannot be settled because the request never succeeds.
+
+| Tool | What the server actually said |
+|---|---|
+| `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;`. Supplying `sort_column`/`order` changes the error to `Your request is invalid`, so the NAMES are right and the values are not: `date`, `symbol`, `company_symbol`, `earnings_date`, `period`, `name` and `id` were all refused. The vocabulary is unknown. |
+| `watchlist_search` | 400 `WatchlistID is a required field;` — the tool takes only `keyword` |
+| `order_queue` | 400 `Stock code is required` — with `symbol` supplied, so it is not being forwarded |
+| `shareholding` | 400 `Invalid company id`. Re-probed with the ticker as a PATH SEGMENT (the route is `/insider/shareholding/companies/:symbol`) and it still refuses, so the segment wants a numeric company id and a symbol→id resolution step is missing. |
+| `underwriters` | 404 `Unrecognized Command`, bare and with `{page,limit}` and `{symbol}` alike. `/order-trade/underwriters` does not exist. |
+| `price_market` | 400 `Silahkan Periksa permintaan`, and still 400 when re-probed correctly against `pricesMarket` with the `:symbol` segment and with/without `date`. Which parameter it wants is unknown. |
+| `shareholders` | PARTLY FIXED. The token endpoint answers `{"message":"Successfully retrieved Token","data":{"value":"<64 hex>"}}` — the token sits under `value`, which no `/token/i` key search can find, and `message` is the only string that mentions the word. Reading `data.value` on this one route settles the mint. The chart call behind it then fails differently: `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found`. How the minted token must be presented is still unknown, so the tool stays `projected`. |
+| `chart_series` | schema drift: points carry no recognisable close field. Keys present: `date`, `formatted_date`, `xlabel`, `value`, `percentage`, `change`, `open`, `high`, `low`. `raw: true` succeeds |
+
+Three more that are not errors but are not right either:
+
+- **`stream_user` names 1 of 60 wire keys.** `src/core/stream.ts:127` says four named fields are the
+  design; this route delivers one. The `/stream/non-login/user/:username` envelope differs from the
+  others and the projection does not reach it.
+- **`broker_flow_intraday` returns 1.1 MB** of unprojected payload. Not a mapping fault — it is
+  `getRunningTradeChart` returning what it is asked for — but it is a tool result a model is meant
+  to read, and 1.1 MB is not readable.
+
+RETRACTED, and left here rather than deleted: an earlier pass recorded `brokers` and `broker_top` as
+returning ~53 KB while reporting `count: 0`. That was wrong, and the fault was in the probe, not the
+server — a provenance extractor that took the first `count` it found at any depth rather than the
+one on the result. Checked directly, `brokers` maps 112 rows and `broker_top` maps 89, both with
+`readFrom` populated. Both are now `observed`.
+
+### Fixed in the same pass
+
+| Tool | What was wrong | How it was settled |
+|---|---|---|
+| `order_queue` | sent `symbol`; the endpoint wants `stock_code` | `symbol`, `code`, `emiten_code`, `stockCode` and `company` each returned 400 "Stock code is required"; `stock_code` answered. The tool had never once returned data. |
+| `chart_series` | no `close` key on the wire, so the whole series was refused | the daily route carries the price in `value`. Proven by arithmetic on the payload rather than by assumption: a BBRI point read `value: "2930"`, `change: -20`, `percentage: "-0.68"`, and 20/2930 = 0.68%. |
+| `chart_series` | flat candles with NO warning | open/high/low/volume arrive as EMPTY STRINGS. The keys are present, so `unmapped` stayed clean and the flat-candle warning never fired, while `numberish("")` returned null and every bar silently took its close for all three. A field that reads null on every row now counts as flat. |
+| `stream_trending` | dropped `date`, which the endpoint REQUIRES | 400 "Silakan periksa konten anda" without it, and 400 to `{page, limit}` too — only a date makes the route reply. An omitted date now defaults to today in WIB, which is what "trending" means when nobody named a day. Returns 30 posts. |
+| `stock_conversion` | sent no paging, and the endpoint has no default | 400 "Page is a required field;Limit is a required field;". Both are now defaulted (page 1, limit 20) rather than made mandatory on the tool: a caller asking a company for its conversions should not have to know the API needs paging to answer at all. |
+| `stream_user` | named 1 of its 4 fields | `/stream/non-login/user/:username` spells them `postid`, `created` and a FLAT `username`/`fullname`, where the per-symbol route uses `stream_id`, `created_at` and a nested `user`. All four now map. |
+
+Four more tools moved to `observed` on the strength of these: `brokers`, `broker_top`,
+`chart_series` and `stream_user` — 18 in total across the day.
+
+`order_queue` stayed `projected` on purpose. The route is proven and the request is now correct, but
+it answered `{"orders": [], "is_open_market": false}` with the market shut, so no row ever exercised
+the mapping. A working request is not a settled field map.
+
+### Blocked, and by what
+
+- **The trading host — still nothing observed.** Needs the six-digit PIN at the account owner's own
+  terminal. Nine reads returned the same honest auth refusal.
+- **e-IPO — `eipo_list`, `eipo_price_groups`, `eipo_rdn_balance` all 404 `Unrecognized Command`.**
+  The routes are wrong. The browser's own traffic during login named the real ones:
+  `GET /eipo/social/company/list?filter=ongoing`, `GET /auth/eipo/webview/link` and
+  `POST /partner/eipo/access_token`, all on `api-sekuritas.stockbit.com`.
+- **The six intraday feeds** — the market was shut. An empty tape settles nothing.
+
+### Two defects in the login path itself, found by using it
+
+1. **`bin/stockbit-auth.ts` opened `https://stockbit.com/trade` for the browser trading login.**
+   That path is a Stockbit *username* route, so it lands on a profile page and the PIN form is never
+   shown. Reported by the account owner, who read the page.
+
+   There is **no trading page to open instead** — confirmed by the same account owner: the PIN
+   prompt is a MODAL raised by clicking buy or sell, anywhere on the site. Any URL here would have
+   been wrong again, so the command opens the site and says what to click.
+2. **The already-signed-in harvest tier was slot-blind.** `harvestFromBrowser` reads
+   `credentialStorage` — the stockbit.com web session, a market-data credential by construction —
+   and `accept()` wrote it to whatever slot was asked for. `trading-login --browser` therefore stored
+   a MAIN token in the SECURITIES slot and printed "Trading session captured"; only the test refresh
+   afterwards produced the 401. The `slot` guard was one-directional. Fixed, and pinned by a test.
+
 ## Still open
 
 ### Unmapped orderbook fields

@@ -109,7 +109,7 @@ class NamedProfile implements ToolProfile {
 /** The profile that filters nothing. Its label is what `status` and the instructions report. */
 const ALL: ToolProfile = { label: "all", allows: () => true };
 
-export function isFamily(value: string): value is Family {
+function isFamily(value: string): value is Family {
   return (FAMILIES as readonly string[]).includes(value);
 }
 

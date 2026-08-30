@@ -69,7 +69,8 @@ you did not start.
 - **A rate limit that behaves like a person.** Three concurrent requests, 150 ms apart.
 - **Trading is a ladder you climb deliberately**: `off` → `stockbit-auth trading-enable --paper` →
   `--live`. The environment can only move you *down* it. Orders are two steps with a human in the
-  middle, and where your client supports elicitation you are asked directly as well.
+  middle, and where your client supports elicitation **you are asked directly, and your answer
+  decides it** — a model cannot skip that ask by asserting you already agreed.
 
 ```mermaid
 flowchart LR
@@ -359,11 +360,31 @@ asserts that.
 **The PIN.** Typed at your terminal, used for one request, never stored. No MCP tool accepts one.
 
 **The ticket protocol.** `order_preview` prices and checks the order and returns a `summary` you
-read. The write tools take that ticket id and an optional confirmation, and nothing else. By
-default, the order proceeds only after `confirm: true` or direct MCP elicitation. The server alone
-may waive that per-call step when you deliberately enabled capped live `--auto-confirm`; the model
-must never set `confirm` on your behalf. A ticket expires in two minutes and carries a fingerprint
-that is rechecked before the request goes out.
+read. The write tools take that ticket id and an optional confirmation, and nothing else. A ticket
+expires in two minutes and carries a fingerprint that is rechecked before the request goes out.
+
+**Who confirms.** Where your client supports MCP elicitation, **you are asked directly, before
+`confirm` is even looked at, and your answer is the decisive one** — declining refuses the order
+however the model set `confirm`. Elicitation is the only channel in MCP that reaches a person;
+`confirm: true` is a boolean the model sets, and treating the two as interchangeable was a real
+defect here, fixed in [ADR-0010](docs/adr/0010-elicitation-is-decisive.md). On a client that cannot
+elicit, `confirm: true` is the only gate there is, the order proceeds, and both the result and the
+audit line say plainly that no human was asked. The model must never set `confirm` on your behalf.
+
+You own three switches over that, all set at your own terminal and none reachable by any tool:
+
+| | |
+|---|---|
+| `trading-enable --elicitation required` | Refuse rather than send when no person can be reached. `confirm: true` never substitutes. |
+| `trading-enable --elicitation when-available` | Ask wherever the client can; fall back to `confirm: true` where it cannot. **The default.** |
+| `trading-enable --elicitation never` | Do not ask at all. `confirm: true` is the only gate. |
+| `trading-enable --auto-confirm --max-order-value N` | Waive the per-order step entirely, under a value cap. Live only, and ignored outright when `--elicitation required` contradicts it. |
+
+The confirmation dialog also carries a second box **you** may tick: don't ask again, for fifteen
+minutes, for orders worth no more than the one you just approved, under the trading policy that was
+in force when you ticked it. It lives in that server's memory and never on disk — a restart ends it,
+`trading_forget` ends it in that conversation, and `stockbit-auth trading-forget` ends it everywhere
+including servers already running. `status` says whether one is live.
 
 **Outcomes.** After a write, `outcome` is one of seven classes. `ok` is the only clean success;
 `landed-despite-error` also means the read-back found the order, but the request itself errored.

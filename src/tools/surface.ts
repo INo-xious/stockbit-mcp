@@ -59,19 +59,31 @@ export function describeSurface(profile?: ToolProfile, isDefault = false): Surfa
   };
 }
 
-/** Group a surface by family, preserving the order families first appear. */
-export function byFamily(surface: Surface): { family: Family; tools: ToolRecord[] }[] {
-  const groups = new Map<Family, ToolRecord[]>();
-  for (const tool of surface.tools) {
-    const existing = groups.get(tool.family);
-    if (existing) existing.push(tool);
-    else groups.set(tool.family, [tool]);
+/**
+ * Group anything family-tagged, preserving the order families first appear.
+ *
+ * Generic over the item because there are two shapes of the same thing: `ToolRecord` here, and the
+ * `Row` `toolsdoc.ts` builds from a live `tools/list`. Both were being grouped by hand — this
+ * function, `toolsdoc.ts` and `instructions.ts` held three copies of the loop, and the exported one
+ * was the copy nobody called.
+ */
+export function byFamily<T extends { family: Family }>(items: readonly T[]): Map<Family, T[]> {
+  const groups = new Map<Family, T[]>();
+  for (const item of items) {
+    const existing = groups.get(item.family);
+    if (existing) existing.push(item);
+    else groups.set(item.family, [item]);
   }
-  return [...groups].map(([family, tools]) => ({ family, tools }));
+  return groups;
 }
 
-/** The evidence word a family mostly carries, for a summary row. */
-export function dominantEvidence(tools: ToolRecord[]): Evidence | "mixed" {
+/**
+ * The one evidence word a group carries, or `"mixed"`.
+ *
+ * Takes the field rather than the record so a caller with its own row type can use it — which is
+ * why the previous signature had no callers at all.
+ */
+export function dominantEvidence(tools: readonly { evidence: Evidence }[]): Evidence | "mixed" {
   const seen = new Set(tools.map((t) => t.evidence));
   if (seen.size === 1) return [...seen][0] as Evidence;
   return "mixed";

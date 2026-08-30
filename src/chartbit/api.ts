@@ -48,7 +48,7 @@ export function chartbitLogPath(): string {
 }
 
 /** A lock older than this belongs to a process that died mid-write. */
-export const WRITE_LOCK_STALE_MS = 60_000;
+const WRITE_LOCK_STALE_MS = 60_000;
 
 /**
  * One append-only line per mutation attempt.
@@ -143,7 +143,7 @@ export async function listChartLayouts(): Promise<ChartLayoutSummary[]> {
  * which snapshotted nothing, failed verification unconditionally, and then "restored" an empty
  * string over the user's drawings. A byte-exact operation gets a byte-exact, uncached read.
  */
-export async function getLayoutContentRaw(layoutId: string): Promise<string> {
+async function getLayoutContentRaw(layoutId: string): Promise<string> {
   const body = await getJson("chartbitChart", { segments: { layoutId } });
   const parsed = parseOr(LayoutDetailResponse, body, "chartbit layout");
   return parsed.data?.data?.content ?? parsed.data?.content ?? "";

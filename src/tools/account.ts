@@ -30,12 +30,7 @@ const CONFIRM = z
   .optional()
   .describe("Must be true. Ask the user in plain words first, naming exactly what changes.");
 
-const OUTCOME_NOTE =
-  "READ `outcome`: `ok` means the change was made AND seen when the account was read back. " +
-  "`not-visible` means it was accepted but is not there, `outcome-unknown` means the read-back " +
-  "failed. Nothing here rolls back — each of these is one action a person can reverse in the " +
-  "Stockbit app, and undoing a change we could not read would be a second blind write. Relay " +
-  "`message` rather than reporting success.";
+const OUTCOME_NOTE = "READ `outcome` before reporting anything, and relay `message`.";
 
 /** The prose the tool layer adds to a core result. One wording for all nine. */
 function describe(result: AccountResult<unknown>, done: string): Record<string, unknown> {
@@ -209,9 +204,10 @@ export function registerAccountWriteTools(define: Definer): void {
       "built by hand.\n" +
       "Distinct from `screener_run`, which evaluates rules and persists nothing. The only " +
       "difference on the wire is one body field, which is exactly why they are separate tools.\n" +
-      "A name that already exists is REFUSED rather than posted: whether Stockbit replaces or " +
-      "duplicates has never been observed, and those are very different outcomes for someone who " +
-      "curated a screen. Pick another name or delete the old one first.\n" +
+      "A name that already exists is REFUSED rather than posted: nobody here knows whether Stockbit " +
+      "would replace the old screen or add a second one under the same name, and those are very " +
+      "different outcomes for someone who curated a screen. The refusal is this server's, not " +
+      "Stockbit's. Pick another name or delete the old one first.\n" +
       "Verified by re-listing the saved screens.\n" +
       OUTCOME_NOTE,
     {

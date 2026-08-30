@@ -21,7 +21,7 @@ import type { CDP } from "../auth/cdp.js";
 import { StockbitError } from "../http/errors.js";
 
 /** How long one page call may take. Chart operations are local; a slow one means something is wrong. */
-export const EVALUATE_TIMEOUT_MS = 20_000;
+const EVALUATE_TIMEOUT_MS = 20_000;
 
 export interface EvaluateOptions {
   /** Values substituted into the script's placeholder identifiers, by placeholder name. */

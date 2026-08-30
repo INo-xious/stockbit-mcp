@@ -47,6 +47,7 @@ const SUBCOMMANDS = [
   "trading-status",
   "trading-enable",
   "trading-disable",
+  "trading-forget",
   "paper-reset",
   "trading-logout",
 ];
@@ -79,9 +80,14 @@ test("every documented invocation still parses — the docs and skills depend on
     ["trading-enable", ["--paper", "--cash", "250000000"]],
     ["trading-enable", ["--live", "--max-order-value", "5000000", "--max-lots", "10", "--symbols", "BBRI,TLKM", "--auto-confirm"]],
     ["trading-enable", ["--no-auto-confirm", "--paper"]],
+    ["trading-enable", ["--paper", "--elicitation", "required"]],
+    ["trading-enable", ["--paper", "--elicitation=never"]],
+    ["trading-enable", ["--live", "--require-elicitation"]],
+    ["trading-enable", ["--paper", "--no-elicitation"]],
     ["paper-reset", ["--cash=1000000"]],
     ["trading-logout", []],
     ["trading-disable", []],
+    ["trading-forget", []],
   ];
   for (const [cmd, argv] of documented) {
     assert.equal(gate(cmd, argv).result, "ok", `${cmd} ${argv.join(" ")}`);
@@ -104,9 +110,13 @@ test("unknown flags and stray arguments are refused, naming what IS accepted", (
     // subcommands never even received argv before this change.
     ["trading-logout", ["--keep-profile"], /trading-logout accepts no flags/],
     ["trading-disable", ["--paper"], /trading-disable accepts no flags/],
+    ["trading-forget", ["--paper"], /trading-forget accepts no flags/],
     ["login", ["now"], /unexpected argument "now"/],
     ["import-har", ["a.har", "b.har"], /takes at most 1 positional argument/],
     ["trading-enable", ["--paper", "--cash"], /--cash needs a value/],
+    // His handler's own check (bin comment: "--elicitation --max-order-value 5000000") — the gate
+    // fires first with the same verdict: a value flag followed by another flag has no value.
+    ["trading-enable", ["--paper", "--elicitation"], /--elicitation needs a value/],
   ];
   for (const [cmd, argv, expected] of cases) {
     try {

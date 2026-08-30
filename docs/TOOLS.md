@@ -2,7 +2,7 @@
 
 # Tool reference
 
-**138 tools** (114 read, 24 write) in 17 families, 8 prompts.
+**139 tools** (114 read, 25 write) in 17 families, 8 prompts.
 
 Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
 
@@ -24,18 +24,18 @@ Every tool carries an **evidence** word — Observed, Read-back or Projected. Th
 | [market](#market) | 18 | Prices, depth, movers, bars, the session clock | Mixed |
 | [bandarmology](#bandarmology) | 6 | Who accumulated and who distributed. The data no other market API has | Mixed |
 | [analysis](#analysis) | 9 | Indicators, patterns, backtests, scans, charts, position sizing | Observed |
-| [company](#company) | 9 | Profile, ownership, management, peers, ratings | Projected |
+| [company](#company) | 9 | Profile, ownership, management, peers, ratings | Mixed |
 | [fundamentals](#fundamentals) | 10 | Key statistics, ratios, financial statements, seasonality | Mixed |
-| [insider](#insider) | 4 | Insider and affiliate transactions | Projected |
-| [corpaction](#corpaction) | 7 | Dividends, splits, rights, the corporate calendar | Projected |
-| [stream](#stream) | 7 | Posts, news and research from Stockbit's own feed | Projected |
-| [screener](#screener) | 5 | Stockbit's screener — the catalogue, the presets, and running one | Projected |
+| [insider](#insider) | 4 | Insider and affiliate transactions | Mixed |
+| [corpaction](#corpaction) | 7 | Dividends, splits, rights, the corporate calendar | Mixed |
+| [stream](#stream) | 7 | Posts, news and research from Stockbit's own feed | Mixed |
+| [screener](#screener) | 5 | Stockbit's screener — the catalogue, the presets, and running one | Mixed |
 | [account](#account) | 11 | The user's watchlists and saved screens, and editing them | Mixed |
 | [chartbit](#chartbit) | 17 | Reading and drawing on the user's real chart, in their own browser | Observed |
 | [alerts](#alerts) | 4 | Rules that fire while no client is open | Observed |
 | [pine](#pine) | 1 | TradingView Pine Script generation | Observed |
 | [workflows](#workflows) | 2 | Saved multi-step recipes, also offered as prompts | Observed |
-| [trading](#trading) | 16 | The brokerage account and order entry | Projected |
+| [trading](#trading) | 17 | The brokerage account and order entry | Projected |
 | [eipo](#eipo) | 9 | The IPO pipeline and subscribing to one | Projected |
 
 ## system
@@ -62,7 +62,7 @@ Prices, depth, movers, bars, the session clock.
 | `price_performance` | read | Multi-timeframe price performance (1D/1W/1M/…): close, high, low, and % change per timeframe. | Observed | symbol* |
 | `orderbook` | read | Full order-book depth ladder for a symbol. | Observed | symbol* |
 | `price_bands` | read | The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock. | Observed | symbol* |
-| `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Projected | symbol*, timeframe*, raw |
+| `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, raw |
 | `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, grouped |
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, limit, chart |
 | `broker_flow_intraday` | read | The intraday running-trade chart for one symbol, returned exactly as Stockbit sends it. | Projected | symbol* |
@@ -81,10 +81,10 @@ Who accumulated and who distributed. The data no other market API has.
 |---|---|---|---|---|
 | `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period |
 | `broker_distribution` | read | Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers… | Observed | symbol*, data_type, investor_type, market_board, period, from, to, date_from, date_to, start_date, end_date, theme, top_sources, top_targets, save_path, open_in_stockbit, browser |
-| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Projected | page, limit |
+| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit |
 | `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Projected | broker_code*, period, market_types, investor_types, sort_by, page, limit |
-| `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Projected | period, sort_by, page, limit |
-| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: total net buy and net sell value for… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
+| `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Observed | period, sort_by, page, limit |
+| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
 
 ## analysis
 
@@ -111,12 +111,12 @@ Profile, ownership, management, peers, ratings.
 | `company_overview` | read | Everything /emitten/{symbol}/info returns for one ticker, with nothing discarded: index memberships, catalogs, the UMA (unusual market activity) marker, specia… | Projected | symbol* |
 | `company_profile` | read | The company description block for a ticker: what the business does, and whatever else Stockbit's profile endpoint carries. | Projected | symbol*, include_typed_info, include_fin_items, emitten_type |
 | `company_contact` | read | Registered address, phone, website and investor-relations contacts for a ticker, verbatim. | Projected | symbol* |
-| `company_subsidiaries` | read | The subsidiaries and associates Stockbit lists for a ticker. | Projected | symbol* |
+| `company_subsidiaries` | read | The subsidiaries and associates Stockbit lists for a ticker. | Observed | symbol* |
 | `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Projected | symbol*, value_year, shareholder_type |
-| `classification` | read | Stockbit's company classification. | Projected | scope |
-| `index_members` | read | The constituents of an IDX index or special board: IDX30, LQ45, KOMPAS100, and the monitoring / syariah lists. | Projected | index_code*, limit* |
+| `classification` | read | Stockbit's company classification. | Observed | scope |
+| `index_members` | read | The constituents of an IDX index or special board: IDX30, LQ45, KOMPAS100, and the monitoring / syariah lists. | Observed | index_code*, limit* |
 | `sector_companies` | read | The companies in one IDX sector. | Projected | sector_id* |
-| `symbol_search` | read | Search Stockbit's directory by keyword — the way to turn a company name into a ticker. | Projected | keyword*, variant, page, type, insider_category |
+| `symbol_search` | read | Search Stockbit's directory by keyword — the way to turn a company name into a ticker. | Observed | keyword*, variant, page, type, insider_category |
 
 ## fundamentals
 
@@ -141,7 +141,7 @@ Insider and affiliate transactions.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `insider_transactions` | read | Disclosed transactions by an IDX company's insiders and major holders: directors, commissioners, controlling shareholders and 5%+ owners, with the shares held… | Projected | symbol, insider, date_start, date_end, page, limit, action_type, source_type |
+| `insider_transactions` | read | Disclosed transactions by an IDX company's insiders and major holders: directors, commissioners, controlling shareholders and 5%+ owners, with the shares held… | Observed | symbol, insider, date_start, date_end, page, limit, action_type, source_type |
 | `insider_ownership` | read | Every position one insider or major holder has disclosed, across all the IDX companies they hold, with the recent changes to each. | Projected | insider*, symbol, page, source_type |
 | `shareholding` | read | The shareholder register, from three directions. | Projected | mode*, symbol, insider_id, root_id, root_type, max_depth, max_edge_per_node, report_date |
 | `ownership_composition` | read | How an IDX company's ownership is split, over a period: the make-up of the register rather than the individual holders shareholding(mode=companies) lists. | Projected | symbol*, period_start, period_end |
@@ -152,12 +152,12 @@ Dividends, splits, rights, the corporate calendar.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `corporate_actions` | read | Corporate actions of ONE kind: dividends, rights issues, RUPS (shareholder meetings), bonus shares, splits, reverse splits, tender offers, warrants, public exp… | Projected | action_type*, symbol, limit |
-| `dividend_calendar` | read | Cash dividends AND stock dividends in one list, newest ex-date first. | Projected | symbol, limit |
+| `corporate_actions` | read | Corporate actions of ONE kind: dividends, rights issues, RUPS (shareholder meetings), bonus shares, splits, reverse splits, tender offers, warrants, public exp… | Observed | action_type*, symbol, limit |
+| `dividend_calendar` | read | Cash dividends AND stock dividends in one list, newest ex-date first. | Observed | symbol, limit |
 | `calendar_today` | read | Every corporate action happening across the whole market on ONE date, or day by day over a short range. | Projected | date, from, to |
-| `corporate_action_status` | read | UMA (unusual market activity) and IDX special-notation status for several symbols in ONE request. | Projected | symbols* |
+| `corporate_action_status` | read | UMA (unusual market activity) and IDX special-notation status for several symbols in ONE request. | Observed | symbols* |
 | `stock_conversion` | read | Warrant and rights conversion records for one issuer: the exercises that turned derivative instruments into ordinary shares, which is share-count dilution that… | Projected | symbol*, page, limit |
-| `ipo_pipeline` | read | Upcoming and recent IPOs, with whatever offering terms the row carries. | Projected | limit |
+| `ipo_pipeline` | read | Upcoming and recent IPOs, with whatever offering terms the row carries. | Observed | limit |
 | `underwriters` | read | The IPO underwriter directory, or ONE underwriter's IPO track record. | Projected | underwriter_code, sort_by |
 
 ## stream
@@ -166,12 +166,12 @@ Posts, news and research from Stockbit's own feed.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Projected | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids |
-| `news` | read | News posts, market-wide or for one symbol. | Projected | symbol, keyword, from_date, to_date, limit, last_stream_id |
-| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Projected | date, limit, last_stream_id |
+| `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Observed | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids |
+| `news` | read | News posts, market-wide or for one symbol. | Observed | symbol, keyword, from_date, to_date, limit, last_stream_id |
+| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Observed | date, limit, last_stream_id |
 | `stream_post_detail` | read | Read ONE post by id, with the whole payload the detail endpoint returns. | Projected | post_id* |
 | `stream_pinned` | read | The posts pinned to a symbol's page — what Stockbit or the company has chosen to keep at the top. | Projected | symbol* |
-| `stream_user` | read | One Stockbit user's posts, by username. | Projected | username*, limit, last_stream_id |
+| `stream_user` | read | One Stockbit user's posts, by username. | Observed | username*, limit, last_stream_id |
 | `research` | read | Stockbit's research metadata. | Projected | symbol |
 
 ## screener
@@ -181,8 +181,8 @@ Stockbit's screener — the catalogue, the presets, and running one.
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
 | `screener_run` | read | Run an ad-hoc stock screen over Stockbit's IDX metric catalogue and get the matching stocks. | Projected | rules*, watchlist_id, limit |
-| `screener_favorites` | read | The screens the user has marked as favourites. | Projected | — |
-| `screener_finitems` | read | Stockbit's fin-item watchlist: the financial-statement line items saved for use as screener columns. | Projected | — |
+| `screener_favorites` | read | The screens the user has marked as favourites. | Observed | — |
+| `screener_finitems` | read | Stockbit's fin-item watchlist: the financial-statement line items saved for use as screener columns. | Observed | — |
 | `watchlist_symbols` | read | The tickers in one watchlist, from Stockbit's dedicated symbols route. | Projected | watchlist_id* |
 | `watchlist_search` | read | Search Stockbit's company directory by keyword — the lookup behind the watchlist's add-a-stock box. | Projected | keyword* |
 
@@ -278,6 +278,7 @@ The brokerage account and order entry.
 | `order_sell` | write, destructive | PLACE A REAL SELL ORDER on the Indonesian exchange, against the user's actual position. | Projected | ticket_id*, confirm |
 | `order_amend` | write, destructive | CHANGE a working order's price or size on the exchange. | Projected | ticket_id*, confirm |
 | `order_cancel` | write, destructive | CANCEL a working order. | Projected | ticket_id*, confirm |
+| `trading_forget` | write | Cancel the user's standing "don't ask again", so the next order asks them directly again. | Projected | — |
 
 ## eipo
 

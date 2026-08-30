@@ -8,7 +8,8 @@
 import { z } from "zod";
 import * as eipo from "../eipo/api.js";
 import { placeEipoOrder, previewEipoOrder } from "../eipo/order.js";
-import { runTool } from "./_format.js";
+import { COMMITMENT_CONFIRM, runTool } from "./_format.js";
+import { elicitationNote } from "../trading/confirmation.js";
 import type { Definer } from "./_define.js";
 
 const SESSION_NOTE =
@@ -16,10 +17,8 @@ const SESSION_NOTE =
   "extra step. If it cannot be minted the error says to run `stockbit-auth login`.";
 
 const PROJECTION_NOTE =
-  "PENDING VERIFICATION: nothing on this host has been observed live. Offering data is returned as " +
-  "the server sent it; anything describing THIS account's money is projected, with `readFrom` naming " +
-  "the wire key each value came from and `unmappedKeys` listing the names — not the values — of the " +
-  "fields that were not recognised.";
+  "PENDING VERIFICATION: nothing on this host has been observed live. Offering data comes back as " +
+  "the server sent it; only what describes THIS account's money is projected.";
 
 export function registerEipoTools(define: Definer): void {
   define.read(
@@ -135,29 +134,42 @@ export function registerEipoTools(define: Definer): void {
       "Step two of two. Call `eipo_order_preview` first, relay its `summary` to the user in words, " +
       "ask them, and pass `confirm: true` only after they have agreed to that specific " +
       "subscription. This tool takes a ticket id and nothing else.\n" +
+      "Where the client supports MCP elicitation the user is ALSO asked directly, before `confirm` " +
+      "is looked at, and their answer is the decisive one: a declined dialog refuses the " +
+      "subscription however confirm was set.\n" +
       "READ `outcome` BEFORE REPORTING ANYTHING. Only `ok` means the subscription is recorded and " +
       "was seen there. Anything else means the state is uncertain — relay `message` verbatim and DO " +
       "NOT RESEND.",
     {
       ticket_id: z.string().describe("The id from eipo_order_preview. This tool takes no price and no quantity."),
-      confirm: z.boolean().optional().describe("Must be true, and only after the user has agreed to this ticket."),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe(COMMITMENT_CONFIRM),
     },
     async (a) =>
       runTool(async () => {
         const result = await placeEipoOrder({
           ticketId: String(a.ticket_id),
           confirm: a.confirm === true,
-          elicit: define.elicit ? define.elicit.bind(define) : undefined,
+          // The gate calls this BEFORE it looks at `confirm`, so a client that can reach a person
+          // always reaches them. See src/trading/confirmation.ts.
+          elicit: define.elicitDecision ? define.elicitDecision.bind(define) : undefined,
         });
+        // Mirrors describeOutcome() in tools/trading.ts: the outcome sentence is unchanged and the
+        // fact about who agreed rides beside it.
+        const note = elicitationNote(result.elicitation);
+        const suffix = note ? ` ${note}` : "";
         const message =
           result.outcome === "ok"
-            ? `The subscription to ${result.emitenCode} is recorded: ${result.lots} lots committing ${result.amountIdr} rupiah.`
+            ? `The subscription to ${result.emitenCode} is recorded: ${result.lots} lots committing ${result.amountIdr} rupiah.${suffix}`
             : result.outcome === "write-failed"
               ? `The subscription to ${result.emitenCode} was refused before it was recorded. ${result.error ?? ""}`.trim()
               : result.outcome === "rejected"
                 ? `The subscription to ${result.emitenCode} was rejected. ${result.error ?? ""}`.trim()
                 : (result.outcomeUnknown ??
-                  `The outcome of the subscription to ${result.emitenCode} could not be established. Do not resend it.`);
+                    `The outcome of the subscription to ${result.emitenCode} could not be established. Do not resend it.`) +
+                  suffix;
         return {
           ...result,
           message,

@@ -344,7 +344,7 @@ const VERSION_DIR_RE = /^\d+\.\d+\.\d+\.\d+$/;
  * payload in a sibling directory named for the version — `Application\152.0.3512.81\` — so the
  * filesystem answers the question without spawning anything.
  */
-export function browserVersionFromLayout(path: string): string | null {
+function browserVersionFromLayout(path: string): string | null {
   try {
     const dir = dirname(path);
     const versions = readdirSync(dir, { withFileTypes: true })

@@ -91,17 +91,31 @@ export const AUTH_COMMANDS: CommandTable = {
       "--paper": "a local ledger. No real money, no PIN. Start here.",
       "--live": "real orders on the exchange, with real money",
       "--auto-confirm": "skip per-order confirmation (live only; needs --max-order-value)",
-      "--no-auto-confirm": "turn per-order confirmation back on",
+      "--no-auto-confirm": "turn that back off",
+      "--require-elicitation": "same as --elicitation required",
+      "--no-elicitation": "same as --elicitation never",
     },
     valueFlags: {
       "--cash": { placeholder: "N", help: "paper starting balance (default Rp 100,000,000)" },
       "--max-order-value": { placeholder: "N", help: "cap one order's value in IDR" },
       "--max-lots": { placeholder: "N", help: "cap one order's size in lots" },
       "--symbols": { placeholder: "A,B", help: "restrict trading to these tickers" },
+      "--elicitation": { placeholder: "MODE", help: "whether a person is asked directly before an order" },
     },
+    details: [
+      "--elicitation modes:",
+      "  required        refuse rather than send when no person can be reached. confirm: true",
+      "                  never substitutes for the ask.",
+      "  when-available  ask wherever the client supports it, fall back to confirm: true. THE DEFAULT.",
+      "  never           do not ask; confirm: true is the only gate.",
+    ],
   },
   "trading-disable": {
     summary: "turn ordering off again. The session and the ledger are left alone.",
+    details: ['Also revokes any standing "don\'t ask again".'],
+  },
+  "trading-forget": {
+    summary: 'revoke every standing "don\'t ask again", in every running server, without changing the trading mode',
   },
   "paper-reset": {
     summary: "start the paper ledger over",

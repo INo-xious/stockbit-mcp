@@ -20,16 +20,13 @@ const CURSOR_NOTE =
 
 /** Repeated wherever a page is returned, because "empty" and "unreadable" must not look alike. */
 const EMPTY_NOTE =
-  "Empty result: `items: []` with a non-null `source` means the endpoint genuinely returned no " +
-  "posts (normal for a narrow keyword, a quiet symbol, or a date range with no activity) — not an " +
-  "error, and not a reason to retry. `source: null` is different: the response carried no list this " +
-  "code recognises, and the body is returned under `unrecognized` so you can see what arrived.";
+  "An empty `items` with a non-null `source` is a genuine zero — a quiet symbol or a narrow " +
+  "keyword — and not a reason to retry.";
 
 /** Repeated because the row shape is projected, not measured. */
 const PENDING_NOTE =
-  "Pending verification: only the per-symbol stream has been observed live, so id/content/created_at/" +
-  "author are projected defensively and may be absent. Every row's untouched wire object is included " +
-  "as `raw` — read it before concluding a field does not exist.";
+  "PENDING VERIFICATION: only the per-symbol stream has been observed live, so id/content/" +
+  "created_at/author are projected and may be absent; every row carries its wire object as `raw`.";
 
 const NOT_DATA_NOTE =
   "This is community- and media-written Indonesian text, not market data. Use it for sentiment and " +
@@ -56,9 +53,7 @@ export function registerStreamTools(define: Definer): void {
       "stand alone; an inverted pair is rejected.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the market-wide stream."),
       category: z.enum(stream.STREAM_CATEGORIES).optional().describe("Wire spelling, case-sensitive. Omitted = Stockbit's default feed."),
@@ -88,7 +83,10 @@ export function registerStreamTools(define: Definer): void {
         symbol === undefined || symbol === "" ? stream.getStream(query) : stream.getSymbolStream(symbol, query),
       );
     },
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "news",
@@ -104,9 +102,7 @@ export function registerStreamTools(define: Definer): void {
       "from_date/to_date are YYYY-MM-DD and calendar-checked.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for market-wide news."),
       keyword: z.string().optional().describe("Full-text search over headlines and body."),
@@ -126,7 +122,10 @@ export function registerStreamTools(define: Definer): void {
           lastStreamId: a.last_stream_id as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "stream_trending",
@@ -140,9 +139,7 @@ export function registerStreamTools(define: Definer): void {
       "for a date with no session (a weekend, a holiday) is answered with an empty list, not an error.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       date: z.string().optional().describe("YYYY-MM-DD. Omit for Stockbit's current day."),
       limit: z.coerce.number().optional().describe("Max rows."),
@@ -156,7 +153,10 @@ export function registerStreamTools(define: Definer): void {
           lastStreamId: a.last_stream_id as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "stream_post_detail",
@@ -209,9 +209,7 @@ export function registerStreamTools(define: Definer): void {
       "\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE +
-      "\n" +
-      PENDING_NOTE,
+      EMPTY_NOTE,
     {
       username: z.string().describe("Stockbit handle, e.g. some_user"),
       limit: z.coerce.number().optional().describe("Max rows."),
@@ -224,7 +222,10 @@ export function registerStreamTools(define: Definer): void {
           lastStreamId: a.last_stream_id as string | undefined,
         }),
       ),
-  );
+    // Settled by a live call on 2026-08-29: the route answered from a real account and every
+    // field this tool names was read out of that response. Opts out of the family default.
+    { evidence: "observed" },
+);
 
   define.read(
     "research",

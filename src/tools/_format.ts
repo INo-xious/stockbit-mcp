@@ -2,6 +2,24 @@
 import { StockbitError } from "../http/errors.js";
 import { redactValue } from "../redact.js";
 
+/**
+ * The `confirm` blurb for an IRREVERSIBLE commitment — an exchange order, an e-IPO subscription.
+ *
+ * One wording, shared, because these two are the same risk class and were describing it in two
+ * different sets of words. What stays is what a model reading only this schema has to see; the
+ * surrounding protocol — two steps, relay the summary verbatim, never resend a non-ok outcome — is
+ * in the server instructions, stated once. Do not shorten this further: every clause is
+ * load-bearing and ADR-0010 is why.
+ *
+ * Account writes deliberately do NOT use this: those are reversible in the Stockbit app, and telling
+ * a model that renaming a watchlist carries an order's weight teaches it to discount the warning
+ * where it matters.
+ */
+export const COMMITMENT_CONFIRM =
+  "Must be true, and only after the user has agreed to THIS ticket's summary in words. Never set it " +
+  "on their behalf. Where the client can ask a person directly, it does, and their answer decides " +
+  "it either way.";
+
 type Content =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
@@ -20,7 +38,7 @@ interface ToolResult {
  * through `redactValue` — it is base64 of markup this process just generated from data already
  * returned to the caller, and re-encoding it would corrupt it.
  */
-export function imageResult(
+function imageResult(
   base64: string,
   mimeType: string,
   summary: unknown,

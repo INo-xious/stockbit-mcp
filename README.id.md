@@ -65,10 +65,12 @@ UI Stockbit, tidak ada loop polling yang tidak Anda mulai.
 
 - **Tidak ada tool yang menyentuh PIN.** PIN 6 digit diketik di terminal Anda, dipakai untuk satu
   request, dan tidak pernah disimpan. Kalau ada yang meminta PIN lewat asisten, itu bukan ini.
-- **Tidak ada order tanpa tiket.** Secara default tool tulis juga memerlukan konfirmasi Anda. Satu-
-  satunya pengecualian adalah `--auto-confirm` dengan batas nilai, yang harus Anda aktifkan sendiri
-  untuk live trading lewat terminal; model tidak bisa menyalakan atau menaikkan batasnya. Tool tidak
-  menerima harga atau jumlah, jadi yang sampai ke bursa persis yang dijelaskan tiket.
+- **Tidak ada order tanpa tiket.** Secara default tool tulis juga memerlukan konfirmasi Anda, dan
+  kalau klien Anda mendukung elicitation MCP Anda ditanya langsung — jawaban Anda yang menentukan,
+  jadi menolak membatalkan order apa pun isi `confirm` yang dikirim model. Satu-satunya pengecualian
+  adalah `--auto-confirm` dengan batas nilai, yang harus Anda aktifkan sendiri untuk live trading
+  lewat terminal; model tidak bisa menyalakan atau menaikkan batasnya. Tool tidak menerima harga atau
+  jumlah, jadi yang sampai ke bursa persis yang dijelaskan tiket.
 - **Tidak pernah mengirim ulang otomatis, tidak pernah membatalkan otomatis.** Kalau hasil sebuah
   order tidak pasti, server mengatakannya dan berhenti.
 - **Resep workflow tidak bisa menulis apa pun.** Dijamin oleh konstruksi kode, bukan oleh disiplin.
@@ -176,10 +178,35 @@ atau `--live`. `trading-enable` tanpa flag ditolak — dua pilihan itu berbeda s
 tool yang menerimanya.
 
 **Protokol tiket.** `order_preview` menghitung dan memeriksa order lalu mengembalikan `summary` yang
-Anda baca. Tool tulis hanya menerima id tiket dan konfirmasi opsional. Secara default order hanya
-lanjut setelah `confirm: true` atau persetujuan langsung lewat MCP. Hanya kebijakan server yang bisa
-melewati langkah per-order ketika Anda sengaja mengaktifkan live `--auto-confirm` dengan batas nilai;
-model tidak boleh mengisi `confirm` atas nama Anda. Tiket kedaluwarsa dalam dua menit.
+Anda baca. Tool tulis hanya menerima id tiket dan konfirmasi opsional. Tiket kedaluwarsa dalam dua
+menit dan membawa sidik jari yang diperiksa ulang tepat sebelum request dikirim.
+
+**Siapa yang menyetujui.** Kalau klien Anda mendukung elicitation MCP, **Anda ditanya langsung,
+sebelum `confirm` bahkan dilihat, dan jawaban Anda yang menentukan** — menolak berarti order
+dibatalkan apa pun isi `confirm` yang dikirim model. Elicitation adalah satu-satunya jalur di MCP
+yang sampai ke orang; `confirm: true` hanyalah boolean yang diisi model. Menganggap keduanya setara
+adalah cacat nyata yang pernah ada di sini, diperbaiki oleh
+[ADR-0010](docs/adr/0010-elicitation-is-decisive.md). Pada klien yang tidak bisa bertanya,
+`confirm: true` adalah satu-satunya gerbang, order tetap jalan, dan hasil maupun baris audit
+menyatakan dengan jelas bahwa tidak ada manusia yang ditanya. Model tidak boleh mengisi `confirm`
+atas nama Anda.
+
+Ada tiga saklar yang Anda pegang sendiri, semuanya diatur di terminal Anda dan tak satu pun bisa
+disentuh tool mana pun:
+
+| | |
+|---|---|
+| `trading-enable --elicitation required` | Tolak daripada mengirim kalau tidak ada orang yang bisa ditanya. `confirm: true` tidak pernah menggantikannya. |
+| `trading-enable --elicitation when-available` | Tanya kalau kliennya bisa; jatuh ke `confirm: true` kalau tidak. **Default.** |
+| `trading-enable --elicitation never` | Jangan tanya sama sekali. `confirm: true` satu-satunya gerbang. |
+| `trading-enable --auto-confirm --max-order-value N` | Lewati langkah per-order sepenuhnya, di bawah batas nilai. Hanya live, dan diabaikan sama sekali kalau bertabrakan dengan `--elicitation required`. |
+
+Dialog konfirmasi juga membawa kotak kedua yang **Anda** centang sendiri: jangan tanya lagi, selama
+lima belas menit, untuk order yang nilainya tidak melebihi yang barusan Anda setujui, di bawah
+kebijakan trading yang berlaku saat Anda mencentangnya. Ia hidup di memori server itu dan tidak
+pernah di disk — restart mengakhirinya, `trading_forget` mengakhirinya di percakapan itu, dan
+`stockbit-auth trading-forget` mengakhirinya di mana-mana termasuk server yang sedang berjalan.
+`status` memberi tahu apakah ada yang masih aktif.
 
 **Hasilnya.** Setelah menulis, `outcome` punya tujuh kelas. `ok` adalah satu-satunya sukses bersih;
 `landed-despite-error` juga berarti order ditemukan saat dibaca ulang, tetapi request-nya error.
@@ -231,8 +258,10 @@ memprediksi imbal hasil di masa depan.
 
 **Kalau Anda menyalakan live trading, perangkat lunak ini bisa mengirim order sungguhan yang
 membelanjakan uang sungguhan.** Fitur itu mati secara default. Order membutuhkan konfirmasi eksplisit
-kecuali Anda juga memilih `--auto-confirm` dengan batas nilai; Anda sepenuhnya bertanggung jawab atas
-setiap order yang dikirim, termasuk order di dalam batas yang Anda izinkan sebelumnya.
+— dan, kalau klien Anda bisa, persetujuan langsung dari Anda — kecuali Anda sendiri memilih
+`--auto-confirm` dengan batas nilai atau `--elicitation never`. Anda sepenuhnya bertanggung jawab
+atas setiap order yang dikirim, termasuk order di dalam batas yang Anda izinkan sebelumnya dan order
+yang tercakup oleh "jangan tanya lagi" yang Anda centang sendiri.
 
 Anda bertanggung jawab mematuhi ketentuan Stockbit, aturan IDX, dan hukum Indonesia.
 

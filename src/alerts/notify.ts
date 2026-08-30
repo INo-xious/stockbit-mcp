@@ -58,7 +58,7 @@ export function alertLogPath(): string {
 }
 
 /** One line of JSON per fired alert, appended. Never rewritten, so history cannot be lost. */
-export function logAlert(event: AlertEvaluation, at: string): void {
+function logAlert(event: AlertEvaluation, at: string): void {
   mkdirSync(stockbitDir(), { recursive: true });
   const line = JSON.stringify({
     at,
@@ -129,7 +129,7 @@ function desktopCommand(title: string, body: string): { command: string; args: s
 }
 
 /** Fire a desktop notification. Resolves to an error string, or null on success. */
-export function notifyDesktop(title: string, body: string, timeoutMs = 8000): Promise<string | null> {
+function notifyDesktop(title: string, body: string, timeoutMs = 8000): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
     const done = (value: string | null) => {

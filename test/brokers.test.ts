@@ -76,9 +76,12 @@ const SUMMARY_BODY = {
         { netbs_broker_code: "CC", type: "Lokal", blot: "50", bval: "500000" },
         { netbs_broker_code: "XL", type: "Asing", blot: "40", bval: "400000" },
       ],
+      // NEGATIVE, because that is what the wire sends — see test/fixtures/broker_summary_BBRI.json
+      // and the sign note atop src/core/marketdetectors.ts. This fixture used to carry positive
+      // sells, which made every assertion below agree with the code and disagree with reality.
       brokers_sell: [
-        { netbs_broker_code: "BK", type: "Asing", slot: "60", sval: "600000" },
-        { netbs_broker_code: "DX", type: "Pemerintah", slot: "40", sval: "400000" },
+        { netbs_broker_code: "BK", type: "Asing", slot: "-60", sval: "-600000" },
+        { netbs_broker_code: "DX", type: "Pemerintah", slot: "-40", sval: "-400000" },
       ],
     },
     bandar_detector: { verdict: "whatever Stockbit calls it" },
@@ -94,6 +97,53 @@ const SUMMARY_ONE_SIDED = {
       symbol: "TLKM",
       brokers_buy: [{ netbs_broker_code: "YP", blot: "10", bval: "100000" }],
       brokers_sell: [],
+    },
+    from: "2026-08-03",
+    to: "2026-08-03",
+  },
+};
+
+/**
+ * Figures this server will not parse, beside ones it will.
+ *
+ * `"n/a"` used to become NaN and poison every total it was summed into; a thousand-separated value
+ * is refused rather than guessed at, because the two Indonesian conventions disagree about which
+ * separator is the decimal one. Both used to be reported as the number zero.
+ */
+const SUMMARY_UNREADABLE = {
+  data: {
+    broker_summary: {
+      symbol: "GOTO",
+      brokers_buy: [
+        { netbs_broker_code: "YP", blot: "10", bval: "1e+5", freq: "" },
+        { netbs_broker_code: "CC", blot: "20", bval: "n/a" },
+        { netbs_broker_code: "XL", blot: "1,234", bval: "300000" },
+        // Only a DECORATIVE field fails here. This row is wholly inside every total.
+        { netbs_broker_code: "ZP", blot: "5", bval: "50000", freq: "many" },
+      ],
+      brokers_sell: [{ netbs_broker_code: "BK", slot: "-5", sval: "-50000" }],
+    },
+    from: "2026-08-03",
+    to: "2026-08-03",
+  },
+};
+
+/**
+ * A buy row that carries no `bval` at all — nothing was refused here, the wire simply did not send
+ * it. The broker still cannot enter `buyValueIdr`, so the reading has to say a total is short. It
+ * used to say nothing: `netValueIdr` came out at 0, which the description reads as "a complete NET
+ * table, both sides are the same trades".
+ */
+const SUMMARY_ABSENT_FLOW = {
+  data: {
+    broker_summary: {
+      symbol: "ASII",
+      brokers_buy: [
+        { netbs_broker_code: "YP", blot: "10", bval: "100000" },
+        { netbs_broker_code: "CC", blot: "20" },
+        { netbs_broker_code: "XL", blot: "30", bval: "300000" },
+      ],
+      brokers_sell: [{ netbs_broker_code: "BK", slot: "-40", sval: "-400000" }],
     },
     from: "2026-08-03",
     to: "2026-08-03",
@@ -151,6 +201,14 @@ before(() => {
     if (u.includes("marketdetectors/TLKM")) {
       requests.summary++;
       return json(SUMMARY_ONE_SIDED);
+    }
+    if (u.includes("marketdetectors/GOTO")) {
+      requests.summary++;
+      return json(SUMMARY_UNREADABLE);
+    }
+    if (u.includes("marketdetectors/ASII")) {
+      requests.summary++;
+      return json(SUMMARY_ABSENT_FLOW);
     }
     if (u.includes("marketdetectors/")) {
       requests.summary++;
@@ -401,10 +459,11 @@ test("bandar: totals, ordering and concentration come off the broker summary", a
   assert.equal(reading.symbol, "BBRI");
   assert.equal(reading.from, "2026-08-03");
   assert.equal(reading.buyValueIdr, 1_000_000);
-  assert.equal(reading.sellValueIdr, 1_000_000);
+  assert.equal(reading.sellValueIdr, -1_000_000, "the sell total carries the wire's sign");
   // Near zero is the CORRECT reading of a complete NET table: both sides are the same trades.
   assert.equal(reading.netValueIdr, 0);
   assert.equal(reading.buyLots, 100);
+  assert.equal(reading.sellLots, -100);
   assert.equal(reading.netLots, 0);
 
   assert.deepEqual(reading.topAccumulators.map((b) => b.code), ["CC", "XL"], "sorted by value, trimmed to top");
@@ -415,8 +474,15 @@ test("bandar: totals, ordering and concentration come off the broker summary", a
   assert.equal(reading.concentration.topBuyerShare, 0.5);
   assert.equal(reading.concentration.top3BuyerShare, 1);
   assert.equal(reading.concentration.buyHerfindahl, 0.25 + 0.16 + 0.01);
+  // The sell side has real numbers here. It used to be null on every call, because the shares were
+  // divided by a negative total, and the tool description reads a null share to the model as
+  // "nothing traded on that side".
+  assert.equal(reading.concentration.topSellerShare, 0.6);
+  assert.equal(reading.concentration.top3SellerShare, 1);
+  assert.equal(reading.concentration.sellHerfindahl, 0.36 + 0.16);
   assert.equal(reading.concentration.buyersListed, 3);
   assert.equal(reading.concentration.sellersListed, 2);
+  assert.equal(reading.unreadable, undefined, "every figure in this fixture parses");
 
   // Stockbit's own block is passed through rather than dropped or parsed.
   assert.deepEqual(reading.stockbitBandarDetector, { verdict: "whatever Stockbit calls it" });
@@ -447,6 +513,68 @@ test("bandar: an out-of-range `top` is rejected before any request", async () =>
   await assert.rejects(() => getBandarDetector({ symbol: "BBRI", top: 0 }), StockbitError);
   await assert.rejects(() => getBandarDetector({ symbol: "BBRI", top: 51 }), StockbitError);
   assert.equal(requests.summary, 0);
+});
+
+test("summary: a figure that cannot be read is ABSENT, never zero and never NaN", async () => {
+  const summary = await getBrokerSummary({ symbol: "GOTO" });
+  const by = new Map(summary.buyers.map((b) => [b.code, b]));
+
+  // E-notation is what this wire actually sends, so it must keep parsing.
+  assert.equal(by.get("YP")!.netValueIdr, 100_000);
+
+  // Present but unparseable. `Number("n/a")` is NaN, which serialises to null in JSON and reaches
+  // the model as an unexplained absence; `s == null ? 0` reported it as a broker that netted zero.
+  assert.equal(by.get("CC")!.netValueIdr, undefined);
+  assert.equal(by.get("CC")!.netLots, 20, "the readable field on the same row still comes through");
+
+  // Refused rather than guessed at: "1,234" is 1234 under one convention and 1.234 under the other.
+  assert.equal(by.get("XL")!.netLots, undefined);
+  assert.equal(by.get("XL")!.netValueIdr, 300_000);
+
+  // An empty string is ABSENT, not unreadable — Stockbit uses "" for "no value here" across this
+  // API, and `numberish` in src/core/pricefeed.ts already reads it that way.
+  assert.equal(by.get("YP")!.freq, undefined);
+
+  // `freq` feeds no total, so ZP is wholly inside buyValueIdr and buyLots. Counting it in `rows`
+  // would tell the model a complete total was short by a broker. The key is still named.
+  assert.equal(by.get("ZP")!.netValueIdr, 50_000);
+  assert.equal(by.get("ZP")!.freq, undefined);
+
+  assert.deepEqual(summary.unreadable, { buyers: 2, sellers: 0, keys: ["blot", "bval", "freq"] });
+});
+
+test("summary: an unreadable DECORATIVE field names its key but costs no total a broker", async () => {
+  const summary = await getBrokerSummary({ symbol: "GOTO" });
+  const readableValues = summary.buyers.filter((b) => b.netValueIdr !== undefined).length;
+
+  // rows counts brokers a total had to leave out. Three of the four buy rows have a readable bval,
+  // and only CC's is missing — so exactly one buy row is a hole in buyValueIdr.
+  assert.equal(readableValues, 3);
+  assert.ok(summary.unreadable!.keys.includes("freq"), "the key is reported");
+  assert.equal(summary.unreadable!.buyers, 2, "CC (bval) and XL (blot) — not ZP, whose freq is cosmetic");
+  assert.equal(summary.unreadable!.sellers, 0, "the sell side parsed completely");
+});
+
+test("bandar: unreadable rows are left out of the totals, not counted as zero", async () => {
+  const reading = await getBandarDetector({ symbol: "GOTO" });
+
+  // 1e+5 + 300000. CC's unreadable bval is excluded; summing it as NaN would make every figure
+  // below null, and summing it as 0 would silently deflate the concentration denominators.
+  assert.equal(reading.buyValueIdr, 450_000); // YP 1e+5 + XL 300000 + ZP 50000; CC's bval is not readable
+  assert.equal(reading.buyLots, 35); // YP 10 + CC 20 + ZP 5; XL's "1,234" is not readable
+  assert.equal(reading.sellValueIdr, -50_000);
+  assert.equal(reading.netValueIdr, 400_000);
+
+  for (const v of [reading.buyValueIdr, reading.sellValueIdr, reading.netValueIdr, reading.netLots]) {
+    assert.ok(Number.isFinite(v), "one unreadable field must not poison a total with NaN");
+  }
+  for (const share of Object.values(reading.concentration)) {
+    assert.ok(share === null || Number.isFinite(share), "no share may be NaN");
+  }
+
+  // Still listed — the row exists, it is its figures that could not be read.
+  assert.equal(reading.concentration.buyersListed, 4);
+  assert.deepEqual(reading.unreadable, { buyers: 2, sellers: 0, keys: ["blot", "bval", "freq"] });
 });
 
 /* ------------------------------ the tool surface ------------------------------ */
@@ -540,4 +668,38 @@ test("tools: a bad broker code comes back as an error result, not a thrown handl
   const payload = JSON.parse(result.content[0].text) as { kind: string };
   assert.equal(payload.kind, "invalid_param");
   assert.equal(requests.activity, 0);
+});
+
+
+test("summary: a flow figure the wire never sent leaves the same hole, and is reported too", async () => {
+  const summary = await getBrokerSummary({ symbol: "ASII" });
+  const cc = summary.buyers.find((b) => b.code === "CC")!;
+
+  assert.equal(cc.netLots, 20, "the field that WAS sent still parses");
+  assert.equal(cc.netValueIdr, undefined, "and the one that was not is absent, not zero");
+  assert.deepEqual(summary.unreadable, { buyers: 1, sellers: 0, keys: ["bval"] });
+});
+
+test("bandar: a total short by one broker says so, instead of reading as a complete table", async () => {
+  const reading = await getBandarDetector({ symbol: "ASII" });
+
+  // 100000 + 300000. CC contributes nothing, because nothing is known about it.
+  assert.equal(reading.buyValueIdr, 400_000);
+  assert.equal(reading.sellValueIdr, -400_000);
+
+  // A net of exactly zero is the signature of a complete NET table — and here it is NOT one.
+  // Refusing to fabricate a zero for a row and then fabricating one for the total silently would
+  // be the same mistake one level up, which is why `unreadable` has to be non-empty here.
+  assert.equal(reading.netValueIdr, 0);
+  assert.deepEqual(reading.unreadable, { buyers: 1, sellers: 0, keys: ["bval"] });
+
+  // The shares are over the same reduced set, so the count and the denominator must not disagree
+  // silently either.
+  assert.equal(reading.concentration.buyersListed, 3, "three brokers were listed");
+  assert.equal(reading.concentration.topBuyerShare, 0.75, "but the share is over the two that count");
+  assert.equal(
+    reading.concentration.buyersListed - reading.unreadable!.buyers,
+    2,
+    "listed minus dropped is what every buy-side figure above actually covers",
+  );
 });

@@ -240,7 +240,11 @@ const POINT_KEYS = {
   open: ["open", "o"],
   high: ["high", "h"],
   low: ["low", "l"],
-  close: ["close", "c"],
+  // `value` last, and only as a fallback: /charts/:symbol/daily carries the price there and sends no
+  // `close` at all. Settled live on 2026-08-29 by arithmetic on the payload itself — a BBRI point
+  // read {value:"2930", change:-20, percentage:"-0.68"}, and 20/2930 = 0.68%, so `value` is the
+  // price level and not a traded value. A real `close` key still wins.
+  close: ["close", "c", "value"],
   volume: ["volume", "vol", "v"],
   average: ["average", "vwap"],
   value: ["value"],
@@ -376,10 +380,17 @@ function projectSeries(
   bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   const warnings: string[] = [];
-  const flat = (["open", "high", "low"] as const).filter((f) => unmapped.includes(f));
+  // Absent is not the only way to be flat. /charts/:symbol/daily sends open/high/low/volume as
+  // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `numberish("")` returns null
+  // — every bar silently took its close for all three and nothing said so. A field that reads null
+  // on every row is as unusable as one that was never there, and the caller has to be told.
+  const flat = (["open", "high", "low"] as const).filter(
+    (f) => unmapped.includes(f) || located.rows.every((row) => read(row, f) === null),
+  );
   if (flat.length > 0) {
     warnings.push(
-      `No ${flat.join("/")} field was found, so those are filled from close and every candle is ` +
+      `No usable ${flat.join("/")} arrived — absent, or present and empty on every bar — so those ` +
+        "are filled from close and every candle is " +
         "flat. Do not run candlestick pattern detection or a high/low-based indicator on this series.",
     );
   }
@@ -477,7 +488,7 @@ export type TradeBookDataMode = (typeof TRADE_BOOK_DATA_MODES)[number];
  * lets an unlisted-but-well-formed key through rather than refusing it — a closed `z.enum` here
  * would reject valid sort keys purely because nobody has written them down yet.
  */
-export const SORT_KEYS = ["TIME", "QUEUE", "LOT", "PRICE"] as const;
+const SORT_KEYS = ["TIME", "QUEUE", "LOT", "PRICE"] as const;
 
 const SORT_KEY_RE = /^[A-Z][A-Z0-9_]{0,30}$/;
 
@@ -519,8 +530,13 @@ function positiveInt(name: string, value: number): number {
  * Dropping one — a key of `runningTrade:${symbol}` that ignores `limit` — serves a five-row answer
  * to a caller who asked for fifty, which is a bug this repo has shipped before.
  */
-function keyFor(route: RouteName, params: QueryParams): string {
-  return `${route}:${JSON.stringify(Object.entries(params).sort())}`;
+export function keyFor(route: RouteName, params: QueryParams): string {
+  // Sorted BY KEY. A bare `.sort()` orders the [k, v] pairs by their default string coercion, so it
+  // is really sorting on "key,value" — two different param sets can tie, and the reader is told
+  // something other than what happens. Comparing the key alone is both injective and what the line
+  // looks like it does.
+  const entries = Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `${route}:${JSON.stringify(entries)}`;
 }
 
 /* ================================ running trade ================================ */
@@ -685,7 +701,10 @@ export interface OrderQueueOptions {
  * module reads, and a stale queue is a wrong answer about what is currently resting on the book.
  */
 export async function getOrderQueue(opts: OrderQueueOptions): Promise<unknown> {
-  const params: QueryParams = { symbol: normalizeSymbol(opts.symbol) };
+  // `stock_code`, not `symbol`. Settled live on 2026-08-29: `symbol`, `code`, `emiten_code`,
+  // `stockCode` and `company` all come back 400 "Stock code is required"; `stock_code` answers.
+  // The tool had always sent `symbol`, so this endpoint had never once returned data.
+  const params: QueryParams = { stock_code: normalizeSymbol(opts.symbol) };
   if (opts.sortBy !== undefined) params.sort_by = normalizeSortKey(opts.sortBy);
   if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
   return cached(keyFor("orderQueue", params), CACHE.quoteTtlMs, () =>

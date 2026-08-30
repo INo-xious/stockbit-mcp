@@ -24,7 +24,7 @@ import { warmupFor } from "./series.js";
 
 export type Timeframe = "D" | "W" | "M";
 
-export const TIMEFRAME_LABELS: Record<Timeframe, string> = { D: "Daily", W: "Weekly", M: "Monthly" };
+const TIMEFRAME_LABELS: Record<Timeframe, string> = { D: "Daily", W: "Weekly", M: "Monthly" };
 
 export interface ResampledSeries {
   timeframe: Timeframe;

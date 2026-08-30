@@ -134,7 +134,7 @@ function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: num
  * enum: refusing an unknown value would make the whole vocabulary unreachable, and inventing the
  * list would make a wrong one look supported.
  */
-export const DEFAULT_EMITTEN_TYPE = "company";
+const DEFAULT_EMITTEN_TYPE = "company";
 
 /** Normalize a caller's emitten type. The transport enforces the charset; this fixes the casing. */
 function emittenTypeOf(value: string | undefined): string {
@@ -153,7 +153,7 @@ export interface CompanyProfile {
 }
 
 /** The profile block alone. */
-export async function getProfile(symbol: string): Promise<unknown> {
+async function getProfile(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   return cached(`companyProfile:${sym}`, CACHE.keystatsTtlMs, async () =>
     dataOf(await getJson("emittenProfile", { segments: { symbol: sym } }), "company profile"),
@@ -161,7 +161,7 @@ export async function getProfile(symbol: string): Promise<unknown> {
 }
 
 /** The typed view of a company, under one statement vocabulary. */
-export async function getTypedInfo(symbol: string, emittenType?: string): Promise<unknown> {
+async function getTypedInfo(symbol: string, emittenType?: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   const type = emittenTypeOf(emittenType);
   return cached(`companyTypedInfo:${sym}:${type}`, CACHE.keystatsTtlMs, async () =>
@@ -173,7 +173,7 @@ export async function getTypedInfo(symbol: string, emittenType?: string): Promis
 }
 
 /** The financial line items one statement vocabulary defines for this company. */
-export async function getFinItems(symbol: string, emittenType?: string): Promise<unknown> {
+async function getFinItems(symbol: string, emittenType?: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   const type = emittenTypeOf(emittenType);
   return cached(`companyFinItems:${sym}:${type}`, CACHE.keystatsTtlMs, async () =>
@@ -281,7 +281,21 @@ async function mintShareholdersToken(): Promise<string> {
   const data = dataOf(body, "shareholders token");
   // A bare-string `data` is the token itself; anything else is searched by key name. The search is
   // deliberately not "any string in the payload" — that would happily return a message or a status.
-  const token = typeof data === "string" && data.trim() !== "" ? data : tokenIn(body);
+  // Observed 2026-08-29: the endpoint answers {"message":"Successfully retrieved Token","data":
+  // {"value":"<64 hex>"}}. The token sits under `value`, which no /token/i key search can find, and
+  // `message` is the only string that mentions the word — so this had always thrown `schema_drift`.
+  // Read narrowly, from `data.value` on this one route, rather than by loosening `tokenIn` into
+  // "any string called value" and letting it grab an unrelated field on some other payload.
+  const fromValue =
+    data !== null && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>).value
+      : undefined;
+  const token =
+    typeof data === "string" && data.trim() !== ""
+      ? data
+      : typeof fromValue === "string" && fromValue.trim() !== ""
+        ? fromValue
+        : tokenIn(body);
   if (!token) {
     // Key names only. The token value must not reach a message that may be logged.
     const keys = body && typeof body === "object" ? Object.keys(body as Record<string, unknown>) : [];

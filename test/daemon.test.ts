@@ -6,6 +6,7 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-daemon-"))
 // Nothing in this file may pop a notification on the machine running the tests.
 delete process.env.STOCKBIT_ALERT_WEBHOOK;
 
+import { getEventListeners } from "node:events";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { isMarketOpen, tick, watch } from "../src/alerts/daemon.ts";
@@ -212,6 +213,38 @@ test("watch stops when aborted", async () => {
   });
   await running;
   assert.ok(ticks.length >= 2, "it should have ticked before stopping");
+});
+
+test("watch leaks no abort listeners — the daemon runs all day on one signal", async () => {
+  // `{ once: true }` removes a listener when the abort event FIRES, not when the timer resolves
+  // normally — which is what happens on every tick but the last. bin/stockbit-alerts.ts creates one
+  // AbortController for the whole process, so the old loop added a listener per tick and never
+  // removed it: ~1,440 a day at the default 60s interval, each retaining a closure, with Node's
+  // MaxListenersExceededWarning about eleven minutes in.
+  //
+  // Measured on the code this replaced, the count at ticks 1/5/10/15 was 0, 4, 9, 14.
+  saveRules([]);
+  const controller = new AbortController();
+  const observed: number[] = [];
+  let ticks = 0;
+  await watch(async () => series([90, 105]), {
+    ...QUIET,
+    intervalMs: 1,
+    signal: controller.signal,
+    onTick: () => {
+      ticks++;
+      observed.push(getEventListeners(controller.signal, "abort").length);
+      if (ticks >= 15) controller.abort();
+    },
+  });
+
+  assert.equal(ticks, 15);
+  assert.deepEqual(
+    observed.filter((n) => n !== 0),
+    [],
+    `abort listeners must never accumulate; saw ${observed.join(",")}`,
+  );
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0, "and none survive the loop");
 });
 
 test("a throwing tick is reported and the loop survives", async () => {

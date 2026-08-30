@@ -35,7 +35,9 @@ import { redactValue } from "../redact.js";
 import { invalidateCache } from "../core/_util.js";
 import { tradingPolicy, type TradingPolicy } from "../settings.js";
 import { idr } from "../trading/preview.js";
-import { TICKET_TTL_MS, issue, now, peek, take, type TicketBase } from "../trading/tickets.js";
+import { TICKET_TTL_MS, blockingCheck, issue, now, peek, take, type TicketBase } from "../trading/tickets.js";
+import { resolveConfirmation, type ElicitationOutcome } from "../trading/confirmation.js";
+import type { ElicitDecision } from "../tools/_define.js";
 import { ensureEipoSession } from "./session.js";
 import { getMyOrderRaw, getOfferingStatus, getRdnBalance, normalizeEmiten, readEipoOrder } from "./api.js";
 import { stockbitDir } from "../paths.js";
@@ -94,7 +96,7 @@ export interface EipoTicket extends TicketBase {
   createdAt: string;
 }
 
-export function fingerprintOfEipo(ticket: EipoTicket): string {
+function fingerprintOfEipo(ticket: EipoTicket): string {
   const material = {
     emitenCode: ticket.emitenCode,
     price: ticket.price,
@@ -352,6 +354,14 @@ export interface EipoResult {
   amountIdr: number;
   uiRef: string;
   outcome: EipoOutcome;
+  /**
+   * What happened on the human channel before this was committed. ADR-0010.
+   *
+   * Same field, same vocabulary and same reasoning as `OrderResult.elicitation` — an IPO
+   * subscription is a trade with no undo at all, so if nobody was asked directly the user is
+   * entitled to read that in the answer rather than infer it from the audit log.
+   */
+  elicitation: ElicitationOutcome;
   verified: boolean;
   outcomeUnknown?: string;
   error?: string;
@@ -369,7 +379,11 @@ export interface EipoResult {
 export async function placeEipoOrder(options: {
   ticketId: string;
   confirm?: boolean;
-  elicit?: (message: string) => Promise<"accepted" | "declined" | "unavailable">;
+  /**
+   * Ask the human directly. Always called when present, before `confirm` is looked at, and a
+   * declined dialog refuses whatever `confirm` said — see `src/trading/confirmation.ts`.
+   */
+  elicit?: ElicitDecision;
 }): Promise<EipoResult> {
   const policy = tradingPolicy();
   if (!policy.enabled) {
@@ -384,32 +398,31 @@ export async function placeEipoOrder(options: {
   }
   const preview = found as EipoTicket;
 
-  let via: "explicit" | "auto-confirm" | "elicited" | null = options.confirm === true ? "explicit" : null;
-  if (!via && policy.autoConfirmIgnored) refuse(`${policy.autoConfirmIgnored} Nothing was sent.`);
-  if (!via && policy.autoConfirm) {
-    const cap = policy.maxOrderValueIdr;
-    if (cap === null) {
-      refuse("autoConfirm is set but no maxOrderValueIdr is configured, so it is ignored. Pass confirm: true.");
-    }
-    if (preview.amountIdr <= cap) via = "auto-confirm";
-    else {
-      refuse(
-        `autoConfirm covers orders up to ${idr(cap)} and this subscription is ${idr(preview.amountIdr)}. ` +
-          "Ask the user and pass confirm: true.",
-      );
-    }
-  }
-  if (!via && options.elicit) {
-    const answer = await options.elicit(preview.summary);
-    if (answer === "accepted") via = "elicited";
-    else if (answer === "declined") refuse("The user declined this subscription when asked directly. Nothing was sent.");
-  }
-  if (!via) {
-    refuse(
-      "Refusing to send an IPO subscription without confirmation. Show the user the ticket's `summary`, in " +
-        "words, and pass confirm: true only after they agree to THAT subscription.",
-    );
-  }
+  // Before the dialog, exactly as `passGates` does it. `take()` refuses a ticket whose checks failed
+  // with this same sentence a moment later, and an e-IPO ticket has six failable checks including
+  // the RDN balance — so without this, a person could be asked to commit money out of an account
+  // that does not have it. Two copies of one gate is the thing this change exists to end, and that
+  // includes the guards either side of it.
+  const blocked = blockingCheck(preview);
+  if (blocked) refuse(blocked);
+
+  // One gate, shared with exchange orders. It used to be a second copy of the same six branches
+  // here, and it had already drifted from the original in three places — a shorter cap-missing
+  // message, no guard for a commitment with no value, and no "Do not set it on their behalf".
+  const { via, elicitation } = await resolveConfirmation({
+    confirm: options.confirm,
+    elicit: options.elicit,
+    policy,
+    summary: preview.summary,
+    valueIdr: preview.amountIdr,
+    noun: "subscription",
+    // Never waivable, in either direction. The grant store is one slot shared with exchange orders,
+    // and a subscription is a different commitment with consequences an order does not have — the
+    // allotment may be smaller than what was asked for, and it cannot be cancelled by selling. A
+    // person who ticked "don't ask again" on a BUY was shown none of that, so their tick must not
+    // answer for this; and a tick made here must not go on to answer for exchange orders either.
+    waivable: false,
+  });
 
   const ticket = take(options.ticketId, "eipo") as EipoTicket;
   if (fingerprintOfEipo(ticket) !== ticket.fingerprint) {
@@ -427,6 +440,9 @@ export async function placeEipoOrder(options: {
     price: ticket.price,
     amountIdr: ticket.amountIdr,
     uiRef: ticket.uiRef,
+    // In `base` so it reaches the result AND every audit line by one route. `via` is added at each
+    // log site instead: it is evidence for the log, not advice for the user.
+    elicitation,
     logPath: eipoLogPath(),
     at,
   };

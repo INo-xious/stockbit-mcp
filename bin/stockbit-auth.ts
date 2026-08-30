@@ -30,7 +30,13 @@ import {
 } from "../src/auth/session.js";
 import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.js";
 import { securitiesTokenUrlAllowed } from "../src/auth/capture.js";
-import { loadSettings, saveSettings, settingsPath, tradingPolicy } from "../src/settings.js";
+import {
+  loadSettings,
+  saveSettings,
+  settingsPath,
+  tradingPolicy,
+  type ElicitationPolicy,
+} from "../src/settings.js";
 import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
 import { captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
@@ -333,9 +339,19 @@ async function cmdLogout(argv: string[]): Promise<void> {
  */
 async function cmdTradingLogin(argv: string[]): Promise<void> {
   if (argv.includes("--browser")) {
-    logStderr("Opening the logged-in browser so Cloudflare sees a real one. Enter your trading PIN there.");
+    // NOT `/trade`. That path is a Stockbit USERNAME route, so it opened a stranger's profile page
+    // — reported by an account owner who read the page they were sent to.
+    //
+    // There is no trading PAGE to send them to instead. Confirmed by the same account owner: the
+    // PIN prompt is a MODAL that appears when a buy or sell is clicked, anywhere on the site. So
+    // this opens the site and says what to click; a URL here could only ever be wrong again.
+    const startUrl = process.env.STOCKBIT_TRADING_URL || "https://stockbit.com/";
+    logStderr("Opening the logged-in browser so Cloudflare sees a real one.");
+    logStderr("Click Buy or Sell on any stock in that window — the 6-digit PIN prompt appears as a");
+    logStderr("pop-up. Enter it there. There is no separate trading page, so nothing to navigate to.");
+    logStderr("The capture watches for the carina session response and closes itself when it sees one.");
     const result = await captureViaBrowserLogin({
-      startUrl: "https://stockbit.com/trade",
+      startUrl,
       isTokenUrl: securitiesTokenUrlAllowed,
       fetchPatterns: ["*carina.stockbit.com/auth/*"],
       slot: "securities",
@@ -396,10 +412,18 @@ async function cmdTradingStatus(argv: string[]): Promise<void> {
   if (policy.autoConfirmIgnored) logStderr(`  ${policy.autoConfirmIgnored}`);
   logStderr(
     `  autoConfirm: ${policy.autoConfirm ? "on" : "off"}; ` +
+      `elicitation: ${policy.elicitation}; ` +
       `maxOrderValueIdr: ${policy.maxOrderValueIdr ?? "none"}; ` +
       `maxLotsPerOrder: ${policy.maxLotsPerOrder}; ` +
       `allowedSymbols: ${policy.allowedSymbols.length ? policy.allowedSymbols.join(", ") : "any"}`,
   );
+  logStderr(`  ${ELICITATION_MEANING[policy.elicitation]}`);
+  if (policy.confirmationsRevokedAt) {
+    logStderr(
+      `  Standing "don't ask again" grants made before ${policy.confirmationsRevokedAt} are revoked ` +
+        "(`trading-forget`).",
+    );
+  }
 
   if (!hasStoredSession("securities")) {
     logStderr(`Securities session: NOT set. ${missingSessionMessage("securities")}`);
@@ -435,6 +459,62 @@ function flagValue(argv: string[], name: string): string | undefined {
   if (index >= 0 && argv[index + 1] && !argv[index + 1].startsWith("--")) return argv[index + 1];
   const inline = argv.find((a) => a.startsWith(`${name}=`));
   return inline?.slice(name.length + 1);
+}
+
+/** One line each, for `trading-status`. Written for the person who set the switch a month ago. */
+const ELICITATION_MEANING: Record<ElicitationPolicy, string> = {
+  required:
+    "A person must be asked directly before every order. A client that cannot ask is REFUSED, and " +
+    "confirm: true does not substitute.",
+  "when-available":
+    "A person is asked directly wherever the client supports it, and their answer decides it. On a " +
+    "client that cannot ask, confirm: true proceeds and the order is marked as unelicited.",
+  never: "Nobody is asked directly, whatever the client supports. confirm: true is the only gate.",
+};
+
+/**
+ * Read the elicitation switch off the command line.
+ *
+ * Three spellings for the same dial, because `--auto-confirm` / `--no-auto-confirm` already set
+ * that precedent and a user who has learned one pair should not have to learn a different shape for
+ * the next. Contradictions are rejected rather than resolved by precedence: `--require-elicitation
+ * --no-elicitation` is not a preference, it is a mistake, and the same is true of `--paper --live`
+ * two commands up.
+ */
+function readElicitationFlags(argv: string[]): ElicitationPolicy | undefined {
+  const chosen: ElicitationPolicy[] = [];
+  if (argv.includes("--require-elicitation")) chosen.push("required");
+  if (argv.includes("--no-elicitation")) chosen.push("never");
+
+  const explicit = flagValue(argv, "--elicitation");
+  // `flagValue` returns undefined both for "not given" and for "given with nothing usable after
+  // it", and those must not be the same answer here. `--elicitation --max-order-value 5000000`
+  // would otherwise leave the switch untouched with no diagnostic, and the user would believe they
+  // had set it. That is tolerable for a numeric cap; it is not tolerable for the switch that
+  // decides whether a person is asked before their money moves.
+  if (explicit === undefined && argv.some((a) => a === "--elicitation" || a.startsWith("--elicitation="))) {
+    logStderr("--elicitation needs a value: required, when-available or never.");
+    process.exit(2);
+  }
+  if (explicit !== undefined) {
+    if (explicit !== "required" && explicit !== "when-available" && explicit !== "never") {
+      logStderr(
+        `--elicitation must be required, when-available or never; got ${JSON.stringify(explicit)}.`,
+      );
+      process.exit(2);
+    }
+    chosen.push(explicit);
+  }
+
+  if (chosen.length === 0) return undefined;
+  if (new Set(chosen).size > 1) {
+    logStderr(
+      `Pick one: --elicitation ${[...new Set(chosen)].join(" and --elicitation ")} cannot both be what you meant. ` +
+        "(--require-elicitation is --elicitation required; --no-elicitation is --elicitation never.)",
+    );
+    process.exit(2);
+  }
+  return chosen[0];
 }
 
 /**
@@ -479,6 +559,9 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
   if (argv.includes("--auto-confirm")) settings.trading.autoConfirm = true;
   if (argv.includes("--no-auto-confirm")) settings.trading.autoConfirm = false;
 
+  const elicitation = readElicitationFlags(argv);
+  if (elicitation !== undefined) settings.trading.elicitation = elicitation;
+
   const maxValue = flagValue(argv, "--max-order-value");
   if (maxValue !== undefined) {
     const parsed = Number(maxValue);
@@ -522,11 +605,13 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
     logStderr("reads and the order tools are served from the ledger instead.");
     logStderr("Every order still needs confirm: true, because rehearsing without it rehearses the");
     logStderr("wrong thing. Fills are approximate: close-only data, no queue position, no partials.");
+    logStderr(`Elicitation: ${policy.elicitation}. ${ELICITATION_MEANING[policy.elicitation]}`);
     return;
   }
 
   logStderr(`LIVE trading ENABLED. Wrote ${settingsPath()}.`);
   logStderr("Orders now reach the exchange and move real money.");
+  logStderr(`Elicitation: ${policy.elicitation}. ${ELICITATION_MEANING[policy.elicitation]}`);
   if (policy.autoConfirmIgnored) logStderr(policy.autoConfirmIgnored);
   else if (policy.autoConfirm) {
     logStderr(
@@ -574,10 +659,37 @@ async function cmdTradingDisable(): Promise<void> {
   const was = settings.trading.mode;
   settings.trading.mode = "off";
   settings.trading.autoConfirm = false;
+  // Turning trading off must also end any standing "don't ask again" held in a server process that
+  // is still running. It cannot reach that memory, but it can stamp a moment every server reads.
+  //
+  // `elicitation` is deliberately NOT reset. Two of its three values are stricter than the default,
+  // and quietly loosening a stricter setting on the way to "off" would mean that turning trading
+  // back on later restored it weaker than the user left it.
+  settings.trading.confirmationsRevokedAt = new Date().toISOString();
   saveSettings(settings);
   logStderr(`Trading DISABLED (was ${was}). Wrote ${settingsPath()}.`);
   logStderr("The order tools still exist and will now refuse, naming this file. The session is untouched.");
+  logStderr("Any standing \"don't ask again\" is revoked; the elicitation setting is left as you set it.");
   if (was === "paper") logStderr(`The paper ledger is left alone at ${paperLedgerPath()}.`);
+}
+
+/**
+ * Revoke every standing "don't ask again", everywhere, without turning trading off.
+ *
+ * The grants live in server memory and a terminal cannot reach it. What it can do is write a
+ * moment into the settings file: every order re-reads the policy before it runs the gate, so a
+ * grant made before that moment stops covering anything — including in server processes that were
+ * already running when this command was typed. That is the whole mechanism, and it is why this is
+ * a settings write rather than an IPC channel nobody would trust with an order.
+ */
+async function cmdTradingForget(): Promise<void> {
+  const settings = loadSettings();
+  const at = new Date().toISOString();
+  settings.trading.confirmationsRevokedAt = at;
+  saveSettings(settings);
+  logStderr(`Standing "don't ask again" grants revoked as of ${at}. Wrote ${settingsPath()}.`);
+  logStderr("Every order from now on asks you directly again, in every client, wherever it can.");
+  logStderr("Nothing else changed: the trading mode, the caps and the elicitation setting are untouched.");
 }
 
 async function main(): Promise<void> {
@@ -646,6 +758,9 @@ async function main(): Promise<void> {
       break;
     case "trading-disable":
       await cmdTradingDisable();
+      break;
+    case "trading-forget":
+      await cmdTradingForget();
       break;
     case "paper-reset":
       await cmdPaperReset(argv);

@@ -191,7 +191,11 @@ export function bollinger(values: number[], period = 20, k = 2): Bollinger {
   const lower: Series = new Array(values.length).fill(null);
   for (let i = period - 1; i < values.length; i++) {
     const window = values.slice(i - period + 1, i + 1);
-    const mean = middle[i]!;
+    // The EXACT window mean, not `middle[i]`. `sma` has already put its output through `round(_, 4)`,
+    // and a rounded centre feeding a standard deviation is the same class of mistake `highest`
+    // refuses a few lines up: round the output, never the input to the next calculation. It costs
+    // one pass over a window that is being walked on the next line anyway.
+    const mean = window.reduce((acc, v) => acc + v, 0) / period;
     // Population (not sample) SD — the convention every charting package uses here.
     const variance = window.reduce((acc, v) => acc + (v - mean) ** 2, 0) / period;
     const sd = Math.sqrt(variance);

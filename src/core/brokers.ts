@@ -95,7 +95,7 @@ export type BrokerSortKey = (typeof BROKER_SORT_KEYS)[number];
  */
 const BROKER_CODE_RE = /^[A-Z0-9]{2,4}$/;
 
-export function normalizeBrokerCode(input: unknown): string {
+function normalizeBrokerCode(input: unknown): string {
   if (typeof input !== "string") {
     throw new StockbitError("invalid_param", "broker code must be a string");
   }
@@ -527,8 +527,12 @@ export async function getBrokerTop(opts: BrokerTopOptions = {}): Promise<BrokerT
  * How concentrated each side of the table is.
  *
  * Every share is `null` rather than `0` when its denominator is zero. A share of 0 says "the top
- * broker took none of it"; on an empty session the truth is "there is nothing to take a share of",
- * and a reader acting on a 0 would conclude the flow was evenly spread.
+ * broker took none of it"; when there is nothing to take a share of, the truth is that the question
+ * cannot be asked, and a reader acting on a 0 would conclude the flow was evenly spread.
+ *
+ * A denominator is zero in two different situations and `null` does not distinguish them: the side
+ * was empty, or every figure on it was unreadable. `sellersListed` tells them apart — a null share
+ * beside a non-zero count means the rows were there and their numbers were not.
  */
 export interface BandarConcentration {
   /** The largest accumulator's share of all listed net buy value, 0-1. */
@@ -554,28 +558,58 @@ export interface BandarReading {
   /** The window the summary actually covered, as the server reported it. */
   from?: string;
   to?: string;
-  /** Sum of the listed brokers' net BUY value, IDR. */
+  /** Sum of the listed brokers' net BUY value, IDR. Positive. */
   buyValueIdr: number;
-  /** Sum of the listed brokers' net SELL value, IDR. */
+  /**
+   * Sum of the listed brokers' net SELL value, IDR.
+   *
+   * NEGATIVE, because the wire signs the sell side that way and this server does not launder it.
+   * See the sign note at the top of `src/core/marketdetectors.ts`.
+   */
   sellValueIdr: number;
   /**
-   * `buyValueIdr - sellValueIdr`.
+   * `buyValueIdr` minus the MAGNITUDE of `sellValueIdr` — how lopsided the two sides are.
    *
-   * On a complete NET table this is near zero and that is correct, not a bug: both sides describe
-   * the same trades from opposite ends, so every rupiah bought was sold by someone. A large
-   * magnitude means the table was truncated by `limit` (more brokers traded than were returned) or
-   * the request was GROSS, where the two sides are not the same trades. It is a coverage reading,
-   * not a verdict on the stock — the per-side totals above are the quantities to reason about.
+   * The magnitude is taken rather than the raw value so the reading stays right whichever way the
+   * wire signs the sell side, which is the exact assumption that was wrong before. With today's
+   * negative sells it is simply `buyValueIdr + sellValueIdr`. It assumes each side is signed
+   * CONSISTENTLY; a side carrying both signs at once is not something this wire produces and is not
+   * modelled here.
+   *
+   * Near zero means the two lists describe the same trades from opposite ends, which is what a
+   * complete NET table looks like. A large magnitude means the sides do NOT cover the same trades —
+   * usually the table was truncated by `limit`, sometimes the request was GROSS.
+   *
+   * `limit` applies PER SIDE, so equal list lengths prove nothing: when both sides overflow, both
+   * come back at exactly `limit`. A count that has reached `limit` is the signal; raise it and see
+   * whether the totals move. The captured BBRI fixture is the cautionary case in the other
+   * direction — its sell side is truncated 25 of 48 while the net is under 2% of the buy side, so a
+   * small net does not prove completeness either.
+   *
+   * It is a coverage reading, not a verdict on the stock; the per-side totals are the quantities to
+   * reason about.
    */
   netValueIdr: number;
   buyLots: number;
+  /** Negative, like `sellValueIdr`. */
   sellLots: number;
+  /** `buyLots` minus the magnitude of `sellLots`, on the same reasoning as `netValueIdr`. */
   netLots: number;
-  /** Largest net buyers first. */
+  /** Largest net buyers first, by size of flow. */
   topAccumulators: NormalizedBroker[];
-  /** Largest net sellers first. */
+  /** Largest net sellers first, by size of flow — the biggest distributor is element 0. */
   topDistributors: NormalizedBroker[];
   concentration: BandarConcentration;
+  /**
+   * Which brokers are missing from which total, passed through from the summary.
+   *
+   * `buyers` / `sellers` count LISTED brokers whose own side's flow figure did not yield a number.
+   * They are excluded from that side's totals and from its concentration denominator rather than
+   * counted as zero — so `buyers: 1` against `concentration.buyersListed: 16` means every buy
+   * figure above is over 15 brokers. `keys` names the wire keys involved, including decorative ones
+   * that move neither count. Absent when everything parsed.
+   */
+  unreadable?: { buyers: number; sellers: number; keys: string[] };
   /**
    * Stockbit's own `bandar_detector` block, passed through untouched. Its shape has not been
    * mapped, so it is neither parsed nor dropped.
@@ -590,6 +624,14 @@ export interface BandarDetectorOptions extends BrokerSummaryOptions {
 
 const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0);
 
+/**
+ * Every concentration figure is computed on MAGNITUDES.
+ *
+ * The sell side arrives negative, so a share taken on raw values divides by a negative total and
+ * `shareOf` answers `null` for every real stock on the exchange — which the tool description then
+ * reports to the model as "nothing traded on that side". `src/analysis/analyze.ts` already takes
+ * magnitudes for the same reason.
+ */
 function shareOf(part: number, total: number): number | null {
   return total > 0 ? part / total : null;
 }
@@ -630,19 +672,37 @@ export async function getBandarDetector(opts: BandarDetectorOptions): Promise<Ba
   const top = opts.top === undefined ? 5 : pageNumber(opts.top, "top", 50);
   const summary = await getBrokerSummary(opts);
 
+  // Ranked by SIZE OF FLOW, not by signed value. The wire sends the sell side negative, so a plain
+  // descending sort puts the *smallest* seller at the top of a list labelled "largest net sellers
+  // first" — which is precisely what this tool used to return. Magnitude ranks both sides the same
+  // way and cannot be inverted by a sign.
+  //
   // Copied before sorting. `getBrokerSummary` hands back a CACHED object, and sorting its arrays in
   // place would reorder what every later caller of that cache entry sees.
-  const byValue = (a: NormalizedBroker, b: NormalizedBroker): number =>
-    b.netValueIdr - a.netValueIdr || b.netLots - a.netLots;
-  const buyers = [...summary.buyers].sort(byValue);
-  const sellers = [...summary.sellers].sort(byValue);
+  const magnitude = (b: NormalizedBroker): number => Math.abs(b.netValueIdr ?? 0);
+  const lotMagnitude = (b: NormalizedBroker): number => Math.abs(b.netLots ?? 0);
+  const byFlow = (a: NormalizedBroker, b: NormalizedBroker): number =>
+    magnitude(b) - magnitude(a) || lotMagnitude(b) - lotMagnitude(a);
+  const buyers = [...summary.buyers].sort(byFlow);
+  const sellers = [...summary.sellers].sort(byFlow);
 
-  const buyValues = buyers.map((b) => b.netValueIdr);
-  const sellValues = sellers.map((s) => s.netValueIdr);
+  // A row whose figure could not be read is left out of every total and every denominator rather
+  // than counted as zero. `summary.unreadable` is what says so out loud.
+  const readable = (values: Array<number | undefined>): number[] =>
+    values.filter((v): v is number => v !== undefined);
+
+  const buyValues = readable(buyers.map((b) => b.netValueIdr));
+  const sellValues = readable(sellers.map((s) => s.netValueIdr));
   const buyValueIdr = sum(buyValues);
   const sellValueIdr = sum(sellValues);
-  const buyLots = sum(buyers.map((b) => b.netLots));
-  const sellLots = sum(sellers.map((s) => s.netLots));
+  const buyLots = sum(readable(buyers.map((b) => b.netLots)));
+  const sellLots = sum(readable(sellers.map((s) => s.netLots)));
+
+  // Shares and Herfindahls run on magnitudes; see the note on `shareOf`.
+  const buyMagnitudes = buyValues.map(Math.abs);
+  const sellMagnitudes = sellValues.map(Math.abs);
+  const buyTotal = sum(buyMagnitudes);
+  const sellTotal = sum(sellMagnitudes);
 
   const top3 = (values: number[]): number => sum(values.slice(0, 3));
 
@@ -652,22 +712,23 @@ export async function getBandarDetector(opts: BandarDetectorOptions): Promise<Ba
     to: summary.to,
     buyValueIdr,
     sellValueIdr,
-    netValueIdr: buyValueIdr - sellValueIdr,
+    netValueIdr: buyValueIdr - Math.abs(sellValueIdr),
     buyLots,
     sellLots,
-    netLots: buyLots - sellLots,
+    netLots: buyLots - Math.abs(sellLots),
     topAccumulators: buyers.slice(0, top),
     topDistributors: sellers.slice(0, top),
     concentration: {
-      topBuyerShare: shareOf(buyValues[0] ?? 0, buyValueIdr),
-      top3BuyerShare: shareOf(top3(buyValues), buyValueIdr),
-      topSellerShare: shareOf(sellValues[0] ?? 0, sellValueIdr),
-      top3SellerShare: shareOf(top3(sellValues), sellValueIdr),
-      buyHerfindahl: herfindahl(buyValues, buyValueIdr),
-      sellHerfindahl: herfindahl(sellValues, sellValueIdr),
+      topBuyerShare: shareOf(buyMagnitudes[0] ?? 0, buyTotal),
+      top3BuyerShare: shareOf(top3(buyMagnitudes), buyTotal),
+      topSellerShare: shareOf(sellMagnitudes[0] ?? 0, sellTotal),
+      top3SellerShare: shareOf(top3(sellMagnitudes), sellTotal),
+      buyHerfindahl: herfindahl(buyMagnitudes, buyTotal),
+      sellHerfindahl: herfindahl(sellMagnitudes, sellTotal),
       buyersListed: buyers.length,
       sellersListed: sellers.length,
     },
+    ...(summary.unreadable ? { unreadable: summary.unreadable } : {}),
     stockbitBandarDetector: summary.bandarDetector,
   };
 }

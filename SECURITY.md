@@ -30,6 +30,23 @@ or newer. `package.json` requires `^1.30.0` and the committed lockfile resolves
 The current server uses the stdio transport. It does not expose an HTTP or SSE
 listener by default.
 
+`hono` appears in the lockfile as a transitive dependency of
+`@modelcontextprotocol/sdk`, which offers it to HTTP transports. Nothing under
+`src/` or `bin/` imports it, an HTTP framework, or an HTTP transport, so the
+CORS, language-middleware, `memo()` and Proxy Helper advisories against it are
+not reachable here. It is still kept current, and the lockfile resolves a
+version past all four.
+
+## Fixed in
+
+The version column names the release the fix ships in. `Unreleased` means it is
+on `main` and in [`CHANGELOG.md`](CHANGELOG.md) but has not been tagged yet.
+
+| Reported | Fixed in | |
+|---|---|---|
+| Order entry | Unreleased | **`confirm: true` could skip the human entirely.** The confirmation gate was seeded from the caller's boolean and every later gate — including MCP elicitation, the only channel that reaches a person — was guarded behind it, so a model could place an order the account holder never saw by asserting that they had already agreed. The audit log recorded `via: "explicit"` for both cases, so afterwards the two could not be told apart. The ask now runs **before** the `confirm` check and behind no such guard; a declined dialog refuses the order whatever `confirm` said; and the log's `via` vocabulary distinguishes all five ways the gate can be satisfied. Applied to `eipo_order` and to paper mode by the same shared gate. See [`docs/adr/0010-elicitation-is-decisive.md`](docs/adr/0010-elicitation-is-decisive.md). |
+| Dependencies | Unreleased | Four moderate GHSAs against `hono 4.12.33`, none of them reachable from this server — see **Dependency Security** above. Hygiene, not an exploitable fix. |
+
 ## Where credentials are stored
 
 The refresh token for each of the three token domains lives in the macOS
@@ -107,10 +124,15 @@ should be aimed at:
 - **Order entry** (`order_buy`, `order_sell`, `order_amend`, `order_cancel`) and
   **IPO subscription** (`eipo_order`) place real orders with real money. They
   are **off by default**, require a preview ticket, and default to per-order
-  confirmation. The operator may deliberately enable live autoconfirm only
-  together with a maximum order value; a model cannot enable it or widen that
-  cap. Writes cannot be reached from a saved workflow recipe. See
-  `docs/adr/0004-order-entry.md`.
+  confirmation. Where the MCP client supports elicitation the user is asked
+  directly, **before** the caller's `confirm` is looked at, and their answer is
+  decisive — a declined dialog refuses the order whatever `confirm` said. Where
+  the client cannot ask, `confirm: true` is the only gate and both the result
+  and the audit line say no human was asked. The operator may deliberately
+  enable live autoconfirm only together with a maximum order value; a model
+  cannot enable it, widen that cap, or turn the ask off. Writes cannot be
+  reached from a saved workflow recipe. See `docs/adr/0004-order-entry.md` and
+  `docs/adr/0010-elicitation-is-decisive.md`.
 - **Chart drawing** drives the browser the user logged in with, over the Chrome
   DevTools Protocol. It enables only the `Page` and `Runtime` CDP domains — never
   `Network` or `Fetch`, which can read response bodies. See
@@ -129,7 +151,15 @@ in this project, whatever else it looks like. In particular:
   it. No module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
   settings file.
 - A path that satisfies a confirmation the user did not give, bypasses or widens
-  capped autoconfirm, or redeems an order ticket twice.
+  capped autoconfirm, or redeems an order ticket twice. **A caller-supplied
+  boolean is not a confirmation the user gave**: where a person can be reached,
+  anything that reaches an order route without asking them, or that proceeds
+  after they declined, is in scope — that is the class of defect ADR-0010
+  closed, and it is the first place to aim a report at.
+- A path that grants, widens or outlives a "don't ask again" without the person
+  ticking the box themselves: one that survives a restart, that covers an order
+  worth more than the one they approved, that outlives the policy it was granted
+  under or `stockbit-auth trading-forget`, or that a model can create.
 - A trading PIN reaching disk, a log, a tool result, or a model. The PIN is
   typed at a terminal, used for one request, and never stored; no MCP tool
   accepts one.

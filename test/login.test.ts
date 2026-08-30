@@ -152,3 +152,24 @@ test("the login ladder never enables a CDP domain to clear cookies", async () =>
   assert.ok(code.includes("Storage.clearDataForOrigin"), "and that is the call it uses");
   assert.ok(code.includes("Storage.clearCookies"), "with a browser-wide fallback for builds without it");
 });
+
+test("the already-signed-in harvest can only ever fill the MAIN slot", async () => {
+  // `harvestFromBrowser` reads `credentialStorage` out of the stockbit.com web session, so what it
+  // returns is a MARKET-DATA credential by construction. `trading-login --browser` passed
+  // slot: "securities", the tier accepted that main token for it, and the CLI printed "Trading
+  // session captured" — the 401 only surfaced on the test refresh afterwards, leaving a poisoned
+  // securities slot behind. The `slot` guard was one-directional: it kept a carina token out of
+  // main and left the reverse wide open. This is an inner closure, so the invariant is pinned the
+  // way the CDP-domain one above is.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const source = readFileSync(fileURLToPath(new URL("../src/auth/login.ts", import.meta.url)), "utf8");
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const line = code.split("\n").find((l) => l.includes("!harvestTried"));
+  assert.ok(line, "the harvest tier still exists");
+  assert.match(
+    line,
+    /options\.slot/,
+    "the harvest tier must test the target slot: it can only honestly fill `main`",
+  );
+});

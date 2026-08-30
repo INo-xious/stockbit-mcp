@@ -5,7 +5,7 @@ Notes for an AI assistant working on this repository. Human contributors want
 
 ## What this is
 
-An MCP server over Stockbit's private JSON API — the Indonesian exchange. 138 tools in 17 families
+An MCP server over Stockbit's private JSON API — the Indonesian exchange. 139 tools in 17 families
 (40 of them registered by default — `STOCKBIT_TOOLS` defaults to `core`),
 three token domains, and, behind switches the account owner turns on themselves, order entry against
 a real brokerage account.
@@ -57,9 +57,11 @@ versions.
 - **Never invent a number.** If a field could not be read, it is absent — not zero, not a default.
   `readFrom` names the wire key a value came from; `unmappedKeys` names what was not recognised, and
   on account data the *values* are dropped because an unmapped field there may be an account number.
-- **Never widen an evidence claim.** A tool whose description says the route has never been observed
-  is `projected`, and saying otherwise throws at registration. Settling one takes a live call, not
-  an edit.
+- **Never widen an evidence claim.** Every tool DECLARES its evidence — `{ evidence }` on the tool
+  or on `define.family()` — and one that declares nothing fails to register rather than defaulting
+  to `observed`. A description that says the route has never been observed while the declaration
+  claims more throws at registration. The full map is hand-written in `test/tools.test.ts` beside
+  `WRITES`, and for the same reason. Settling one takes a live call, not an edit.
 - **Never write a secret anywhere.** Tokens, PINs and bot tokens are matched by shape as well as by
   key. When adding an error path, ask what the message could contain: a `fetch` failure quotes the
   URL, and a Telegram URL contains the bot token.
@@ -76,6 +78,14 @@ The evidence ladder (**Observed / Read-back / Projected**) is load-bearing, not 
 ## Where the money is
 
 `src/trading/` and `src/eipo/`. If a change touches the ticket protocol, the confirmation gates, the
-outcome classes or the settings file, read [ADR-0004](docs/adr/0004-order-entry.md) and
-[ADR-0008](docs/adr/0008-paper-trading.md) first. The rule those encode: a user must never be able to
-place an order they did not read, and the server must never say "placed" when it does not know.
+outcome classes or the settings file, read [ADR-0004](docs/adr/0004-order-entry.md),
+[ADR-0008](docs/adr/0008-paper-trading.md) and
+[ADR-0010](docs/adr/0010-elicitation-is-decisive.md) first. The rule those encode: a user must never
+be able to place an order they did not read, and the server must never say "placed" when it does not
+know.
+
+**One gate, in `src/trading/confirmation.ts`.** Exchange orders and e-IPO both call it, and the
+duplicate that used to live in `src/eipo/order.ts` had already drifted in three places before anyone
+noticed. Its branch order is the security property, not an implementation detail: the human is asked
+**before** `confirm` is looked at, and behind no `via` test. A change that moves the ask later, or
+puts any condition in front of it, is reintroducing the defect ADR-0010 closed.
