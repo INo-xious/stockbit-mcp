@@ -10,6 +10,27 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A revoked session was reported as no session at all.** A 401 from the refresh endpoint appended
+  the no-token-at-all sentence — "No Stockbit session stored. Run `stockbit-auth login` first." — to
+  a failure whose whole meaning is that a token *is* stored and Stockbit refused it. `status`, which
+  reads the very journal that failure writes, said it correctly at the same moment: "present and
+  unexpired, but Stockbit rejected it". Two reports of one state, disagreeing on whether the user
+  had ever logged in, and the tool's version is the one an agent relays — sending the user to fix a
+  login that was never the problem. Each token domain now carries a separate `rejected` message
+  naming what actually happened; `missing` stays for the genuinely-absent case.
+
+- **A refused website session was still reported as healthy.** `webSessionHealth` judged the refresh
+  token's expiry and nothing else, so a revoked session — unexpired payload, every byte unchanged —
+  read as `stored, ~6.0d left` while the browser opened a chart, received Stockbit's empty shell and
+  threw. The chart path is the only place that can observe that refusal, and the observation died
+  with the process that made it, so the next `status` went on quoting the expiry of a credential the
+  browser had just proved dead. The health journal already answered exactly this question for the
+  three token slots; its key now covers the website session too, the refusal is recorded where it is
+  detected, and a recorded rejection outranks the clock. The fingerprint check comes with it, so a
+  rejection about a session the user has since replaced stays quiet.
+
 ## [1.2.2] — 2026-08-29
 
 ### Security

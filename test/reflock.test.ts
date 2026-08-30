@@ -507,6 +507,19 @@ test("a 401 with nothing newer in the web session still fails, and says how to r
         assert.ok(err instanceof StockbitError);
         assert.equal(err.status, 401);
         assert.match(err.message, /stockbit-auth login/);
+
+        // A REJECTED session is not a MISSING one, and the message must not confuse them. This
+        // sentence used to end "No Stockbit session stored. Run `stockbit-auth login` first." —
+        // borrowed wholesale from the no-token-at-all case — while `status`, reading the journal
+        // this very failure writes, correctly said "present and unexpired, but Stockbit rejected
+        // it". Two reports of one state, disagreeing on whether the user had ever logged in. An
+        // agent relaying the tool's version sends them to fix a login that is not the problem.
+        assert.doesNotMatch(
+          err.message,
+          /No Stockbit session stored/,
+          "a stored-but-revoked token must not be reported as no token at all",
+        );
+        assert.match(err.message, /revoked, or superseded/, "say what actually happened to it");
         return true;
       },
     );

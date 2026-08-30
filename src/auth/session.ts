@@ -114,6 +114,14 @@ interface DomainSpec {
   presentation: "header" | "body" | "query";
   /** What to tell a user who has no token for this domain. Names the command that gets one. */
   missing: string;
+  /**
+   * What to tell a user whose token IS stored and was REJECTED. A different state from `missing`,
+   * and it used to borrow that sentence: a revoked session answered "No Stockbit session stored",
+   * which contradicts `status` — that reads the same journal this failure writes and says "present
+   * and unexpired, but Stockbit rejected it". Telling a user they never logged in, when they did,
+   * sends them to fix the wrong thing.
+   */
+  rejected: string;
 }
 
 const DOMAINS: Record<TokenDomain, DomainSpec> = {
@@ -122,6 +130,9 @@ const DOMAINS: Record<TokenDomain, DomainSpec> = {
     refreshRoute: "loginRefresh",
     presentation: "header",
     missing: "No Stockbit session stored. Run `stockbit-auth login` first.",
+    rejected:
+      "The stored session was revoked, or superseded by another login — it is present and " +
+      "unexpired, so only Stockbit can see this. Log in again: `stockbit-auth login`.",
   },
   securities: {
     slot: "securities",
@@ -130,12 +141,19 @@ const DOMAINS: Record<TokenDomain, DomainSpec> = {
     missing:
       "Trading session not set up — run `stockbit-auth trading-login`. " +
       "It asks for your 6-digit trading PIN once; the PIN is never stored and never reaches this server.",
+    rejected:
+      "The stored trading session was revoked or has ended — run `stockbit-auth trading-login` " +
+      "again. It asks for your 6-digit trading PIN once; the PIN is never stored and never reaches " +
+      "this server.",
   },
   eipo: {
     slot: "eipo",
     refreshRoute: "eipoRefreshToken",
     presentation: "query",
     missing: "No e-IPO session. It is minted automatically from your Stockbit login — run `stockbit-auth login`.",
+    rejected:
+      "The stored e-IPO session was rejected. It is minted from your Stockbit login, so logging in " +
+      "again re-mints it: `stockbit-auth login`.",
   },
 };
 
@@ -583,7 +601,7 @@ async function refreshOnce(domain: TokenDomain, attempt = 0, locked = false): Pr
     throw new StockbitError(
       "auth",
       res.status === 401
-        ? `Refresh failed (HTTP 401) — the stored ${domain} token is no longer valid. ${spec.missing}`
+        ? `Refresh failed (HTTP 401) — the stored ${domain} token is no longer valid. ${spec.rejected}`
         : `Refresh failed (HTTP ${res.status}) for the ${domain} session`,
       { status: res.status },
     );
