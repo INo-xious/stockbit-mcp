@@ -10,6 +10,25 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.2.4] — 2026-08-31
+
+### Changed
+
+- **The package is published under Darren Wang.** The `author` field in `package.json`, the plugin
+  and Desktop Extension manifests, the marketplace `owner`, and the MIT copyright line all now name
+  Darren Wang — the account that publishes this package to npm (`dwstockbit`).
+
+  This needed its own version because npm metadata is immutable per version: the `author` shown on
+  npmjs.com for `1.2.3` and every release before it cannot be edited, only superseded. `1.2.4` is
+  therefore identical to `1.2.3` in behaviour — no code changed, and the diff is bylines only.
+
+  The GitHub namespace is deliberately untouched. Every `INo-xious` URL, and the
+  `io.github.INo-xious/stockbit-mcp` name in `server.json`, identify where the repository lives and
+  which MCP Registry entry this is; renaming them would point at a profile that does not exist and
+  orphan the registry record. `.mailmap` is untouched for the same class of reason — it maps
+  historical commits by a past identity onto a display name, and rewriting it would relabel commits
+  that were not made by the new byline.
+
 ## [1.2.3] — 2026-08-31
 
 Three fixes with one shape: a credential that does not work, reported as healthy. One at capture,

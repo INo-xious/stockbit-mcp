@@ -637,4 +637,4 @@ Provided under the MIT licence, **without warranty of any kind**.
 
 ## License
 
-[MIT](LICENSE) © Marvel Harisson
+[MIT](LICENSE) © Darren Wang

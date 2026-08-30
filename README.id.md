@@ -269,4 +269,4 @@ Disediakan di bawah lisensi MIT, **tanpa jaminan apa pun**.
 
 ## Lisensi
 
-[MIT](LICENSE) © Marvel Harisson
+[MIT](LICENSE) © Darren Wang
