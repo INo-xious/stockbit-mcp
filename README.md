@@ -492,6 +492,7 @@ Keep it running with launchd (macOS), Task Scheduler (Windows) or a systemd user
 | `stockbit-auth paper-reset [--cash N]` | Start the paper ledger over. |
 | `stockbit-auth trading-logout` | End the trading session and delete its credential. |
 | `stockbit-alerts watch\|check\|test` | The alert daemon. |
+| `stockbit-batch plan\|bars\|broker\|probe\|status` | Historical backfill for an ML dataset: one request per (symbol, session) for broker summaries, throttled, off-hours by default, resumable from a checkpoint, stoppable with a kill-file. `plan` makes no requests and tells you the cost first. |
 
 Every command answers `--help`/`-h` without running anything, and an unknown flag or stray argument
 is an error naming what that command accepts — never silently ignored.

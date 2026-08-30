@@ -48,7 +48,8 @@
     "stockbit-mcp": "dist/bin/stockbit-mcp.js",
     "stockbit-auth": "dist/bin/stockbit-auth.js",
     "stockbit-alerts": "dist/bin/stockbit-alerts.js",
-    "stockbit-live": "dist/bin/stockbit-live.js"
+    "stockbit-live": "dist/bin/stockbit-live.js",
+    "stockbit-batch": "dist/bin/stockbit-batch.js"
   },
   "exports": {
     ".": "./dist/src/server.js",
@@ -75,7 +76,8 @@
     "dev:auth": "node --import tsx bin/stockbit-auth.ts",
     "dev:alerts": "node --import tsx bin/stockbit-alerts.ts",
     "live": "node dist/bin/stockbit-live.js",
-    "dev:live": "node --import tsx bin/stockbit-live.ts"
+    "dev:live": "node --import tsx bin/stockbit-live.ts",
+    "dev:batch": "node --import tsx bin/stockbit-batch.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
