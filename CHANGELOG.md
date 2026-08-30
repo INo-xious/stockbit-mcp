@@ -10,7 +10,43 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-08-31
+
+Three fixes with one shape: a credential that does not work, reported as healthy. One at capture,
+one at storage, one at the status that was asked about both.
+
 ### Fixed
+
+- **A refused Keychain write threw the credential away, and retrying made it worse.** Reported from
+  the field on macOS, reproduced twice: `login()` captured a session and then failed with "Keychain
+  write failed" — a background MCP server cannot display the macOS authorisation prompt, so
+  `security` is killed at the timeout or answers `errSecInteractionNotAllowed`. `websession.enc`
+  landed in the same operation, so the directory was writable and only the Keychain write failed.
+
+  The failure was non-fatal, which is what made it expensive. The captured token stayed in memory
+  and served about ninety seconds of real calls; the server then fell back to the *stored* refresh
+  token — revoked, because the login had just superseded it — and everything 401'd. So the server
+  appeared to log in and broke a minute later. And because refresh tokens rotate and are
+  single-use, every retry **spent a good token** to mint a replacement that was then discarded:
+  retrying degraded the auth state rather than repairing it.
+
+  A refused Keychain write now falls back to the encrypted file store. That is not a new security
+  posture — it is the documented `STOCKBIT_FORCE_FILE_STORE` mode — but it *is* a downgrade, so it
+  is announced on stderr and restated in `status` rather than mentioned once. If the file write
+  also fails the error is raised: a login that stored nothing has not succeeded.
+
+  The fallback is **recorded**, in `~/.stockbit/backend.json`, and this is the part that took the
+  care. The backend is chosen per process and cached only in memory, so a one-off file write would
+  be invisible to the next process: it would build a Keychain store, read the stale item still
+  sitting there, and report it present. Nothing would ever look at the file. A recorded fallback
+  now outranks platform detection, and the superseded Keychain item is deleted. It also keeps
+  `reflock` honest, since lock paths differ by backend.
+
+- **`status` reported presence as health.** "market-data session: ok (Stored.)" appeared beside
+  "main session: fail" for the same credential, because one consulted the refresh journal and the
+  other only asked whether a file existed. It now asks the journal too — no extra request, and
+  nothing rotates. A login whose credential did not land is surfaced as a failed check, and a store
+  that fell back to the file backend says so every time.
 
 - **A login that captured a dead credential reported success.** Measured on 2026-08-29 and
   2026-08-30: four consecutive logins printed `Session captured (harvested from the
