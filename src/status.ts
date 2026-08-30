@@ -510,6 +510,11 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     // dead while every slot above is perfectly healthy. That combination is what made the original
     // failure so hard to read.
     checks.push({ name: "website session", status: "warn", detail: web.hint });
+  } else if (web.rejected) {
+    // `fail`, not `warn`: this is not a deadline approaching, it is a credential Stockbit has
+    // already refused. It reads the same as the token slots' `failing` rung, and for the same
+    // reason — both are recorded observations rather than inferences from an expiry.
+    checks.push({ name: "website session", status: "fail", detail: web.hint });
   }
   checks.push(runningCodeCheck());
 
@@ -756,6 +761,11 @@ function describeWebSession(web: WebSessionHealth): string {
 
   const age = web.ageHours === null ? "age unknown" : `captured ${web.ageHours.toFixed(1)}h ago`;
 
+  if (web.rejected) {
+    // Ahead of every clock-based line below, for the same reason the health rung is: this one is
+    // the only verdict Stockbit actually gave. Reporting "~6.0d left" over it was the bug.
+    return "REJECTED by Stockbit — a chart rendered nothing; run `stockbit-auth login`";
+  }
   if (web.basis === "unknown") {
     // Unknown is not dead. Demanding a login here is the same pessimism that cost a daily one.
     return `stored, ${age} — validity unreadable, the chart will settle it`;
