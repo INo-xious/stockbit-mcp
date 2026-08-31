@@ -439,8 +439,14 @@ export async function withBrokerNames<T extends { code: string; name?: string }>
     if (entry.code !== undefined && entry.name !== undefined) byCode.set(entry.code, entry.name);
   }
   return {
+    // The two sides of this join do NOT arrive normalized the same way. A directory code has passed
+    // `isCode` (`/^[A-Z0-9]{2,4}$/`), so every key in the map is already upper case — but a summary
+    // row's `code` is `netbs_broker_code` straight off the wire (src/core/marketdetectors.ts:322),
+    // never trimmed and never upper-cased. Joining on the raw value would drop the name for any
+    // row the wire happened to send in lower case, and drop it SILENTLY: the row would look exactly
+    // like a broker the directory has never heard of.
     rows: rows.map((row) => {
-      const name = byCode.get(row.code);
+      const name = byCode.get(String(row.code).trim().toUpperCase());
       return name === undefined ? { ...row } : { ...row, name };
     }),
     resolution: { resolved: true },

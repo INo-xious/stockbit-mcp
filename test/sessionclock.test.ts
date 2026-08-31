@@ -99,13 +99,13 @@ test("nowUtc is the same instant as nowWib, and keeps the seconds nowWib drops",
   const at = new Date("2026-08-25T03:00:14Z"); // 10:00:14 WIB, Tuesday
   const c = sessionClock(at);
   assert.equal(c.nowWib, "2026-08-25 10:00");
-  assert.equal(c.nowUtc, "2026-08-25T03:00:14Z");
+  assert.equal(c.nowUtc, "2026-08-25T03:00:14.000Z");
 });
 
 test("nextOpenUtc accompanies nextOpenWib, and never appears without it", () => {
   const friday = sessionClock(wib("2026-08-28T12:00")); // in the long Friday break
   assert.equal(friday.nextOpenWib, "2026-08-28 14:00");
-  assert.equal(friday.nextOpenUtc, "2026-08-28T07:00:00Z");
+  assert.equal(friday.nextOpenUtc, "2026-08-28T07:00:00.000Z");
 
   // While a session is open there is no next open at all — and so no UTC sibling either.
   const open = sessionClock(wib("2026-08-25T10:00"));
@@ -118,16 +118,16 @@ test("the UTC sibling rolls back a DAY where the WIB reading does not", () => {
   // unchanged — but the weekend jump from Saturday must land on Monday 02:00Z, not Sunday's.
   const saturday = sessionClock(wib("2026-08-29T10:00"));
   assert.equal(saturday.nextOpenWib, "2026-08-31 09:00");
-  assert.equal(saturday.nextOpenUtc, "2026-08-31T02:00:00Z");
+  assert.equal(saturday.nextOpenUtc, "2026-08-31T02:00:00.000Z");
 
   // And the genuine rollover: pre-opening at 08:45 WIB is 01:45Z the SAME day, while any WIB
   // reading before 07:00 would be the previous UTC day. `wibInstant` is built from the instant
   // rather than the rendered string precisely so this cannot drift.
   const beforeOpen = sessionClock(wib("2026-08-25T06:30"));
   assert.equal(beforeOpen.nowWib, "2026-08-25 06:30");
-  assert.equal(beforeOpen.nowUtc, "2026-08-24T23:30:00Z", "06:30 WIB is the PREVIOUS day in UTC");
+  assert.equal(beforeOpen.nowUtc, "2026-08-24T23:30:00.000Z", "06:30 WIB is the PREVIOUS day in UTC");
   assert.equal(beforeOpen.nextOpenWib, "2026-08-25 09:00");
-  assert.equal(beforeOpen.nextOpenUtc, "2026-08-25T02:00:00Z");
+  assert.equal(beforeOpen.nextOpenUtc, "2026-08-25T02:00:00.000Z");
 });
 
 test("every phase that reports a next open reports both clocks", () => {
@@ -146,7 +146,7 @@ test("every phase that reports a next open reports both clocks", () => {
     const c = sessionClock(wib(at));
     assert.ok(c.nextOpenWib, `${at} should have a next open`);
     assert.ok(c.nextOpenUtc, `${at} (${c.phase}) reports nextOpenWib without nextOpenUtc`);
-    assert.match(c.nextOpenUtc, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, at);
+    assert.match(c.nextOpenUtc, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, at);
     // The two readings must be seven hours apart — the definition of WIB, asserted rather than
     // assumed, so a future offset edit cannot silently desynchronise the pair.
     const utc = Date.parse(c.nextOpenUtc);
@@ -155,9 +155,14 @@ test("every phase that reports a next open reports both clocks", () => {
   }
 });
 
-test("nowUtc carries no milliseconds, matching how payloads are stamped", () => {
+test("the UTC fields are a plain toISOString, the way the rest of the server stamps time", () => {
+  // Not a cosmetic preference. These fields exist so a reading can be compared against the
+  // server's other output without thinking about it, and a second timestamp format is the problem
+  // this issue removes rather than a polish on it — every other stamp in src/ is a raw
+  // toISOString(), milliseconds included.
   const c = sessionClock(new Date("2026-08-25T03:00:14.789Z"));
-  assert.equal(c.nowUtc, "2026-08-25T03:00:14Z");
+  assert.equal(c.nowUtc, "2026-08-25T03:00:14.789Z");
+  assert.equal(c.nowUtc, new Date("2026-08-25T03:00:14.789Z").toISOString());
 });
 
 test("the daemon's polling window is wider than any single session", () => {

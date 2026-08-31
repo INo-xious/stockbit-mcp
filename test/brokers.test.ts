@@ -363,6 +363,16 @@ test("names: a code the directory carries gains its house, one absent from it do
   assert.equal(rows[1].netValueIdr, -50, "the figures are untouched either way");
 });
 
+test("names: the join normalizes the row's code, which the wire does not", async () => {
+  // The two sides arrive differently normalized. A directory code has passed `isCode` and is upper
+  // case by construction; a summary row's `code` is `netbs_broker_code` verbatim off the wire. A
+  // raw join would lose the name for a lower-case row and lose it SILENTLY — indistinguishable
+  // from a broker the directory has never heard of.
+  const { rows } = await withBrokerNames([{ code: "yp" }, { code: " cc " }]);
+  assert.equal(rows[0].name, "Mirae Asset Sekuritas Indonesia");
+  assert.equal(rows[1].name, "Mandiri Sekuritas");
+});
+
 test("names: a directory that cannot be read costs the names, never the numbers", async () => {
   directoryStatus = 500;
   const { rows, resolution } = await withBrokerNames([{ code: "YP", netValueIdr: 100 }]);

@@ -148,6 +148,10 @@ test("usage is generated from the table, top level and per command", () => {
   for (const name of Object.keys(T)) assert.ok(top.includes(name), name);
   assert.match(top, /Unknown flags are an error, never ignored/);
   assert.match(top, /Extra note\./);
+  // Every bin answers `--version`, so every bin's usage has to say so. It is asked of the BIN, not
+  // of a command, so it cannot live in a CommandTable — and a flag the validator accepts while the
+  // generated help stays silent is exactly the drift this generator exists to prevent.
+  assert.match(top, /Run `mybin --version` \(or -v\) for the installed version\./);
 
   const one = formatUsage("mybin", T, "go");
   assert.match(one, /Usage: mybin go <target> \[flags\]/);

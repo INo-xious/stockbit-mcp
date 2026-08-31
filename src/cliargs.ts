@@ -280,7 +280,14 @@ export function formatUsage(bin: string, commands: CommandTable, cmd?: string, e
     lines.push(`  ${label(name).padEnd(width)}  ${commands[name].summary}`);
     lines.push(...flagLines(commands[name], `  ${" ".repeat(width)}  `));
   }
-  lines.push("", `Run \`${bin} <command> --help\` for one command. Unknown flags are an error, never ignored.`);
+  lines.push(
+    "",
+    `Run \`${bin} <command> --help\` for one command. Unknown flags are an error, never ignored.`,
+    // Named here rather than in each bin's table because `--version` is not a flag OF a command —
+    // it is asked of the bin, before any command word. Leaving it out is the drift this generated
+    // usage exists to prevent: all five bins answer it, and the help text has to say so.
+    `Run \`${bin} --version\` (or -v) for the installed version.`,
+  );
   if (epilogue?.length) lines.push("", ...epilogue);
   return lines.join("\n") + "\n";
 }

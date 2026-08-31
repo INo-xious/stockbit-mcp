@@ -109,9 +109,17 @@ function formatWib(wib: Date, minutesOverride?: number): string {
   return `${date} ${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
 }
 
-/** ISO-8601 to the second. Trailing milliseconds are noise on a clock that counts in minutes. */
+/**
+ * ISO-8601, exactly as every other timestamp in this server is stamped.
+ *
+ * A raw `toISOString()`, milliseconds and all. Trimming them to `…:14Z` looks tidier and was the
+ * first thing tried here, but it would have made this the only bespoke timestamp format in the
+ * tree — against 37 raw `toISOString()` sites — and the entire point of these fields is that a
+ * reading can be compared against the server's other output without thinking about it. A second
+ * format is the problem this issue exists to remove, not a polish on it.
+ */
 function iso(instant: Date): string {
-  return instant.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return instant.toISOString();
 }
 
 /**
