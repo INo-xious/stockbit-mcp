@@ -254,6 +254,12 @@ GET /company-price-feed/prices/close?symbol={SYMBOL}&interval=1
 ```
 This is the intraday price/volume source for the alert engine's Stage 2.
 
+**No time channel is known on this row, and none is synthesized.** The series is ordered, not
+timestamped, and IDX breaks midday, so index × interval is not wall-clock time. Whatever else the
+row carries comes back by name in `unmapped.sampleKeys` (`src/core/pricefeed.ts`) — one live call
+against a symbol with a session will settle whether a clock reading is in there under another key.
+The `prices` elements are STRINGS: an unparseable one is reported as `null`, never as `0`.
+
 ### 4f. Price performance (multi-timeframe) [CONFIRMED]
 ```
 GET /company-price-feed/price-performance/{SYMBOL}
@@ -285,6 +291,11 @@ the web UI's statement/period toggles).
 ```
 GET /corpaction/{action}?symbol={SYMBOL}      (~18KB; action segment varies)
 ```
+Ex-date spelling, from the 2026-08-31 field report (reported, not re-captured here): a cash-dividend
+row carried `dividend_exdate` beside `dividend_cumdate` / `dividend_recdate` / `dividend_paydate`.
+`EX_DATE_KEYS` in `src/core/corpaction.ts` probes it first and reports, per row, which key it read.
+The `stock_dividend` leg's spelling is still unknown — `stock_dividend_exdate` is a candidate in
+that list purely as an extrapolation and is named in the output only if it ever matches.
 
 ### 4k. Seasonality [EXISTS — needs year]
 ```

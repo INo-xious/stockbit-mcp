@@ -119,6 +119,32 @@ the mapping. A working request is not a settled field map.
 `autoreject_*`. `iepiev` in particular is worth a look during the pre-opening auction (08:45 WIB) —
 a previous pass listed it as "unobserved" rather than absent.
 
+### `company_profile` percentages — and `symbol_search`'s row shape
+
+Two things a live call must settle, both surfaced by the 2026-08-31 field report.
+
+**`company_profile`.** A shareholder block was reported as
+`{name, value: "3.24 M", percentage: "<0.0001%"}`, and the arithmetic disagrees: 3,242,500 of
+40.69 B is 7.9688e-5. That single observation fits two readings, and nothing here can choose between
+them, so the body is passed through untouched and `src/core/company.ts` records why.
+
+| | What is guessed | How it fails |
+|---|---|---|
+| The unit of `"3.24 M"` | *miliar* (1e9) or *million* (1e6) | 1000× either way. `MAGNITUDES` in `src/live/promptspec.ts` already refuses a bare `"m"` for this reason. |
+| What `percentage` means | A percent, or a fraction wearing a `%` | 7.9688e-5 is `<0.0001` as a FRACTION and `0.0080%` as a PERCENT, so "wrong by 80×" and "correct, differently scaled" are the same bytes. |
+| Whether an unrounded count is there | A raw share count beside the rounded display string | Without one, any recomputation starts from 3,240,000 rather than 3,242,500 and is approximate before it begins. |
+
+Until all three are captured, nothing computes a percentage. If one is ever added it must be a NEW
+key naming both inputs, never a rewrite of the upstream field, and not inside `getCompanyProfile`,
+which is ONE request by contract.
+
+**`symbol_search`.** The row shape was never recorded, and the mapping was wrong. `/search/v2` rows
+came back as `{id, name, desc, url}` — the ticker in `id` and in `name`, and `url` as
+`symbol/<TICKER>` — with no `symbol` key at all, so the tool reported 8 of 8 rows ticker-less and
+`symbols: []` on a query that matched eight emittens. Now read from the `symbol/<TICKER>` link, with
+`readFrom` on each hit. What a live call should still confirm: whether any emitten row links by
+something other than `symbol/<TICKER>`, and whether a ticker ever arrives lowercased.
+
 ### The whole trading host — `carina.stockbit.com`
 
 **Nothing on this host has been observed live.** Reading it needs a securities session, which needs
