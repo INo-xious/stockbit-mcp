@@ -111,25 +111,35 @@ export function registerCompanyTools(define: Definer): void {
     "Share ownership composition for a ticker, as Stockbit's shareholder chart reports it.\n" +
       "Costs TWO upstream requests: the endpoint is gated behind a one-shot token that is minted and " +
       "spent immediately. The token is never returned to you and cannot be reused.\n" +
-      "value_year selects the year of the reading; omit it for whatever the endpoint defaults to. " +
-      "shareholder_type filters the ownership category, but its accepted values have NOT been " +
-      "observed — an unrecognised one is more likely to come back as an empty chart than as an " +
-      "error, so omit it unless you already know the vocabulary.\n" +
-      ROW_SOURCE_NOTE +
-      "\n" +
-      "Pending verification: where the minted token belongs on the wire is unconfirmed; it is sent " +
-      "as a `token` query parameter. An auth error here on a session that works elsewhere means that " +
-      "placement is wrong, not that the account lacks access.",
+      "It answers with SERIES, not rows: `series` holds one line per ownership class — Local and " +
+      "Foreign on the readings taken so far — each point carrying `label` (\"Mar 26\"), `percent` " +
+      "and `unixDate`. `rows` is therefore empty with `source: null`, which is this server saying " +
+      "it found nothing row-shaped rather than saying the issuer has no data; the whole payload is " +
+      "under `extra` either way.\n" +
+      "`value_year` is a WINDOW LENGTH IN MONTHS, not a calendar year — 12 means one year, and " +
+      "asking for 36 returns 37 monthly points. Stockbit's own client offers 5, 12, 24 and 36, and " +
+      "the answer's `timeframes` names the set the endpoint actually served, with its own labels. " +
+      "Passing a year like 2025 is a request for a 2025-month window and is not what you meant.\n" +
+      "`shareholder_type` filters the ownership category. `all` is what Stockbit's own client sends; " +
+      "the rest of that one field's vocabulary is unconfirmed, so an unrecognised value is more " +
+      "likely to come back as an empty chart than as an error.\n" +
+      "Costs TWO upstream requests, and the second is authorised by the FIRST rather than by your " +
+      "session: the minted token goes in a raw Authorization header. That is why this tool " +
+      "answered 401 `WebViewToken.FromContext: User Not Found` for as long as it existed — it was " +
+      "sending the token as a query parameter, which this endpoint does not read. Settled by " +
+      "capturing Stockbit's own request on 2026-09-01.\n" +
+      "For the holder-by-holder register rather than the aggregate split, company_profile's " +
+      "`shareholder_one_percent` names each holder with percentages and the scrip/scripless split.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       value_year: z.coerce
         .number()
         .optional()
-        .describe("Four-digit year of the reading, e.g. 2025. Omit for the endpoint's default"),
+        .describe("Window length in MONTHS, not a year. 5, 12, 24 or 36; 12 = one year."),
       shareholder_type: z
         .string()
         .optional()
-        .describe("Ownership category filter. Accepted values are unobserved — omit unless known"),
+        .describe("Ownership category filter. `all` is what Stockbit sends; the rest is unobserved."),
     },
     async (a) =>
       runTool(() =>
@@ -139,6 +149,10 @@ export function registerCompanyTools(define: Definer): void {
           a.shareholder_type as string | undefined,
         ),
       ),
+    // Settled by a live call on 2026-09-01, once the token placement was captured: the chart came
+    // back and every field this tool names — the series, their points, the timeframe vocabulary —
+    // was read out of that response.
+    { evidence: "observed" },
   );
 
   define.read(

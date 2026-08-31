@@ -63,9 +63,9 @@ Prices, depth, movers, bars, the session clock.
 | `orderbook` | read | Full order-book depth ladder for a symbol. | Observed | symbol* |
 | `price_bands` | read | The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock. | Observed | symbol* |
 | `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, raw |
-| `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, grouped |
-| `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, limit, chart |
-| `broker_flow_intraday` | read | The intraday running-trade chart for one symbol, returned exactly as Stockbit sends it. | Projected | symbol* |
+| `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, order_by, grouped |
+| `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
+| `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
 | `market_movers` | read | Market movers from the order-trade service. | Projected | limit |
 | `top_stocks` | read | The order-trade service's top-stock list. | Projected | limit |
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
@@ -112,7 +112,7 @@ Profile, ownership, management, peers, ratings.
 | `company_profile` | read | The company description block for a ticker: what the business does, and whatever else Stockbit's profile endpoint carries. | Projected | symbol*, include_typed_info, include_fin_items, emitten_type |
 | `company_contact` | read | Registered address, phone, website and investor-relations contacts for a ticker, verbatim. | Projected | symbol* |
 | `company_subsidiaries` | read | The subsidiaries and associates Stockbit lists for a ticker. | Observed | symbol* |
-| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Projected | symbol*, value_year, shareholder_type |
+| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Observed | symbol*, value_year, shareholder_type |
 | `classification` | read | Stockbit's company classification. | Observed | scope |
 | `index_members` | read | The constituents of an IDX index or special board: IDX30, LQ45, KOMPAS100, and the monitoring / syariah lists. | Observed | index_code*, limit* |
 | `sector_companies` | read | The companies in one IDX sector. | Projected | sector_id* |

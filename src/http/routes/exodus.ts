@@ -135,11 +135,19 @@ export const EXODUS_ROUTES = {
    * READS: it creates nothing and returns a value used immediately by the GET below.
    */
   shareholdersToken: { host: "exodus", method: "POST", template: "/emitten-metadata/shareholders/token", auth: "main" },
+  /**
+   * Authorised by the token `shareholdersToken` mints, NOT by the main session bearer.
+   *
+   * Captured from Stockbit's own client on 2026-09-01: it sends `Authorization: <the 64-hex minted
+   * token>`, raw and with no `Bearer` prefix, and no `token` query parameter at all. Sending the
+   * main bearer here — which is what `auth: "main"` did — answers
+   * `401 WebViewToken.FromContext: User Not Found` on a session where everything else works.
+   */
   shareholdersChart: {
     host: "exodus",
     method: "GET",
     template: "/emitten-metadata/shareholders/:symbol/chart",
-    auth: "main",
+    auth: "webviewToken",
   },
   emittenClassification: { host: "exodus", method: "GET", template: "/emitten/classification", auth: "main" },
   emittenClassificationCompany: {
@@ -176,10 +184,19 @@ export const EXODUS_ROUTES = {
   /* --------------------------- insider & ownership --------------------------- */
   insiderTransactions: { host: "exodus", method: "GET", template: "/insider/company/majorholder", auth: "main" },
   insiderOwnership: { host: "exodus", method: "GET", template: "/insider/majorholder/ownership", auth: "main" },
+  /**
+   * The segment is a NUMERIC company id, not a ticker.
+   *
+   * Sending the ticker — which this route did until the segment was renamed — answers
+   * `400 {"error":"Invalid company id"}`. `normalizeSymbol` would have accepted `"134"` quite
+   * happily (`^[A-Z0-9]{1,12}$` matches digits), so naming the segment `symbol` was not a harmless
+   * label: it was a validator that agreed with the wrong value. `companyId` refuses a ticker here
+   * instead, and `getShareholdingCompanies` resolves the ticker before it gets this far.
+   */
   shareholdingCompanies: {
     host: "exodus",
     method: "GET",
-    template: "/insider/shareholding/companies/:symbol",
+    template: "/insider/shareholding/companies/:companyId",
     auth: "main",
   },
   shareholdingInvestors: {

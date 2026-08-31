@@ -39,6 +39,7 @@ import { StockbitError } from "../http/errors.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
+import { resolveCompanyId } from "./emitten.js";
 import { normalizeTradeDate } from "./dates.js";
 
 /* -------------------------------- vocabularies -------------------------------- */
@@ -574,6 +575,11 @@ export interface Shareholding {
   entriesFrom: string | null;
   /** How many entries it held, or null when there was no such key. Zero is a real, empty answer. */
   entryCount: number | null;
+  /**
+   * Companies mode only: the numeric company id the ticker resolved to, which is what the request
+   * was actually addressed with. It is also the `root_id` for `mode="network"`.
+   */
+  companyId?: string;
   /** Network mode only: how many nodes the graph carried, or null when there was no `nodes` key. */
   nodeCount?: number | null;
   /** The payload, unprojected. */
@@ -594,16 +600,54 @@ function firstArray(
   return { from: null, count: null };
 }
 
-/** Who holds a company. */
+/**
+ * Who holds a company.
+ *
+ * ## The path segment is a company id, and it was being sent a ticker
+ *
+ * `shareholding(mode="companies", symbol="DEWA")` answered `400 {"error":"Invalid company id"}`,
+ * because the ticker went straight into the `{symbol}` segment of
+ * `/insider/shareholding/companies/{…}` and the endpoint wants Stockbit's internal numeric id
+ * (`"134"` for DEWA). There was no argument that made this mode work.
+ *
+ * The id is resolved here rather than exposed as a parameter, so the documented interface stays a
+ * ticker — which is what a caller has. `resolveCompanyId` is the same reader `watchlist_add`
+ * already uses, and it reads the id off the `emitten/{symbol}/info` row that `quote` is written
+ * against, so the id itself is observed rather than guessed. It costs one extra request, cached.
+ *
+ * `subject` stays the ticker that was asked for; `companyId` says what was actually sent, because
+ * a caller comparing this against `mode="network"` needs the id and would otherwise have to go and
+ * find it a second time.
+ */
 export async function getShareholdingCompanies(symbol: string): Promise<Shareholding> {
   const sym = normalizeSymbol(symbol);
   return cached(`shareholding:companies:${sym}`, CACHE.keystatsTtlMs, async () => {
+    const companyId = await resolveCompanyId(sym);
+    // Tested for being a NUMBER, not merely for being present. The quote row reads its id through
+    // `z.coerce.string()`, and `String(null)` is the four-character string "null" — truthy, and
+    // exactly the kind of value that reaches a URL looking like an id. The transport's numeric
+    // validator would refuse it a moment later, but with a message about a malformed id rather
+    // than the true one: Stockbit has no id for this ticker.
+    if (companyId === undefined || !/^[0-9]+$/.test(companyId)) {
+      throw new StockbitError(
+        "not_found",
+        `${sym} has no company id on Stockbit, and this endpoint is addressed by company id rather ` +
+          `than by ticker, so the register cannot be read for it. Check the ticker.`,
+      );
+    }
     const data = unwrap(
-      await getJson("shareholdingCompanies", { segments: { symbol: sym } }),
+      await getJson("shareholdingCompanies", { segments: { companyId } }),
       "shareholding companies",
     );
     const { from, count } = firstArray(data, ["holders", "holdings"]);
-    return { mode: "companies" as const, subject: sym, entriesFrom: from, entryCount: count, data };
+    return {
+      mode: "companies" as const,
+      subject: sym,
+      companyId,
+      entriesFrom: from,
+      entryCount: count,
+      data,
+    };
   });
 }
 

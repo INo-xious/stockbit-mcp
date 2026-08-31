@@ -26,6 +26,14 @@ export type AuthKind =
   | "refreshMain"
   | "refreshSecurities"
   | "refreshEipo"
+  /**
+   * A one-shot token minted by another route and presented RAW in `Authorization` — no `Bearer`.
+   *
+   * The odd one out: its credential does not come from a token store, so the call site supplies it
+   * and the transport still decides where it goes. Captured from Stockbit's own client on
+   * 2026-09-01, which sends `Authorization: <64 hex>` and no `token` query parameter at all.
+   */
+  | "webviewToken"
   | "none";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";

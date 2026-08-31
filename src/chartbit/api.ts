@@ -33,6 +33,7 @@ import {
   decodeLayoutContent,
   encodeDrawings,
   encodeLayoutContent,
+  normalizeDrawingSymbol,
   type Drawing,
   type StoredSource,
 } from "./codec.js";
@@ -193,6 +194,8 @@ const DrawingsResponse = z
 export interface ChartDrawings {
   layoutId?: string;
   chartId?: string;
+  /** True when `chartId` was decoded out of the layout rather than supplied by the caller. */
+  chartIdDerived?: boolean;
   symbol?: string;
   /** What the user has actually drawn, projected for reading. */
   drawings: Drawing[];
@@ -207,32 +210,181 @@ export interface DrawingsQuery {
   symbol?: string;
 }
 
+/** A plain object, or undefined. Arrays and null are not records for the walks below. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Walk the `content` chain to whichever level actually holds the TradingView state.
+ *
+ * A stored layout read live on 2026-09-01 is THREE objects deep:
+ * `{id, name, resolution, symbol, content}` wraps
+ * `{…, charts_symbols, content}` wraps the state carrying `charts`. Reading only the top level —
+ * which is what `docs/research/chartbit-layout-format.md` documents, because it recorded the
+ * innermost object alone — finds nothing on every real layout.
+ *
+ * Walked rather than indexed at a fixed depth: the two shapes on record differ by two levels
+ * already, so hard-coding either one is how this breaks again the next time Stockbit wraps it.
+ */
+function layoutState(layout: unknown): Record<string, unknown> | undefined {
+  let node = asRecord(layout);
+  for (let depth = 0; node && depth < 8; depth++) {
+    if (Array.isArray(node.charts)) return node;
+    const next = asRecord(node.content);
+    if (!next) return undefined;
+    node = next;
+  }
+  return undefined;
+}
+
+/** `charts_symbols` arrives as a JSON STRING: `{"1":{"symbol":"IHSG"}}`. */
+function chartSymbols(layout: unknown): Record<string, { symbol?: unknown }> | undefined {
+  let node = asRecord(layout);
+  for (let depth = 0; node && depth < 8; depth++) {
+    const raw = node.charts_symbols;
+    if (typeof raw === "string") {
+      try {
+        return asRecord(JSON.parse(raw)) as Record<string, { symbol?: unknown }> | undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    const asObject = asRecord(raw);
+    if (asObject) return asObject as Record<string, { symbol?: unknown }>;
+    const next = asRecord(node.content);
+    if (!next) return undefined;
+    node = next;
+  }
+  return undefined;
+}
+
+/**
+ * The chart id inside a decoded layout, which is the id this endpoint is addressed by.
+ *
+ * TradingView stores the drawings of each chart in a layout separately — that is what the
+ * `saveload_separate_drawings_storage` feature flag on the chart page means — and addresses them
+ * by the chart's own id within the layout, not by the layout id. A layout read live carries
+ * `charts: [{ …, "chartId": "1" }]`, so the id this project needed has been sitting inside a
+ * payload it already reads.
+ *
+ * A layout holding SEVERAL charts is resolved by `symbol` when one is given, using the layout's own
+ * `charts_symbols` map (`{"1":{"symbol":"IHSG"}}`) — the same thing the chart page uses to know
+ * which chart shows what. Without a symbol, or when the map does not name one, nothing is returned
+ * rather than picking a chart: each chart has its own drawing store, so guessing would answer with
+ * a different chart's lines and look entirely successful doing it.
+ */
+export function chartIdFromLayout(layout: unknown, symbol?: string): string | undefined {
+  const charts = layoutState(layout)?.charts;
+  if (!Array.isArray(charts) || charts.length === 0) return undefined;
+
+  const idOf = (chart: unknown): string | undefined => {
+    const id = asRecord(chart)?.chartId;
+    return typeof id === "string" || typeof id === "number" ? String(id) : undefined;
+  };
+
+  const wanted = symbol === undefined ? undefined : normalizeSymbol(symbol);
+  const symbols = chartSymbols(layout);
+  /** What the layout says a chart shows, or undefined when it does not say. */
+  const symbolOf = (id: string | undefined): string | undefined => {
+    const named = id === undefined ? undefined : symbols?.[id]?.symbol;
+    return typeof named === "string" ? normalizeDrawingSymbol(named).toUpperCase() : undefined;
+  };
+
+  if (charts.length === 1) {
+    const only = idOf(charts[0]);
+    const shows = symbolOf(only);
+    // A single chart is NOT automatically the caller's chart. The account's real "Bandarmology"
+    // layout holds one chart showing IHSG; asking it for BBRI used to derive that chart's id and
+    // hand back IHSG's hand-drawn levels under `symbol: "BBRI"` — the exact confusion the
+    // multi-chart branch below refuses to create, arrived at through the easy path instead.
+    // Checked only when the layout actually names a symbol: the older flat shape carries no map,
+    // and refusing everything on a layout that never claimed a symbol would help nobody.
+    if (wanted !== undefined && shows !== undefined && shows !== wanted) return undefined;
+    return only;
+  }
+
+  if (wanted !== undefined) {
+    const matches = charts.map(idOf).filter((id) => id !== undefined && symbolOf(id) === wanted);
+    // One match or none. Two charts on the same symbol are two different drawing stores and the
+    // layout says nothing about which the caller means.
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+  return undefined;
+}
+
 /**
  * The line tools on a chart.
  *
- * All three filters are optional because the endpoint's own client sends different combinations
- * depending on where the user is; sending an empty one rather than omitting it would narrow the
- * answer to nothing, so absent arguments are dropped by the transport rather than sent blank.
+ * ## This endpoint answered 400 to every argument this project could send
+ *
+ * A 2026-08-31 field report called it with no arguments, with `{symbol}`, and with `{symbol,
+ * layout_id}` — a layout id taken from `chartbit_layouts`, which succeeded on the same credential
+ * at the same moment — and got `400 "Silahkan Periksa permintaan"` every time. The docstring here
+ * used to say all three filters were optional because "the endpoint's own client sends different
+ * combinations", which was read out of the bundle and is contradicted by every call anyone has
+ * made: without a chart id there is no combination that answers.
+ *
+ * So `chart_id` is derived rather than demanded. Given a `layoutId`, the layout is read and its
+ * chart id decoded out of it, which costs one extra request and is the only way this server can
+ * produce the value at all — nothing else it returns carries one. Given neither, the call is
+ * refused here rather than spent on a 400 whose Indonesian text says nothing actionable.
+ *
+ * What is still NOT settled: whether `layout_id` + `chart_id` is the pair the endpoint wants. That
+ * needs a live call, and until one is made the error says which arguments were tried.
  */
 export async function getChartDrawings(query: DrawingsQuery = {}): Promise<ChartDrawings> {
   const symbol = query.symbol ? normalizeSymbol(query.symbol) : undefined;
   const key = `chartbit:drawings:${query.layoutId ?? "-"}:${query.chartId ?? "-"}:${symbol ?? "-"}`;
   return cached(key, CACHE.defaultTtlMs, async () => {
+    const chartId = query.chartId ?? (query.layoutId ? await deriveChartId(query.layoutId, symbol) : undefined);
+    if (!chartId) {
+      throw new StockbitError(
+        "invalid_param",
+        query.layoutId
+          ? `Chart layout ${query.layoutId} does not name one chart to read, so the drawings ` +
+            `endpoint cannot be addressed from it${symbol ? ` for ${symbol}` : ""}. Pass chart_id ` +
+            `explicitly. A layout holding several charts stores each one's drawings separately, ` +
+            `and this happens when the layout's own symbol map names no chart for your symbol, or ` +
+            `names more than one — either way, choosing for you would answer with a different ` +
+            `chart's lines and look like it worked.`
+          : "chartbit drawings needs a chart_id, and the only way to get one is a layout_id: pass " +
+            "layout_id (from chartbit_layouts) and the chart id is decoded out of the layout. " +
+            "Every call without one has answered 400, including with a valid layout_id and symbol " +
+            "alone, so this is refused rather than sent.",
+      );
+    }
     const body = await getJson("chartbitDrawings", {
-      params: { layout_id: query.layoutId, chart_id: query.chartId, symbol },
+      params: { layout_id: query.layoutId, chart_id: chartId, symbol },
     });
     const parsed = parseOr(DrawingsResponse, body, "chartbit drawings");
     const content = parsed.data?.data?.content ?? parsed.data?.content ?? null;
     const { drawings, stored } = decodeDrawings(content);
     return {
       layoutId: query.layoutId,
-      chartId: query.chartId,
+      chartId,
+      /** True when the id was decoded out of the layout rather than supplied by the caller. */
+      chartIdDerived: query.chartId === undefined,
       symbol,
       drawings,
       sources: stored.sources,
       groups: stored.groups,
     };
   });
+}
+
+/**
+ * Read one layout and decode its chart id.
+ *
+ * A decode failure comes back as `undefined` rather than throwing: the caller's next step is the
+ * same either way — say what could not be produced — and a raw decode error here would replace an
+ * actionable message with one about zip bytes.
+ */
+async function deriveChartId(layoutId: string, symbol?: string): Promise<string | undefined> {
+  const layout = await getChartLayout(layoutId);
+  return chartIdFromLayout(layout.layout, symbol);
 }
 
 /* ------------------------------------ templates ------------------------------------ */
