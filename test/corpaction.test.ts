@@ -254,6 +254,75 @@ test("a payload that is not a row list is reported as unrecognized, not as empty
   assert.deepEqual(page.raw, { message: "maintenance", code: 7 });
 });
 
+/* ------------------------------ date-order sanity ------------------------------ */
+
+test("a record date after the meeting it gates is reported, with both keys named", async () => {
+  // The row a 2026-08-31 field report found: a RUPS on 2020-01-15 carrying rups_eligible_date
+  // 2020-11-19, ten months after the meeting it decides attendance for. Upstream's defect; passing
+  // it on looking clean is this server's.
+  reply = () => ({
+    data: [
+      { symbol: "DEWA", date: "2020-01-15", rups_eligible_date: "2020-11-19", agenda: "RUPSLB" },
+      { symbol: "DEWA", date: "2021-06-10", rups_eligible_date: "2021-05-20" },
+    ],
+  });
+  const page = await getCorpactions("rups", "DEWA");
+  assert.deepEqual(page.suspectDates, [
+    { row: 0, earlierKey: "rups_eligible_date", earlier: "2020-11-19", laterKey: "date", later: "2020-01-15" },
+  ]);
+  // The row itself is handed over untouched — nothing is repaired, and no marker is added to it.
+  assert.deepEqual(page.rows[0], {
+    symbol: "DEWA",
+    date: "2020-01-15",
+    rups_eligible_date: "2020-11-19",
+    agenda: "RUPSLB",
+  });
+});
+
+test("a clean page carries no suspectDates key at all", async () => {
+  // Absent rather than empty, so a reader cannot mistake "nothing was out of order" for a report
+  // that ran. Most rows carry neither side of any pair and are never compared.
+  const page = await getCorpactions("dividend", "BBRI");
+  assert.equal("suspectDates" in page, false);
+  const conversions = await getStockConversion("BUKA");
+  assert.equal("suspectDates" in conversions, false, "a bare `date` is never one side of a pair");
+});
+
+test("equal, missing and unreadable dates are not suspicions", async () => {
+  reply = () => ({
+    data: [
+      // Collapsed onto one day: far likelier a feed rounding them together than an impossibility.
+      { cum_date: "2026-04-02", ex_date: "2026-04-02" },
+      // One side absent. Absent is not wrong, the same rule as absent is not zero.
+      { cum_date: "2026-04-02" },
+      // Present but not a date. A pair that could not be read is not evidence of anything.
+      { cum_date: "2026-04-05", ex_date: "-" },
+    ],
+  });
+  const page = await getCorpactions("dividend");
+  assert.equal("suspectDates" in page, false);
+});
+
+test("the dividend calendar checks the same orderings, indexed after the sort", async () => {
+  // It has to: the tool description steers callers here for dividends, so a check that fired only
+  // on `corporate_actions` would claim a coverage this path does not have.
+  reply = (pathname) =>
+    pathname.includes("stock_dividend")
+      ? { data: [] }
+      : {
+          data: [
+            { symbol: "X", ex_date: "2026-01-10", recording_date: "2026-01-02" },
+            { symbol: "X", ex_date: "2026-05-10", recording_date: "2026-05-12" },
+          ],
+        };
+  const calendar = await getDividendCalendar("X");
+  // Sorted newest ex-date first, so the offending row moved from index 0 to index 1.
+  assert.equal(calendar.rows[1].exDate, "2026-01-10");
+  assert.deepEqual(calendar.suspectDates, [
+    { row: 1, earlierKey: "ex_date", earlier: "2026-01-10", laterKey: "recording_date", later: "2026-01-02" },
+  ]);
+});
+
 test("the cache key holds every argument that changes the answer", async () => {
   await getCorpactions("dividend", "BBRI", 5);
   await getCorpactions("dividend", "BBRI", 5);
