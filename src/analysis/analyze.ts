@@ -442,7 +442,11 @@ export function brokerFlowPillar(input: BrokerFlowInput): Pillar {
   // the bar window would be a quiet lie, and with no bars at all it read "over the last 0 sessions".
   const direction = score > 10 ? "money entering" : score < -10 ? "money leaving" : "roughly balanced";
   const over = foreignRead
-    ? `over the last ${readable.length} sessions`
+    ? readable.length === recent.length
+      ? `over the last ${recent.length} sessions`
+      // NOT "the last N": the unreadable sessions can be the newest ones, and "over the last 12"
+      // would then describe a window ending eight sessions ago. Say how many of how many.
+      : `over ${readable.length} readable of the last ${recent.length} sessions`
     : concentrationRead
       ? `from broker concentration over ${describeWindow(s)}`
       : "";

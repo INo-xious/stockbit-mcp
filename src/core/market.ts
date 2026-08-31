@@ -26,7 +26,7 @@
 import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { normalizeTradeDate, todayIso } from "./dates.js";
@@ -52,30 +52,6 @@ async function readData(
 }
 
 /* ------------------------------ shared small parsers ------------------------------ */
-
-/**
- * Read a number that may arrive as a number, a numeric string, or a `{value}` / `{raw}` wrapper.
- *
- * All of those shapes are live in this API — `src/core/pricefeed.ts` found the auto-rejection bands
- * arriving as `{"value":"3,910"}` with bare numbers beside them — so a chart point's OHLCV is read
- * the same defensive way. `Number("")` being `0` is the specific trap: an empty string must come
- * back as absent, never as a free zero.
- */
-function numberish(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return null;
-    const parsed = Number(trimmed.replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (value && typeof value === "object") {
-    const wrapper = value as Record<string, unknown>;
-    if ("value" in wrapper) return numberish(wrapper.value);
-    if ("raw" in wrapper) return numberish(wrapper.raw);
-  }
-  return null;
-}
 
 /**
  * Jakarta's offset from UTC. IDX does not observe daylight saving, so this is a constant and not a
@@ -342,7 +318,7 @@ function projectSeries(
 
   const read = (row: Record<string, unknown>, field: PointField): number | null => {
     const key = mapped[field];
-    return key === undefined ? null : numberish(row[key]);
+    return key === undefined ? null : wireNumber(row[key]);
   };
 
   const bars: Bar[] = located.rows.map((row, index) => {
@@ -385,7 +361,7 @@ function projectSeries(
 
   const warnings: string[] = [];
   // Absent is not the only way to be flat. /charts/:symbol/daily sends open/high/low/volume as
-  // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `numberish("")` returns null
+  // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `wireNumber("")` returns null
   // — every bar silently took its close for all three and nothing said so. A field that reads null
   // on every row is as unusable as one that was never there, and the caller has to be told.
   const unreadable = (field: PointField): boolean =>

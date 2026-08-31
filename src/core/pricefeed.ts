@@ -6,7 +6,7 @@
  */
 import { z } from "zod";
 import { getJson } from "../http/client.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 
@@ -89,7 +89,7 @@ export function shapeIntraday(
     // `numberish`, not `Number`: it is the reader this file already documents as the guard against
     // an empty string becoming a free zero, and it lives 100 lines below for the bands. Each
     // element goes through it as `unknown`, so a number, a string or neither are all handled there.
-    prices: Array.isArray(raw) ? (raw as unknown[]).map((value) => numberish(value)) : [],
+    prices: Array.isArray(raw) ? (raw as unknown[]).map((value) => wireNumber(value)) : [],
     unmapped: { count: sampleKeys.length, sampleKeys },
     note: INTRADAY_NOTE,
   };
@@ -220,29 +220,6 @@ const BAND_FIELDS = {
   fnet: "foreignNet",
 } as const;
 
-/**
- * Read a numeric field that may arrive as a number, a string, a `{value}` wrapper or a `{raw}` one.
- *
- * All four shapes are live in this API — the bands use `{value: "3,910"}` while the foreign figures
- * beside them are bare numbers. Thousands separators are stripped, and `Number("")` being 0 is
- * exactly the trap this guards: an empty string must be "absent", not a free zero.
- */
-function numberish(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return null;
-    const parsed = Number(trimmed.replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (value && typeof value === "object") {
-    const wrapper = value as Record<string, unknown>;
-    if ("value" in wrapper) return numberish(wrapper.value);
-    if ("raw" in wrapper) return numberish(wrapper.raw);
-  }
-  return null;
-}
-
 /** Extract the bands from an already-fetched orderbook payload. Pure, so it is testable offline. */
 export function extractBands(symbol: string, payload: unknown): PriceBands {
   const source = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
@@ -251,7 +228,7 @@ export function extractBands(symbol: string, payload: unknown): PriceBands {
   const missing: string[] = [];
 
   for (const [wire, name] of Object.entries(BAND_FIELDS)) {
-    const parsed = numberish(source[wire]);
+    const parsed = wireNumber(source[wire]);
     out[name] = parsed;
     if (parsed === null) missing.push(wire);
     else found.push(wire);

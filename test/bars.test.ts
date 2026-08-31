@@ -11,6 +11,7 @@ import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/index.ts";
 import { toBar } from "../src/core/bars.ts";
+import { StockbitError } from "../src/http/errors.ts";
 import { MAX_PAGES, ROWS_PER_PAGE, getBars } from "../src/core/bars.ts";
 
 function farFutureJwt(): string {
@@ -152,6 +153,30 @@ test("an EMPTY field on the wire is absent, which is where the zero used to be m
   assert.equal(bar.foreignSell, null);
   assert.equal(bar.netForeign, null, "the field this whole rule exists for");
   assert.equal(bar.close, 1005, "and the price is untouched");
+});
+
+test("a row with an unreadable PRICE is refused, never returned with a price of zero", async () => {
+  // A statistic this row did not carry is absent; a PRICE it did not carry makes the row unusable.
+  // `z.coerce.number().parse(null)` is 0, and a close of 0 is not a quiet degradation: an alert
+  // rule `close < 100` fires on it, `backtest` divides by an entry price of zero, and the chart
+  // collapses its axis. One bad bar poisons every indicator over the series containing it.
+  for (const bad of [null, "", "  ", false, [], "abc"] as unknown[]) {
+    rowsOverride = [{ date: day(0), open: 1000, high: 1010, low: 990, close: bad, volume: 1200 }];
+    clearCache();
+    await assert.rejects(
+      () => getBars({ symbol: "BBRI", bars: 1 }),
+      (err: unknown) => err instanceof StockbitError && err.kind === "schema_drift" && /close/.test(err.message),
+      `a close of ${JSON.stringify(bad)} must be refused`,
+    );
+  }
+});
+
+test("a real zero PRICE is still a price, because zero is a value the wire can mean", async () => {
+  // The rule is what the value IS. A numeric 0 was sent; refusing it would be this server
+  // overriding the response rather than declining to invent one.
+  rowsOverride = [{ date: day(0), open: 0, high: 0, low: 0, close: 0, volume: 1 }];
+  const series = await getBars({ symbol: "BBRI", bars: 1 });
+  assert.equal(series.bars[0].close, 0);
 });
 
 test("a thousands-separated wire number is read, not reported as unreadable", async () => {

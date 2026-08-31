@@ -28,7 +28,7 @@
 import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput } from "./dates.js";
@@ -116,7 +116,10 @@ const Party = z
   .object({
     code: z.string(),
     type: z.string().optional(),
-    amount: z.coerce.number().optional(),
+    // NOT `z.coerce.number()`. `Number("")` and `Number(null)` are 0, so coercing here would
+    // destroy the absence before `mapParty` could report it — the same defect this project fixed
+    // in `src/core/bars.ts`. The raw value is read by `wireNumber` instead.
+    amount: z.unknown(),
   })
   .passthrough();
 
@@ -225,7 +228,7 @@ export function brokerDistributionTtlFor(
 const mapParty = (p: z.output<typeof Party>): DistributionCounterparty => ({
   code: p.code,
   investorType: p.type,
-  amount: p.amount ?? null,
+  amount: wireNumber(p.amount),
 });
 
 /**

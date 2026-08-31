@@ -260,6 +260,46 @@ test("a party the response gave no amount for is absent, not a party that traded
   assert.equal(d.topBuyers[0].distributedWith[1].amount, null);
 });
 
+test("an EMPTY amount is absent too, which is where the zero used to be manufactured", async () => {
+  // The omitted-key case above is the ONE empty shape that reached `?? null`. Every other one —
+  // "", null, "  ", false, [] — was turned into the figure 0 by `z.coerce.number()` first, so a
+  // broker with no amount was drawn as a hairline reading "traded almost nothing" and
+  // `brokersWithoutAmount` reported 0. Same defect as `src/core/bars.ts`, one module over.
+  for (const empty of ["", null, "  ", false, []] as unknown[]) {
+    bodyOverride = {
+      data: {
+        date_info: "2026-08-01",
+        by_value: {
+          top_broker_buy: [{ detail: { code: "AK", type: "Asing", amount: empty }, distribute_to: [] }],
+          top_broker_sell: [],
+        },
+        by_volume: { top_broker_buy: [], top_broker_sell: [] },
+      },
+    };
+    clearCache();
+    const d = await getBrokerDistribution({ symbol: "GOTO", date: "2026-08-01" });
+    assert.equal(d.topBuyers[0].amount, null, `an amount of ${JSON.stringify(empty)} is absent, not zero`);
+  }
+});
+
+test("a thousands-separated amount is read rather than refusing the whole call", async () => {
+  // `Number("1,234")` is NaN, which under the old coerced schema failed the parse and threw
+  // schema_drift for the entire response. Stockbit is on record sending `{"value":"3,910"}`.
+  bodyOverride = {
+    data: {
+      date_info: "2026-08-01",
+      by_value: {
+        top_broker_buy: [{ detail: { code: "AK", type: "Asing", amount: "1,234" }, distribute_to: [] }],
+        top_broker_sell: [],
+      },
+      by_volume: { top_broker_buy: [], top_broker_sell: [] },
+    },
+  };
+  clearCache();
+  const d = await getBrokerDistribution({ symbol: "GOTO", date: "2026-08-01" });
+  assert.equal(d.topBuyers[0].amount, 1234);
+});
+
 test("VOLUME selects the other block and reports the unit as LOTS, not shares", async () => {
   clearCache();
   nextStatus = 200;

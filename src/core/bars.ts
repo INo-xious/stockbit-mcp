@@ -28,9 +28,10 @@
  */
 import { z } from "zod";
 import { getJson } from "../http/client.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
+import { StockbitError } from "../http/errors.js";
 import { normalizeTradeDate, todayIso } from "./dates.js";
 
 /** Rows the endpoint returns per page. Not configurable — `limit` is rejected. */
@@ -59,15 +60,18 @@ export interface Bar {
    * Every one of them used to be `?? 0`, which made "the field was absent" and "the figure really
    * was zero" the same bytes. On `netForeign` that is the difference between "foreigners were flat
    * today" and "we have no idea", and `analyze` read the first from a row that meant the second.
-   * The row schema marks all eight `.optional()` — that is this module's own admission that it does
-   * not know the field is always sent — and no live row shape for this route is recorded anywhere.
+   * The row schema carries all eight as `z.unknown()` and hands them to `wireNumber`, which is
+   * what keeps an empty wire value from arriving here as the figure zero. No live row shape for
+   * this route is recorded anywhere, which is why none of them is assumed present.
    *
    * `null` rather than an absent key: it keeps the shape stable for `deepEqual` and JSON round
    * trips, and it matches `PriceBands` and `Series` (`Array<number | null>`), which are the two
    * places in this codebase that already had to answer the same question.
    *
-   * `open`/`high`/`low`/`close` stay required: `projectSeries` refuses a row without a usable date
-   * or close outright, on the ground that a series with holes in it is worse than an error.
+   * `open`/`high`/`low`/`close` are always numbers, because a row that cannot yield one is REFUSED
+   * rather than projected — see `toBar`. That is the same call `projectSeries` makes in
+   * `src/core/market.ts`, on the same ground: a series with holes in it is worse than an error,
+   * since every average, pattern and backtest computed from it is quietly wrong rather than absent.
    */
   /** Lots (1 lot = 100 shares), matching the convention used elsewhere in this API. */
   volume: number | null;
@@ -98,13 +102,14 @@ export interface BarSeries {
 const Row = z
   .object({
     date: z.string(),
-    // OHLC stay REQUIRED and keep plain coercion. See the note on `Bar` — a row that cannot yield a
-    // price is a different problem from one missing a statistic, and it is not this change's to
-    // settle. Recorded in progress.md as an open finding.
-    open: z.coerce.number(),
-    high: z.coerce.number(),
-    low: z.coerce.number(),
-    close: z.coerce.number(),
+    // Read the same way as everything else rather than coerced. `z.coerce.number().parse(null)` is
+    // 0, and a PRICE of 0 is far worse than a statistic of 0: an alert rule `close < 100` fires on
+    // it, `backtest` divides by an entry price of zero, and the chart collapses its axis. A row
+    // that cannot yield a price is refused in `toBar`.
+    open: z.unknown(),
+    high: z.unknown(),
+    low: z.unknown(),
+    close: z.unknown(),
     // Deliberately NOT `z.coerce.number().optional()`. `z.coerce.number()` is `Number()`, and
     // `Number("")`, `Number(null)`, `Number("  ")`, `Number(false)` and `Number([])` are every one
     // of them 0 — so an empty field would reach `toBar` as the FIGURE ZERO and the absence would be
@@ -134,47 +139,45 @@ const Response = z
   .passthrough();
 
 /**
- * One optional wire number, or `null` when the response did not carry a usable one.
+ * Project one wire row onto `Bar`. Exported so the absence rules above are testable offline.
  *
- * The rule is what the value IS, not a list of empties: a number passes as itself, a string only
- * when it has non-space content, and everything else — `undefined`, `null`, `""`, `"  "`, `false`,
- * `[]` — is absent. `src/core/market.ts` names the same trap for its own reader, and the annotation
- * coordinates in `src/tools/register.ts` are the same rule at the tool boundary.
- *
- * A non-numeric string like `"abc"` is absent too rather than `NaN`: `NaN` is not a figure, and
- * every consumer would have to guard it separately. Thousands separators are stripped, because a
- * "1,234" that read as NaN would be a readable number reported as unreadable.
+ * Throws rather than emitting a price of zero. A statistic this row did not carry is reported
+ * absent; a PRICE it did not carry makes the row unusable, and one bad bar quietly poisons every
+ * indicator computed over the series that contains it.
  */
-function optionalNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  if (text === "") return null;
-  const parsed = Number(text.replace(/,/g, ""));
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/** Project one wire row onto `Bar`. Exported so the absence rules above are testable offline. */
 export function toBar(r: z.output<typeof Row>): Bar {
+  const price = (field: "open" | "high" | "low" | "close"): number => {
+    const value = wireNumber(r[field]);
+    if (value === null) {
+      throw new StockbitError(
+        "schema_drift",
+        `Historical bar for ${String(r.date)} has no usable ${field} (received ` +
+          `${JSON.stringify(r[field])}). The row is refused rather than returned with a price of 0.`,
+      );
+    }
+    return value;
+  };
+
+  const close = price("close");
   return {
     date: r.date,
-    open: r.open,
-    high: r.high,
-    low: r.low,
-    close: r.close,
+    open: price("open"),
+    high: price("high"),
+    low: price("low"),
+    close,
     // `average` keeps its fallback: substituting the close for a missing VWAP is a documented
     // approximation of the same quantity, not a number invented out of nothing. The eight below
     // have no such stand-in — there is nothing a missing foreign flow could sensibly be — so they
     // report absence instead of a zero nobody sent.
-    average: optionalNumber(r.average) ?? r.close,
-    volume: optionalNumber(r.volume),
-    value: optionalNumber(r.value),
-    frequency: optionalNumber(r.frequency),
-    change: optionalNumber(r.change),
-    changePercent: optionalNumber(r.change_percentage),
-    foreignBuy: optionalNumber(r.foreign_buy),
-    foreignSell: optionalNumber(r.foreign_sell),
-    netForeign: optionalNumber(r.net_foreign),
+    average: wireNumber(r.average) ?? close,
+    volume: wireNumber(r.volume),
+    value: wireNumber(r.value),
+    frequency: wireNumber(r.frequency),
+    change: wireNumber(r.change),
+    changePercent: wireNumber(r.change_percentage),
+    foreignBuy: wireNumber(r.foreign_buy),
+    foreignSell: wireNumber(r.foreign_sell),
+    netForeign: wireNumber(r.net_foreign),
   };
 }
 

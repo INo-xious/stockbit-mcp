@@ -58,3 +58,46 @@ export function parseOr<T>(schema: z.ZodType<T>, body: unknown, context: string)
 
 /** Common ID types can arrive as string or number; coerce to a string output. */
 export const StrOrNum = z.coerce.string();
+
+/* ------------------------------- reading a number ------------------------------- */
+
+/**
+ * One wire number, or `null` when the response did not carry a usable one.
+ *
+ * ## Why this is not `z.coerce.number()`
+ *
+ * `z.coerce.number()` is `Number()`, and `Number("")`, `Number(null)`, `Number("  ")`,
+ * `Number(false)` and `Number([])` are every one of them **0**. A schema that coerces therefore
+ * destroys the difference between "the field was absent" and "the figure was zero" before any
+ * projection can report it — and on this API that difference is the whole answer: "no foreign flow
+ * today" and "we have no idea" are not the same claim. This project has now made that mistake in
+ * four places, so there is one reader and everything uses it.
+ *
+ * ## The rule
+ *
+ * What the value IS, never a list of empties — enumerating them missed `"  "` once already. A
+ * number passes as itself; a string passes only with non-space content; a `{value}` or `{raw}`
+ * wrapper is unwrapped, because both are live on this API (`src/core/pricefeed.ts` measured
+ * `{"value":"3,910"}` beside bare numbers); everything else is absent.
+ *
+ * A non-numeric string is `null` rather than `NaN`: `NaN` is not a figure, and every consumer would
+ * otherwise need its own guard. Thousands separators are stripped — a `"1,234"` read as unreadable
+ * would be worse than reading it. NOTE that makes `"1,5"` 15, not 1.5: the Indonesian decimal comma
+ * is not distinguishable from a thousands separator without knowing the field's magnitude, and this
+ * project has never seen a decimal comma on a numeric wire field.
+ */
+export function wireNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") return null;
+    const parsed = Number(trimmed.replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value && typeof value === "object") {
+    const wrapper = value as Record<string, unknown>;
+    if ("value" in wrapper) return wireNumber(wrapper.value);
+    if ("raw" in wrapper) return wireNumber(wrapper.raw);
+  }
+  return null;
+}

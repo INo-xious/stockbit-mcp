@@ -390,8 +390,11 @@ export function registerTools(
         // zero, which would draw a hairline that reads as "traded almost nothing". What was
         // dropped is COUNTED and reported below; a diagram missing a broker in silence is the
         // failure this whole change is about.
+        // `Number.isFinite`, matching `renderSankey`'s own test. `typeof === "number"` admits
+        // Infinity — JSON.parse("1e400") produces it — which the renderer then drops silently,
+        // so the party would be counted as charted and drawn as nothing.
         const drawable = <T extends { amount: number | null }>(p: T): p is T & { amount: number } =>
-          typeof p.amount === "number";
+          typeof p.amount === "number" && Number.isFinite(p.amount);
         const brokers = d.topBuyers.filter(drawable).map((b) => ({
           ...b,
           distributedWith: b.distributedWith.filter(drawable),
@@ -456,9 +459,10 @@ export function registerTools(
               dataType: d.dataType,
               marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
-              // DISTINCT brokers the response carried no amount for, on either side or as a
-              // counterparty, so they are absent from the diagram. Not the same as a broker that
-              // traded nothing — that one is drawn, at zero width.
+              // DISTINCT brokers the response carried no usable amount for, on either side or as
+              // a counterparty. Not the same as a broker that traded nothing — that one is drawn.
+              // A broker unreadable in one row and readable in another is counted here AND drawn,
+              // because the flow that could be read is still a flow.
               brokersWithoutAmount,
               savedTo,
               stockbitUrl: stockbit.url,
@@ -574,7 +578,7 @@ export function registerTools(
       "A rule that fires is recorded so it does not fire again for the same bar.\n" +
       "`reason` on a rule that did not fire distinguishes 'condition-false' from 'warming-up' — the " +
       "second means the comparison could not be made, which is NOT the same as a no. It covers two " +
-      "situations, and `leftValue: null` with `barsNeeded` already satisfied tells them apart: not " +
+      "situations: not " +
       "enough history yet, which more bars fix; or an operand the SERIES DOES NOT CARRY — not every " +
       "response includes volume, value or foreign flow, and where a bar is missing the field it is " +
       "absent rather than zero. The second never resolves by waiting, however much history arrives, " +
