@@ -1,6 +1,20 @@
-# One line per identity that should display under the maintainer's canonical name.
+# One line per identity that should display under its owner's canonical name.
 #
-# The 2026-08-25 history rewrite removed the other two identities this file used to need
-# (a GitHub web-UI commit and an old local-hostname author), so only the name normalisation
-# is left. Garit32's identity is deliberately untouched — they are a separate contributor.
+# This file only affects what GIT shows — `git log`, `git shortlog`, `git blame`. GitHub does not
+# read it: its contributor graph and auto-generated release notes come from the commit author
+# EMAIL and which account has that email verified. So consolidating an identity here and
+# consolidating it on GitHub are two separate jobs, and this file can only do the first.
+#
+# The 2026-08-25 history rewrite removed two identities this file used to need (a GitHub web-UI
+# commit and an old local-hostname author), leaving the name normalisation below.
+
 Marvel Harisson <im.marvel.harisson@gmail.com> INo-xious <im.marvel.harisson@gmail.com>
+
+# Darren Wang, confirmed 2026-08-31 to be one person behind three git identities. `xthom2001` is a
+# secondary GitHub account (created 2026-04-26, no repositories); `Garit32` is the main one and the
+# canonical form below is its noreply address, so the real address stays out of the public log.
+#
+# The earlier note here called Garit32 "a separate contributor". That was wrong, and it is exactly
+# the kind of thing a mailmap should record once rather than have each reader re-derive.
+Darren Wang <100551715+Garit32@users.noreply.github.com> Darren <xthom2001@gmail.com>
+Darren Wang <100551715+Garit32@users.noreply.github.com> Garit32 <valorantgovol1@gmail.com>
