@@ -89,25 +89,37 @@ const ANNOTATION_REQUIRES = new Map<string, string>([
 ]);
 
 /**
- * One annotation coordinate. An explicit `null` or `""` means ABSENT, not zero.
+ * One annotation coordinate. Anything empty means ABSENT, not zero.
  *
- * `z.coerce.number()` is `Number()`, and `Number(null)` and `Number("")` are both `0` — so a caller
- * that sent `price: null` ("I have no price for this one") had a coordinate invented for it at the
- * price 0. Nothing downstream could tell that apart from a real zero: the marker was counted in
+ * `z.coerce.number()` is `Number()`, and `Number()` answers **0** for a whole family of values that
+ * carry no number at all: `null`, `""`, `"  "`, `false`, `[]`. So a caller that sent `price: null`
+ * ("I have no price for this one") had a coordinate invented for it at the price 0, and nothing
+ * downstream could tell that apart from a real zero — the annotation was counted in
  * `annotationsDrawn`, and the 0 then dragged the price scale to the axis origin, squashing forty
  * sessions of a 4,000-level chart into three pixels of the 340px price panel while the summary
  * reported it drawn and `annotationsNotDrawn: []`. Absence has to survive the schema, because past
  * it the handler has only a number.
  *
+ * So the test is what the value IS, not which empties were thought of: a number passes as itself,
+ * a string passes only if it has non-space content, and everything else is absent. Enumerating
+ * `null` and `""` was the first attempt and it missed `"  "` — `Number("  ")` is 0 too, and
+ * `"  " === ""` is false, which put the whole defect back through a different empty value.
+ *
  * An EXPLICIT `0` is untouched and still widens the scale: a caller asking for a level at zero is
  * asking for that, and refusing it would be this server inventing policy instead of a number.
+ * `"abc"` still fails validation rather than passing as absent — it is a value, just not a number,
+ * and silently dropping it would hide a caller's typo.
  *
  * A factory rather than one shared instance: `zodToJsonSchema` emits the second USE of a shared
  * schema as `{"$ref": "#/properties/price"}`, so reusing one object would change the JSON Schema
  * every client reads. A fresh instance per field keeps that published shape byte-identical to what
  * a plain `z.coerce.number().optional()` produced.
  */
-const coordinate = () => z.preprocess((v) => (v === null || v === "" ? undefined : v), z.coerce.number().optional());
+const coordinate = () =>
+  z.preprocess(
+    (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? v : undefined),
+    z.coerce.number().optional(),
+  );
 
 /**
  * A strategy from tool arguments: a preset, or a hand-written condition pair.

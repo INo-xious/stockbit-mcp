@@ -335,6 +335,27 @@ test("a null price on a level is refused, not drawn at zero", async () => {
   assert.equal(withNull.svg, withNone.svg, "and the chart is exactly the one with no annotation at all");
 });
 
+test("every value Number() reads as zero without carrying one is absent, not a coordinate", async () => {
+  // Enumerating `null` and `""` was the first attempt at this and it missed the rest of the family:
+  // `Number("  ")`, `Number(false)` and `Number([])` are all 0 too, so each put the whole defect
+  // back through a different empty value. The rule is what the value IS, not a list of empties.
+  const none = await chart({ show_levels: false });
+  for (const price of [null, "", "  ", "\t", false, [], [null]] as unknown[]) {
+    const { summary, svg } = await chart({ show_levels: false, annotations: [{ kind: "level", price }] });
+    assert.equal(summary.annotationsDrawn.level, 0, `${JSON.stringify(price)} carries no price, so no level is drawn`);
+    assert.equal(summary.annotationsNotDrawn.length, 1, `${JSON.stringify(price)} is reported rather than dropped`);
+    assert.equal(svg, none.svg, `${JSON.stringify(price)} left the price scale exactly where it was`);
+  }
+});
+
+test("a string that is a number still works, and one that is not still fails", async () => {
+  // The other edge of the same rule: trimming decides ABSENCE, not validity. "1005" is a coordinate;
+  // "abc" is a value that is not a number, and dropping it silently would hide a caller's typo.
+  const { summary } = await chart({ show_levels: false, annotations: [{ kind: "level", price: "1005" }] });
+  assert.equal(summary.annotationsDrawn.level, 1);
+  await assert.rejects(() => chart({ show_levels: false, annotations: [{ kind: "level", price: "abc" }] }));
+});
+
 test("an EXPLICIT zero is still a coordinate and still widens the scale", async () => {
   // The other side of the same rule. Refusing a real 0 would be this server inventing policy; only
   // `null` and `""` change meaning, and this is what stops the fix above from over-reaching.
