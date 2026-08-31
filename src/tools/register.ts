@@ -9,7 +9,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "../core/index.js";
-import { withBrokerNames } from "../core/brokers.js";
+import { withBrokerNamesAll } from "../core/brokers.js";
 import { normalizeAnnotationKeys } from "../chartbit/shapes.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
@@ -274,8 +274,11 @@ export function registerTools(
         if (!a.resolve_names) return summary;
         // New arrays, never a mutation: `summary` is the shared cache entry, and writing names into
         // its rows would hand them to every later caller that did not ask for them.
-        const buyers = await withBrokerNames(summary.buyers);
-        const sellers = await withBrokerNames(summary.sellers);
+        //
+        // Both sides through ONE directory read. Two calls would be invisible on success (the
+        // second is a cache hit) and would double the damage on failure: two failed requests, and
+        // two identical notes of which only one is kept.
+        const [buyers, sellers] = await withBrokerNamesAll([summary.buyers, summary.sellers]);
         const note = buyers.resolution.note ?? sellers.resolution.note;
         return {
           ...summary,

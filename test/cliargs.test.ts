@@ -177,7 +177,7 @@ const BARE: CommandSpec = {
 };
 
 /** Run the bare gate, collecting whatever it writes. */
-function bare(argv: string[], version?: string): { result: string; out: string } {
+function bare(argv: string[], version = "9.9.9"): { result: string; out: string } {
   let out = "";
   const result = gateBareCommandLine("mybin", BARE, argv, (text) => (out += text), version);
   return { result, out };
@@ -202,12 +202,13 @@ test("isVersionToken knows both spellings and nothing else", () => {
   }
 });
 
-test("a bin that declares no version refuses to invent one", () => {
-  // `--version` is declared in BARE, so this is the "accepted but unanswerable" case: with no
-  // version supplied the gate must not print an empty line as though it were an answer.
-  const r = bare(["--version"]);
-  assert.equal(r.result, "ok");
-  assert.equal(r.out, "");
+test("the version is a REQUIRED argument, so --version can never fall through to running", () => {
+  // It was optional once. That meant a bin declaring `--version` in its flags but forgetting to
+  // pass one would accept the token, return "ok" and START — the exact "an unknown token is
+  // treated as absent" failure this module exists to close, reintroduced one level up. The
+  // signature now makes that unwritable, which is why this asserts the TYPE rather than a branch.
+  assert.equal(gateBareCommandLine.length, 5, "every parameter is required; none may be dropped");
+  assert.equal(bare(["--version"]).result, "version", "and the token is always answered");
 });
 
 test("help wins over version, exactly as it wins over everything else", () => {

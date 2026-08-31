@@ -153,7 +153,13 @@ function release(ticket: Ticket): void {
   grant(next);
 }
 
-/** Whether a chart operation is running, and which. For `status` and for tests. */
+/**
+ * Whether a chart operation is running, and which.
+ *
+ * Used by the tests today. Named and exported rather than reached for through module state because
+ * "is the chart busy, and with what" is the question a queued caller's error already answers, and
+ * the same answer belongs on `status` the day someone wants it there.
+ */
 export function driverLockState(): { busy: boolean; what?: string; heldForMs?: number; queued: number } {
   return {
     busy: holder !== null,

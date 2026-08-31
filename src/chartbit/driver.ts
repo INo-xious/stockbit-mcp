@@ -240,8 +240,11 @@ export interface DrawResult {
   ours: OurDrawingStatus[];
   /** Recorded drawings the chart no longer holds. Empty when the reading was clean. */
   gone: OurDrawingStatus[];
-  /** How many entries in `ours` the chart confirmed. Absent reading means every entry is unconfirmed. */
-  onChart: number;
+  /**
+   * How many entries in `ours` the chart confirmed. ABSENT when `reconciled` is false — a zero
+   * there would report "the chart holds none of them" for a chart nobody managed to look at.
+   */
+  onChart?: number;
   /** False when the live chart could not be enumerated, so no `presence` above is a reading. */
   reconciled: boolean;
   notes: string[];
@@ -349,7 +352,8 @@ export async function drawAnnotations(options: DrawOptions): Promise<DrawResult>
       replaced,
       ours,
       gone,
-      onChart,
+      // Omitted, not zeroed, when there was no reading — see `Reconciliation.onChart`.
+      ...(onChart === undefined ? {} : { onChart }),
       reconciled,
       notes: note ? [...session.notes, note] : session.notes,
     };

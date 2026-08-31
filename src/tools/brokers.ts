@@ -35,8 +35,11 @@ export function registerBrokerTools(define: Definer): void {
       "codes out of a broker_summary rather than building a table. The filter is applied HERE, to " +
       "the cached directory, not by the exchange — so it costs no extra request, and asking for " +
       "two codes and asking for all 112 are the same one fetch. `filteredTo` echoes what you " +
-      "asked for and `notFound` lists any code no row carried, so a missing house is stated " +
-      "rather than left as a shorter list you have to notice.\n" +
+      "asked for and `notFound` lists any code no row ON THAT PAGE carried, so a missing house " +
+      "is stated rather than left as a shorter list you have to notice. `notFound` is not proof " +
+      "the exchange has no such broker: with a narrowed `page`/`limit` it can simply be on " +
+      "another page, and a row whose key names this projection does not recognise lands there " +
+      "too — that is what `unmapped` counts.\n" +
       "Each entry carries `code` and `name` where a recognised key held them, " +
       "`readFrom` naming the wire key each was read from, and `row` with the entire raw row. If " +
       "`code` is undefined the projection did not recognise this row's key names — read `row` " +
@@ -257,8 +260,11 @@ export function registerBrokerTools(define: Definer): void {
         if (!a.resolve_names) return reading;
         // Only the two lists that are returned. `getBandarDetector` already slices them off a
         // sorted copy, so these are this call's own arrays and no cache entry is touched.
-        const accumulators = await brokers.withBrokerNames(reading.topAccumulators);
-        const distributors = await brokers.withBrokerNames(reading.topDistributors);
+        // Both lists through ONE directory read — see `withBrokerNamesAll`.
+        const [accumulators, distributors] = await brokers.withBrokerNamesAll([
+          reading.topAccumulators,
+          reading.topDistributors,
+        ]);
         const note = accumulators.resolution.note ?? distributors.resolution.note;
         return {
           ...reading,

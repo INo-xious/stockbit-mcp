@@ -215,6 +215,11 @@ function validateTokens(bin: string, cmd: string | undefined, spec: CommandSpec,
  * Help and version are answered HERE, before any caller can act, for the reason `gateCommandLine`
  * answers help first: the command you are asking ABOUT must never be the command that RUNS.
  *
+ * `version` is REQUIRED, and that is the point. It was optional once, which meant a bin declaring
+ * `--version` in its flags but forgetting to pass one would accept the token, fall through, and
+ * START — the exact "a token the parser does not know is treated as absent" failure this whole
+ * module exists to close, reintroduced one level up. A required parameter makes that unwritable.
+ *
  * @returns "help" or "version" when it has already written the answer, "ok" to proceed.
  * @throws {CliParseError} on an unknown flag or an unexpected positional.
  */
@@ -223,13 +228,13 @@ export function gateBareCommandLine(
   spec: CommandSpec,
   argv: readonly string[],
   write: (text: string) => void,
-  version?: string,
+  version: string,
 ): "help" | "version" | "ok" {
   if (argv.some(isHelpToken)) {
     write(formatBareUsage(bin, spec));
     return "help";
   }
-  if (version !== undefined && argv.some(isVersionToken)) {
+  if (argv.some(isVersionToken)) {
     write(`${version}\n`);
     return "version";
   }

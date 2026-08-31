@@ -308,13 +308,18 @@ export interface BrokerDirectory {
    */
   filteredTo?: string[];
   /**
-   * Codes that were asked for and that no row in the directory carried.
+   * Codes that were asked for and that no row ON THIS PAGE carried.
    *
    * Present only when `codes` was passed. An empty array is the good answer and is kept rather than
    * omitted, so "everything you asked for was found" is something the caller can READ instead of
-   * having to infer it from a length comparison. A code landing here is not necessarily wrong — the
-   * row may exist with its code under a key this projection does not recognise, which is what
-   * `unmapped` counts.
+   * having to infer it from a length comparison.
+   *
+   * "On this page", not "in the directory", and the distinction is load-bearing. The filter runs on
+   * whatever `page`/`limit` fetched, and the default pair covers the whole exchange in one page —
+   * but a caller who narrowed the page can land a real broker here purely because it sits on
+   * another one. Two other causes are equally not "no such broker": the row may exist with its code
+   * under a key this projection does not recognise (that is what `unmapped` counts), or the
+   * exchange may genuinely not list it. This field cannot tell them apart, so it does not try.
    */
   notFound?: string[];
 }
@@ -416,6 +421,20 @@ export interface NameResolution {
 export async function withBrokerNames<T extends { code: string; name?: string }>(
   rows: readonly T[],
 ): Promise<{ rows: T[]; resolution: NameResolution }> {
+  const [resolved] = await withBrokerNamesAll([rows]);
+  return resolved;
+}
+
+/**
+ * The same join over several row-sets at once, sharing ONE directory read.
+ *
+ * A broker summary has two sides, and resolving them with two calls meant two attempts at the
+ * directory. That is invisible when it succeeds — the second is a cache hit — and doubles the
+ * damage when it fails: two failed requests, and two identical notes of which the caller keeps one.
+ */
+export async function withBrokerNamesAll<T extends { code: string; name?: string }>(
+  sets: ReadonlyArray<readonly T[]>,
+): Promise<Array<{ rows: T[]; resolution: NameResolution }>> {
   let directory: BrokerDirectory;
   try {
     directory = await getBrokerDirectory();
@@ -423,34 +442,32 @@ export async function withBrokerNames<T extends { code: string; name?: string }>
     // The KIND only. A fetch failure quotes its URL, and a note is not worth widening what this
     // server is willing to write down.
     const why = err instanceof StockbitError ? err.kind : "unreadable";
-    return {
-      rows: [...rows],
-      resolution: {
-        resolved: false,
-        note:
-          `Broker names were not resolved (${why}): the directory could not be read. ` +
-          "The codes and every figure beside them are unaffected.",
-      },
+    const resolution: NameResolution = {
+      resolved: false,
+      note:
+        `Broker names were not resolved (${why}): the directory could not be read. ` +
+        "The codes and every figure beside them are unaffected.",
     };
+    return sets.map((rows) => ({ rows: [...rows], resolution }));
   }
 
   const byCode = new Map<string, string>();
   for (const entry of directory.brokers) {
     if (entry.code !== undefined && entry.name !== undefined) byCode.set(entry.code, entry.name);
   }
-  return {
-    // The two sides of this join do NOT arrive normalized the same way. A directory code has passed
-    // `isCode` (`/^[A-Z0-9]{2,4}$/`), so every key in the map is already upper case — but a summary
-    // row's `code` is `netbs_broker_code` straight off the wire (src/core/marketdetectors.ts:322),
-    // never trimmed and never upper-cased. Joining on the raw value would drop the name for any
-    // row the wire happened to send in lower case, and drop it SILENTLY: the row would look exactly
-    // like a broker the directory has never heard of.
+  // The two sides of this join do NOT arrive normalized the same way. A directory code has passed
+  // `isCode` (`/^[A-Z0-9]{2,4}$/`), so every key in the map is already upper case — but a summary
+  // row's `code` is `netbs_broker_code` straight off the wire (src/core/marketdetectors.ts), never
+  // trimmed and never upper-cased. Joining on the raw value would drop the name for any row the
+  // wire happened to send in lower case, and drop it SILENTLY: the row would look exactly like a
+  // broker the directory has never heard of.
+  return sets.map((rows) => ({
     rows: rows.map((row) => {
       const name = byCode.get(String(row.code).trim().toUpperCase());
       return name === undefined ? { ...row } : { ...row, name };
     }),
-    resolution: { resolved: true },
-  };
+    resolution: { resolved: true } as NameResolution,
+  }));
 }
 
 /**

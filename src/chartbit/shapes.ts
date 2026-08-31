@@ -417,7 +417,13 @@ export function normalizeAnnotationKeys<T>(annotation: T): T {
     if (!Object.hasOwn(row, snake)) continue;
     const snakeValue = row[snake];
     const camelValue = row[camel];
-    if (camelValue !== undefined && !Object.is(camelValue, snakeValue)) {
+    // `null` is "no value", not a disagreeing one: `annotations` is an open record, so a JSON null
+    // reaches here unfiltered, and `{from_date: "2026-01-02", fromDate: null}` is a caller who
+    // spelled it once — refusing that as a contradiction blames one that does not exist. And
+    // `Object.is` alone separates -0 from 0, which would print "(0) and (0) ... they disagree".
+    const camelIsSet = camelValue !== undefined && camelValue !== null;
+    const same = Object.is(camelValue, snakeValue) || camelValue === snakeValue;
+    if (camelIsSet && !same) {
       throw new StockbitError(
         "invalid_param",
         `An annotation carries both \`${camel}\` (${JSON.stringify(camelValue)}) and \`${snake}\` ` +
@@ -427,7 +433,9 @@ export function normalizeAnnotationKeys<T>(annotation: T): T {
     }
     out ??= { ...row };
     delete out[snake];
-    if (camelValue === undefined) out[camel] = snakeValue;
+    // A camelCase `null` is overwritten, not preserved: it carries no coordinate, and leaving it
+    // would hand `requireNumber` a null when the caller plainly supplied the value in snake_case.
+    if (!camelIsSet) out[camel] = snakeValue;
   }
   return (out ?? row) as T;
 }

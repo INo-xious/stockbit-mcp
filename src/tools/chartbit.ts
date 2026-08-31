@@ -244,9 +244,12 @@ export function registerChartbitTools(define: Definer): void {
       "chart, so do not report them to the user as drawn.\n" +
       "`ours` is everything this server has recorded drawing on this symbol, and each entry carries " +
       "`presence`: \"on-chart\" if the live chart still holds it, \"gone\" if it does not, and " +
-      "\"unconfirmed\" if the chart could not be enumerated. `onChart` counts the confirmed ones and " +
-      "`gone` lists the rest — a drawing can disappear because the page reloaded before a save, or " +
-      "because the user deleted it, and neither is an error. Report `onChart`, never `ours.length`.\n" +
+      "\"unconfirmed\" if the chart could not be read.\n" +
+      "CHECK `reconciled` FIRST. When it is true the chart was read: `onChart` counts what it still " +
+      "holds and `gone` lists what it does not — a drawing can vanish because the page reloaded " +
+      "before a save, or because the user deleted it, and neither is an error. When `reconciled` is " +
+      "false NOTHING was read: `onChart` is absent and `gone` is empty, and that means unknown, NOT " +
+      "zero and NOT nothing-lost. Say the chart could not be checked; do not report a count.\n" +
       "Entries are never removed by this check: the record is the only thing distinguishing this " +
       "server's drawings from the user's own, so a single bad reading must not be able to destroy it.",
     {
@@ -262,8 +265,10 @@ export function registerChartbitTools(define: Definer): void {
             '{kind:"fib",from_date,from_price,to_date,to_price,label?} — from/to are the START and ' +
             'END of the move being retraced (swing low then swing high for an up-move); the tool ' +
             'derives its own levels. ' +
-            'This is the SAME shape price_chart takes, so an array can be drawn locally to check ' +
-            'the geometry and then passed here unchanged. The camelCase spelling (fromDate, ' +
+            'The coordinate keys are the SAME ones price_chart takes, so an array written for it can ' +
+            'be drawn locally to check the geometry and then passed here unchanged. Note the ' +
+            'reverse is only true for level/zone/trend/marker: price_chart renders those four and ' +
+            'rejects channel, vline and fib. The camelCase spelling (fromDate, ' +
             'fromPrice, toDate, toPrice) is also accepted; passing both spellings of one coordinate ' +
             'with different values is an error rather than a silent choice between them.',
         ),

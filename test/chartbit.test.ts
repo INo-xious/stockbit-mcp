@@ -245,7 +245,11 @@ test("an unreadable chart is UNCONFIRMED, which is not the same as an empty one"
   // loss that never happened.
   const unread = reconcileOurDrawings(LEDGER, null, "the page would not answer");
   assert.equal(unread.reconciled, false);
-  assert.equal(unread.onChart, 0);
+  // ABSENT, not zero. Zero here is a measurement — "the chart holds none of them" — and it is the
+  // most alarming thing this type can say; reporting it for a chart nobody looked at is the
+  // "never invent a number" rule broken on the one field that matters most.
+  assert.equal(unread.onChart, undefined);
+  assert.equal("onChart" in unread, false, "the key itself must be absent, not set to undefined");
   assert.deepEqual(unread.gone, [], "nothing may be called gone on a reading that was never taken");
   assert.ok(unread.ours.every((d) => d.presence === "unconfirmed"));
   assert.equal(unread.note, "the page would not answer");
@@ -254,6 +258,24 @@ test("an unreadable chart is UNCONFIRMED, which is not the same as an empty one"
   assert.equal(empty.reconciled, true);
   assert.equal(empty.gone.length, 3);
   assert.equal(empty.note, undefined);
+});
+
+test("LIST_SHAPES reports a widget it cannot ask as NOT-READY, never as an empty chart", () => {
+  // The bug this closes: the script opened `chart.getAllShapes ? chart.getAllShapes() : []`, so a
+  // widget without that API answered `{ready: true, shapes: []}` — indistinguishable from a chart
+  // holding nothing. Once drawAnnotations began reconciling against this list, that turned "the
+  // widget cannot be asked" into the positive claim "every drawing you just made is gone".
+  //
+  // Asserted on the SOURCE because the failing state needs a widget missing one method, which the
+  // fixture deliberately provides. The prologue's other four guards all report a reason; this was
+  // the only one that answered with a fabricated reading.
+  assert.match(LIST_SHAPES, /typeof chart\.getAllShapes !== "function"/);
+  assert.match(LIST_SHAPES, /ready: false, reason: "no-getAllShapes"/);
+  assert.doesNotMatch(
+    LIST_SHAPES,
+    /chart\.getAllShapes \? chart\.getAllShapes\(\) : \[\]/,
+    "a missing API must not fall back to an empty list",
+  );
 });
 
 test("ids are compared as strings, since the widget's are not guaranteed to be", () => {
@@ -521,6 +543,40 @@ test("both spellings of ONE coordinate, disagreeing, is refused rather than pick
       return true;
     },
   );
+});
+
+test("a null alias is 'no value', not a disagreeing one", () => {
+  // `annotations` is an open record, so a JSON null reaches the normalizer unfiltered. Treating it
+  // as a rival value refuses `{from_date: "…", fromDate: null}` — a caller who spelled it once —
+  // by blaming a contradiction that does not exist.
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        from_date: "2026-01-02",
+        fromDate: null,
+        from_price: 1,
+        fromPrice: null,
+        to_date: "2026-08-24",
+        to_price: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(request.points[0].price, 1, "the snake_case value must win over a null camelCase one");
+});
+
+test("-0 and 0 are the same coordinate, not a contradiction", () => {
+  // `Object.is(-0, 0)` is false, which produced the self-refuting message "carries both (0) and
+  // (0) ... they disagree".
+  const [request] = toShapeRequests(
+    [
+      { kind: "trend", fromDate: "2026-01-02", fromPrice: -0, from_price: 0, toDate: "2026-08-24", toPrice: 2 } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].price, -0);
 });
 
 test("both spellings AGREEING is accepted — it is not a contradiction", () => {

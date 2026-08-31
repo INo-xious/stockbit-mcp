@@ -16,6 +16,7 @@ import {
   getBrokerActivity,
   getBrokerDirectory,
   withBrokerNames,
+  withBrokerNamesAll,
   getBrokerTop,
 } from "../src/core/brokers.ts";
 import { getBrokerSummary } from "../src/core/marketdetectors.ts";
@@ -398,6 +399,40 @@ test("names: the caller's rows are copied, never written into", async () => {
   const { rows } = await withBrokerNames(input);
   assert.equal(input[0].name, undefined, "the array handed in must come back unchanged");
   assert.notEqual(rows[0], input[0]);
+});
+
+test("names: several row-sets share ONE directory read, even when it fails", async () => {
+  // A summary has two sides. Resolving them with two calls is invisible on success — the second is
+  // a cache hit — and doubles the damage on failure: two failed requests, and two identical notes
+  // of which the caller keeps one.
+  directoryStatus = 500;
+
+  // Measured against a ONE-set call rather than against the literal number 1: the HTTP client
+  // retries a 500, so the raw request count is the retry budget, not the number of reads. What
+  // must hold is that two sides cost the same as one.
+  await withBrokerNames([{ code: "YP" }]);
+  const oneSet = requests.directory;
+  assert.ok(oneSet > 0, "the failing path must actually have tried");
+
+  clearCache();
+  requests.directory = 0;
+  const out = await withBrokerNamesAll([[{ code: "YP" }], [{ code: "CC" }]]);
+  assert.equal(requests.directory, oneSet, "two sides must cost one directory read, not two");
+  assert.equal(out.length, 2);
+  for (const side of out) {
+    assert.equal(side.resolution.resolved, false);
+    assert.ok(side.resolution.note);
+  }
+  assert.equal(out[0].rows[0].code, "YP");
+  assert.equal(out[1].rows[0].code, "CC");
+});
+
+test("names: the shared read resolves every set on success too", async () => {
+  const out = await withBrokerNamesAll([[{ code: "YP" }], [{ code: "CC" }, { code: "ZZ" }]]);
+  assert.equal(requests.directory, 1);
+  assert.equal(out[0].rows[0].name, "Mirae Asset Sekuritas Indonesia");
+  assert.equal(out[1].rows[0].name, "Mandiri Sekuritas");
+  assert.equal(out[1].rows[1].name, undefined, "a code the directory lacks still gets no name");
 });
 
 test("names: resolving reuses the cached directory rather than fetching per call", async () => {

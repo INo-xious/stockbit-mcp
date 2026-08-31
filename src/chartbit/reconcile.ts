@@ -49,8 +49,15 @@ export interface Reconciliation {
   ours: OurDrawingStatus[];
   /** Recorded drawings the chart no longer holds. Empty when the reading was clean. */
   gone: OurDrawingStatus[];
-  /** How many recorded drawings the chart confirmed. */
-  onChart: number;
+  /**
+   * How many recorded drawings the chart confirmed.
+   *
+   * ABSENT when no reading was taken — not zero. Zero here is a measurement meaning "the chart
+   * holds none of them", which is the most alarming thing this type can say, and reporting it for
+   * a chart nobody managed to look at would be inventing exactly the number that matters most.
+   * Check `reconciled` before reading it; when that is false there is no count to report.
+   */
+  onChart?: number;
   /** True when a live reading was taken. False means every `presence` is `unconfirmed`. */
   reconciled: boolean;
   /** Why no reading was taken, when none was. Absent on success. */
@@ -70,10 +77,11 @@ export function reconcileOurDrawings(
   note?: string,
 ): Reconciliation {
   if (liveIds === null) {
+    // No `onChart`. A zero here would read as "the chart holds none of your drawings" — a
+    // measurement — where the truth is that nobody was able to look.
     return {
       ours: ledger.map((d) => ({ ...d, presence: "unconfirmed" as const })),
       gone: [],
-      onChart: 0,
       reconciled: false,
       ...(note ? { note } : {}),
     };
