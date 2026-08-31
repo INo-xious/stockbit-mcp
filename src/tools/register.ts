@@ -11,7 +11,7 @@ import { z } from "zod";
 import * as core from "../core/index.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
-import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
+import { barIndexOn, plottedBars, renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
 import { defaultChartPath, defaultPinePath, writePine, writeSvg } from "../render/write.js";
 import {
   buildPineScripts,
@@ -67,6 +67,47 @@ import { registerAccountWriteTools } from "./account.js";
 
 /** Sub-panel titles, matching the periods `PANEL_PRESETS` declares. */
 const PANE_LABELS = { rsi: "RSI(14)", macd: "MACD(12,26,9)", atr: "ATR(14)" } as const;
+
+/**
+ * What each annotation kind needs to be drawable, named exactly as the `annotations` schema names
+ * it — and, PER KIND, which of those have to be finite numbers.
+ *
+ * Stated per kind because they differ: a marker needs two strings and no number at all, while a
+ * trend needs two of each. One shared "as finite numbers" suffix told a marker missing its `label`
+ * that a label was a number.
+ *
+ * A `Map`, not an object literal: `ANNOTATION_REQUIRES["constructor"]` on an object reads through
+ * `Object.prototype` and answers with a FUNCTION, so the `??` fallback beside it never fires and
+ * the reason field reads "needs function Object() { [native code] }". The enum on the schema means
+ * no such kind reaches here today; a lookup that cannot be walked into keeps it that way.
+ */
+const ANNOTATION_REQUIRES = new Map<string, string>([
+  ["level", "`price`, as a finite number"],
+  ["zone", "`from` and `to`, both as finite numbers"],
+  ["trend", "`from_date` and `to_date`, with `from_price` and `to_price` as finite numbers"],
+  ["marker", "`date` and `label`, and a finite `price` if one is given"],
+]);
+
+/**
+ * One annotation coordinate. An explicit `null` or `""` means ABSENT, not zero.
+ *
+ * `z.coerce.number()` is `Number()`, and `Number(null)` and `Number("")` are both `0` — so a caller
+ * that sent `price: null` ("I have no price for this one") had a coordinate invented for it at the
+ * price 0. Nothing downstream could tell that apart from a real zero: the marker was counted in
+ * `annotationsDrawn`, and the 0 then dragged the price scale to the axis origin, squashing forty
+ * sessions of a 4,000-level chart into three pixels of the 340px price panel while the summary
+ * reported it drawn and `annotationsNotDrawn: []`. Absence has to survive the schema, because past
+ * it the handler has only a number.
+ *
+ * An EXPLICIT `0` is untouched and still widens the scale: a caller asking for a level at zero is
+ * asking for that, and refusing it would be this server inventing policy instead of a number.
+ *
+ * A factory rather than one shared instance: `zodToJsonSchema` emits the second USE of a shared
+ * schema as `{"$ref": "#/properties/price"}`, so reusing one object would change the JSON Schema
+ * every client reads. A fresh instance per field keeps that published shape byte-identical to what
+ * a plain `z.coerce.number().optional()` produced.
+ */
+const coordinate = () => z.preprocess((v) => (v === null || v === "" ? undefined : v), z.coerce.number().optional());
 
 /**
  * A strategy from tool arguments: a preset, or a hand-written condition pair.
@@ -780,6 +821,12 @@ export function registerTools(
       "`annotations` draws your own levels, zones, trend lines and markers, which is how you show " +
       "the evidence behind an analysis. Drawing happens on this render only — nothing is written to " +
       "the Stockbit account.\n" +
+      "The result counts yours and this tool's apart. `autoLevels` is the support/resistance this " +
+      "tool detected itself (`show_levels`, on by default); `annotationsDrawn` counts YOUR " +
+      "annotations by kind — level, zone, trend, marker — so you can confirm each one landed. " +
+      "`annotationsNotDrawn` names the ones that did not, by their index in your array and why: a " +
+      "date outside the plotted window, or a kind that arrived without the fields it needs. It is " +
+      "never silently empty about something that was skipped.\n" +
       "Whenever this draws, it also opens the symbol's Stockbit chart in the user's own default " +
       "browser so they can compare the drawing against the live chart in their own session. " +
       "`stockbitUrl` in the result is that page; pass `open_in_stockbit: false` to skip opening it.",
@@ -799,13 +846,16 @@ export function registerTools(
         .array(
           z.object({
             kind: z.enum(["level", "zone", "trend", "marker"]),
-            price: z.coerce.number().optional(),
-            from: z.coerce.number().optional().describe("zone: one edge"),
-            to: z.coerce.number().optional().describe("zone: other edge"),
+            // Every coordinate goes through `coordinate`, which is where `null` and `""` stop being
+            // the number 0. See its comment: the guards in the handler below all rest on absence
+            // still being absence by the time they run.
+            price: coordinate(),
+            from: coordinate().describe("zone: one edge"),
+            to: coordinate().describe("zone: other edge"),
             from_date: z.string().optional().describe("trend: start session"),
-            from_price: z.coerce.number().optional(),
+            from_price: coordinate(),
             to_date: z.string().optional().describe("trend: end session"),
-            to_price: z.coerce.number().optional(),
+            to_price: coordinate(),
             date: z.string().optional().describe("marker: session"),
             label: z.string().optional(),
             color: z.string().optional(),
@@ -864,24 +914,40 @@ export function registerTools(
           });
         }
 
+        // The tool's own pivot levels and the caller's drawings are counted APART. Merged into one
+        // `levelsDrawn`, a caller that passed two levels was told three, and could not tell whether
+        // its own had landed at all — which is the only question that number is asked. The array
+        // handed to the renderer is unchanged in membership and order.
         const annotations: Annotation[] = [];
+        let autoLevels = 0;
         if (a.show_levels !== false) {
           for (const l of core.levels(bars, 5, 1.5).filter((x) => x.touches >= 2).slice(0, 5)) {
             annotations.push({ kind: "level", price: l.price, label: `${l.kind} ${l.price} (x${l.touches})` });
+            autoLevels++;
           }
         }
-        for (const raw of a.annotations ?? []) {
-          if (raw.kind === "level" && raw.price !== undefined) {
+
+        // Placement is asked of the same array the renderer plots, through the same helper. A
+        // second copy of `>=` here is how `trend: 1` starts describing a chart with no trend on it.
+        const plotted = plottedBars(bars);
+        const drawn = { level: 0, zone: 0, trend: 0, marker: 0 };
+        /** Accepted but not drawn: no bar holds its date, or its kind arrived without what it needs. */
+        const notDrawn: Array<{ index: number; kind: string; reason: string }> = [];
+        const window =
+          plotted.length === 0
+            ? "an empty window"
+            : `${plotted[0].date} → ${plotted[plotted.length - 1].date}`;
+        const noSession = (dates: string[]): string => `no session on or after ${dates.join(" or ")} in ${window}`;
+        const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+        for (const [index, raw] of (a.annotations ?? []).entries()) {
+          if (raw.kind === "level" && num(raw.price)) {
             annotations.push({ kind: "level", price: raw.price, label: raw.label, color: raw.color });
-          } else if (raw.kind === "zone" && raw.from !== undefined && raw.to !== undefined) {
+            drawn.level++;
+          } else if (raw.kind === "zone" && num(raw.from) && num(raw.to)) {
             annotations.push({ kind: "zone", from: raw.from, to: raw.to, label: raw.label, color: raw.color });
-          } else if (
-            raw.kind === "trend" &&
-            raw.from_date &&
-            raw.to_date &&
-            raw.from_price !== undefined &&
-            raw.to_price !== undefined
-          ) {
+            drawn.zone++;
+          } else if (raw.kind === "trend" && raw.from_date && raw.to_date && num(raw.from_price) && num(raw.to_price)) {
             annotations.push({
               kind: "trend",
               fromDate: raw.from_date,
@@ -891,9 +957,45 @@ export function registerTools(
               label: raw.label,
               color: raw.color,
             });
-          } else if (raw.kind === "marker" && raw.date && raw.label) {
+            // Still handed to the renderer — its prices widen the price scale either way — but a
+            // line with no bar to anchor to is not drawn, so it is not counted as drawn.
+            const missing = [raw.from_date, raw.to_date].filter((d) => barIndexOn(plotted, d) < 0);
+            if (missing.length === 0) drawn.trend++;
+            else notDrawn.push({ index, kind: "trend", reason: noSession(missing) });
+          } else if (raw.kind === "marker" && raw.date && raw.label && (raw.price === undefined || num(raw.price))) {
+            // `price` is OPTIONAL on a marker — without one the renderer anchors it to the bar's own
+            // high or low — so absence is valid and only a PRESENT non-finite price is refused. It
+            // is still a coordinate: `z.coerce.number()` admits `1e999` as Infinity, and `yOf` turns
+            // that into `points="521,-Infinity"` in an SVG this tool also writes to `savedTo`.
+            // Absence reaches here as `undefined` only because `coordinate` keeps `null` and `""`
+            // out of `Number()`; without that this test reads a caller's "no price" as the price 0.
             annotations.push({ kind: "marker", date: raw.date, price: raw.price, label: raw.label, color: raw.color });
+            if (barIndexOn(plotted, raw.date) >= 0) drawn.marker++;
+            else notDrawn.push({ index, kind: "marker", reason: noSession([raw.date]) });
+          } else {
+            // Reported, not silently dropped. This ladder used to fall through to nothing at all: a
+            // trend missing `to_price` drew nothing and said nothing, so the caller read a summary
+            // that never mentioned it. It is not an error — an existing caller's chart still
+            // renders — but it is no longer invisible.
+            notDrawn.push({
+              index,
+              kind: String(raw.kind),
+              reason: `needs ${ANNOTATION_REQUIRES.get(String(raw.kind)) ?? "the fields its kind documents, with every coordinate a finite number"}`,
+            });
           }
+        }
+        if (plotted.length === 0) {
+          // `renderCandles` answers an empty window with an explanatory card that carries no
+          // annotations at all. Counting any of them drawn is the same lie this fix removes.
+          for (const [index, raw] of (a.annotations ?? []).entries()) {
+            if (!notDrawn.some((n) => n.index === index)) {
+              notDrawn.push({ index, kind: String(raw.kind), reason: "the window has no plottable session, so nothing was drawn" });
+            }
+          }
+          drawn.level = 0;
+          drawn.zone = 0;
+          drawn.trend = 0;
+          drawn.marker = 0;
         }
 
         const svg = renderCandles({
@@ -940,7 +1042,12 @@ export function registerTools(
               lastClose: bars[bars.length - 1]?.close,
               overlays: overlays.map((o) => o.label),
               panels: panels.map((p) => p.label),
-              levelsDrawn: annotations.filter((x) => x.kind === "level").length,
+              // Apart on purpose: `autoLevels` is what this tool found, `annotationsDrawn` is what
+              // the CALLER asked for, per kind. One number covering both answered neither, and
+              // three of the four kinds were not counted at all.
+              autoLevels,
+              annotationsDrawn: drawn,
+              annotationsNotDrawn: notDrawn,
               truncated: series.truncated,
               savedTo,
               stockbitUrl: stockbit.url,
@@ -991,7 +1098,16 @@ export function registerTools(
 
   defMarket.read(
     "intraday_prices",
-    "Intraday minutely close-price series for a symbol (the basis for volume/price-move signals).",
+    "Intraday minutely close-price series for a symbol (the basis for volume/price-move signals).\n" +
+      "ORDERED, NOT TIMESTAMPED. The row carries no clock reading this server recognises and none " +
+      "is computed, so `prices[i]` cannot be placed on a clock. IDX breaks midday (Mon-Thu " +
+      "12:00-13:30 WIB, Fri 11:30-14:00 WIB), which means index x interval is NOT wall-clock time: " +
+      "two adjacent points can straddle a 90- or 150-minute gap. Any timing conclusion drawn from " +
+      "the index alone is unsound; `market_session` gives the clock.\n" +
+      "`interval` is what was ASKED FOR, not a measured spacing. A `null` in `prices` is a point " +
+      "the wire did not spell as a number — it is absent, not zero. `unmapped.sampleKeys` names " +
+      "the row's other keys, so a time channel under a different name would show up there. `note` " +
+      "carries the same warning for a caller reading the payload alone.",
     {
       symbol: z.string().describe("IDX ticker"),
       interval: z.coerce.number().optional().describe("Minutes per point (default 1)"),

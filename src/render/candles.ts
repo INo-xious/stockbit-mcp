@@ -38,6 +38,25 @@ export type Annotation =
   | { kind: "trend"; fromDate: string; fromPrice: number; toDate: string; toPrice: number; label?: string; color?: string }
   | { kind: "marker"; date: string; price?: number; label: string; color?: string; above?: boolean };
 
+/**
+ * The bars that actually reach the plot: a non-finite close cannot be positioned.
+ *
+ * Exported alongside `barIndexOn` because anything that REPORTS what was drawn has to ask the same
+ * two questions the drawing asks, of the same array. A caller filtering `opts.bars` while this
+ * filters something else is how a count starts disagreeing with the picture it describes.
+ */
+export function plottedBars(bars: Bar[]): Bar[] {
+  return bars.filter((b) => Number.isFinite(b.close));
+}
+
+/**
+ * The bar a dated annotation lands on — the first on or after `date` — or -1 when the series ends
+ * before it. A date before the first bar snaps to bar 0; only a date past the last one has no home.
+ */
+export function barIndexOn(bars: Bar[], date: string): number {
+  return bars.findIndex((b) => b.date >= date);
+}
+
 export interface SubPanel {
   /** Panel heading, e.g. "RSI(14)". */
   label: string;
@@ -96,7 +115,7 @@ export function renderCandles(opts: CandleChartOptions): string {
   const PAD_R = 74; // price axis lives here
   const HEADER = 74;
   const FOOTER = 40;
-  const bars = opts.bars.filter((b) => Number.isFinite(b.close));
+  const bars = plottedBars(opts.bars);
   const title = opts.title ?? `${opts.symbol} — daily`;
 
   if (bars.length === 0) {
@@ -132,6 +151,18 @@ export function renderCandles(opts: CandleChartOptions): string {
     if (a.kind === "level") { lo = Math.min(lo, a.price); hi = Math.max(hi, a.price); }
     if (a.kind === "zone") { lo = Math.min(lo, a.from, a.to); hi = Math.max(hi, a.from, a.to); }
     if (a.kind === "trend") { lo = Math.min(lo, a.fromPrice, a.toPrice); hi = Math.max(hi, a.fromPrice, a.toPrice); }
+    // Only when it is PRESENT: a marker without a price anchors to its own bar's high or low, which
+    // the bar loop above already covers. With one, it is a coordinate like any other — left out, a
+    // marker priced above every high was positioned against a scale that did not know about it and
+    // its arrow was emitted at a negative y, off the canvas, while the summary said it was drawn.
+    // And only when it is DRAWN, which is the same `barIndexOn` test the marker loop below uses: a
+    // marker dated past the last session draws nothing, so widening the scale to reach its price
+    // would shrink every candle for a triangle that is not on the chart. `trend` above is left as
+    // it is on purpose: `src/tools/register.ts` states that tradeoff where it hands one over.
+    if (a.kind === "marker" && a.price !== undefined && barIndexOn(bars, a.date) >= 0) {
+      lo = Math.min(lo, a.price);
+      hi = Math.max(hi, a.price);
+    }
   }
   for (const o of opts.overlays ?? []) {
     for (const v of o.series) if (v !== null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
@@ -228,8 +259,8 @@ export function renderCandles(opts: CandleChartOptions): string {
       );
     }
     if (a.kind === "trend") {
-      const i1 = bars.findIndex((b) => b.date >= a.fromDate);
-      const i2 = bars.findIndex((b) => b.date >= a.toDate);
+      const i1 = barIndexOn(bars, a.fromDate);
+      const i2 = barIndexOn(bars, a.toDate);
       if (i1 >= 0 && i2 >= 0) {
         const c = a.color ?? th.asing;
         parts.push(
@@ -243,7 +274,7 @@ export function renderCandles(opts: CandleChartOptions): string {
       }
     }
     if (a.kind === "marker") {
-      const i = bars.findIndex((b) => b.date >= a.date);
+      const i = barIndexOn(bars, a.date);
       if (i >= 0) {
         const b = bars[i];
         const c = a.color ?? th.title;

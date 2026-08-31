@@ -79,6 +79,24 @@ test("the price scale covers annotations, so a level cannot land off-canvas", ()
   assert.ok(y >= 0 && y <= H, `level drawn at y=${y} on a ${H}px canvas`);
 });
 
+test("a marker's own price widens the scale, so its arrow cannot land off-canvas", () => {
+  // The scale loop covered level, zone and trend and skipped marker, so a marker priced above every
+  // bar high was positioned against a scale that did not know about it: the arrow was emitted at a
+  // large negative y, outside the viewBox, while the caller was told the marker had been drawn.
+  const above = Math.max(...bars.map((b) => b.high)) + 300;
+  const svg = renderCandles({
+    symbol: "BBRI",
+    bars,
+    annotations: [{ kind: "marker", date: bars[30].date, price: above, label: "spike" }],
+  });
+  const H = Number(/height="(\d+)"/.exec(svg)?.[1] ?? 0);
+  const tri = /<polygon points="[-\d.]+,([-\d.]+) /.exec(svg);
+  assert.ok(tri, "the marker should draw its arrow");
+  const y = Number(tri[1]);
+  assert.ok(y >= 0 && y <= H, `marker drawn at y=${y} on a ${H}px canvas`);
+  assert.ok(svg.includes("spike"), "and its label with it");
+});
+
 test("overlays also widen the scale", () => {
   const svg = renderCandles({
     symbol: "BBRI",
