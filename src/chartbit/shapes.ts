@@ -411,7 +411,10 @@ export function normalizeAnnotationKeys<T>(annotation: T): T {
   const row = annotation as Record<string, unknown>;
   let out: Record<string, unknown> | undefined;
   for (const [snake, camel] of Object.entries(COORDINATE_ALIASES)) {
-    if (!(snake in row)) continue;
+    // `hasOwn`, not `in`: `in` walks the prototype chain, so a polluted `Object.prototype` would
+    // make every annotation appear to carry a coordinate it never had — and a coordinate this
+    // module did not receive is exactly the thing it must never invent.
+    if (!Object.hasOwn(row, snake)) continue;
     const snakeValue = row[snake];
     const camelValue = row[camel];
     if (camelValue !== undefined && !Object.is(camelValue, snakeValue)) {
