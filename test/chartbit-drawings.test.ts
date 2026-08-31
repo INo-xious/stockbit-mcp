@@ -135,6 +135,26 @@ test("the chart id is found at the depth a REAL layout keeps it, not just the do
   // every layout on every real account, and its unit tests all pass, because the fixture was
   // copied from a doc that recorded the innermost object.
   assert.equal(chartIdFromLayout(REAL_NESTING), "1");
+  assert.equal(chartIdFromLayout(REAL_NESTING, "IHSG"), "1", "the symbol it actually shows");
+});
+
+test("ONE chart is not automatically the caller's chart", () => {
+  // REAL_NESTING is the account's real Bandarmology layout: a single chart showing IHSG. Deriving
+  // its id for a caller who asked about BBRI would answer with IHSG's hand-drawn levels under
+  // `symbol: "BBRI"` — the same confusion the multi-chart branch refuses to create, reached by the
+  // easy path instead.
+  assert.equal(chartIdFromLayout(REAL_NESTING, "BBRI"), undefined);
+});
+
+test("a single-chart layout that names no symbol is still derivable", () => {
+  // The older flat shape carries no `charts_symbols`. Refusing a layout that never claimed a
+  // symbol would help nobody, so the mismatch check only fires when the layout actually says.
+  assert.equal(chartIdFromLayout(ONE_CHART, "BBRI"), "7");
+});
+
+test("the symbol map is matched case-insensitively and past the exchange prefix", () => {
+  const lower = { content: { charts_symbols: '{"1":{"symbol":"idx:bbri"}}', content: { charts: [{ chartId: "1" }] } } };
+  assert.equal(chartIdFromLayout(lower, "BBRI"), "1");
 });
 
 test("a multi-chart layout is resolved by the layout's own symbol map", () => {

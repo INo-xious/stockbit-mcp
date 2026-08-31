@@ -19,6 +19,9 @@
  * query parameter no tool declares — which needs no route-table edit and no ADR, because
  * `RouteSpec` constrains host, method, template and auth kind and says nothing about params.
  *
+ * **GET routes only**, enforced below. Not being able to invent an endpoint is not the same as not
+ * being able to spend one, and roughly a quarter of the table is a write.
+ *
  * That is the whole point: probing a candidate parameter is exactly how `order_by` and the plural
  * `symbols` on running trade were settled on 2026-08-28.
  *
@@ -69,6 +72,28 @@ if (!(routeName in ROUTES)) {
 }
 
 const route = ROUTES[routeName as RouteName];
+
+/**
+ * READS ONLY, and this is the load-bearing line in the file.
+ *
+ * The route name is the only thing a caller supplies; the METHOD comes from the table
+ * (`transport.ts`: `const method: HttpMethod = route.method`). Without this guard,
+ * `probe-route.ts screenerFavoriteRemove` — no other arguments — is a real DELETE on the user's
+ * live bearer, `watchlistDelete --segment watchlistId=…` destroys a watchlist, and `orderBuy` is a
+ * POST to the trading host that never passes `src/trading/confirmation.ts`. A debugging tool must
+ * not be a way around the one gate this project has.
+ *
+ * It would also be the wrong verb even for a write worth making: `getJson` retries on 429, 5xx and
+ * network failure, and `src/http/client.ts` says exactly why the write helpers do not — a write
+ * whose response was lost in flight may already have been applied.
+ */
+if (route.method !== "GET") {
+  fail(
+    `Route ${JSON.stringify(routeName)} is a ${route.method}, and this script only probes GETs.\n` +
+      "Writes go through the tools, which confirm them, snapshot them and do not retry them.",
+  );
+}
+
 const params: QueryParams = {};
 const segments: Segments = {};
 

@@ -298,20 +298,32 @@ export function chartIdFromLayout(layout: unknown, symbol?: string): string | un
     return typeof id === "string" || typeof id === "number" ? String(id) : undefined;
   };
 
-  if (charts.length === 1) return idOf(charts[0]);
+  const wanted = symbol === undefined ? undefined : normalizeSymbol(symbol);
+  const symbols = chartSymbols(layout);
+  /** What the layout says a chart shows, or undefined when it does not say. */
+  const symbolOf = (id: string | undefined): string | undefined => {
+    const named = id === undefined ? undefined : symbols?.[id]?.symbol;
+    return typeof named === "string" ? normalizeDrawingSymbol(named).toUpperCase() : undefined;
+  };
 
-  if (symbol !== undefined) {
-    const wanted = normalizeSymbol(symbol);
-    const symbols = chartSymbols(layout) ?? {};
-    const matches = Object.entries(symbols).filter(
-      ([, entry]) => typeof entry?.symbol === "string" && normalizeDrawingSymbol(entry.symbol) === wanted,
-    );
+  if (charts.length === 1) {
+    const only = idOf(charts[0]);
+    const shows = symbolOf(only);
+    // A single chart is NOT automatically the caller's chart. The account's real "Bandarmology"
+    // layout holds one chart showing IHSG; asking it for BBRI used to derive that chart's id and
+    // hand back IHSG's hand-drawn levels under `symbol: "BBRI"` — the exact confusion the
+    // multi-chart branch below refuses to create, arrived at through the easy path instead.
+    // Checked only when the layout actually names a symbol: the older flat shape carries no map,
+    // and refusing everything on a layout that never claimed a symbol would help nobody.
+    if (wanted !== undefined && shows !== undefined && shows !== wanted) return undefined;
+    return only;
+  }
+
+  if (wanted !== undefined) {
+    const matches = charts.map(idOf).filter((id) => id !== undefined && symbolOf(id) === wanted);
     // One match or none. Two charts on the same symbol are two different drawing stores and the
     // layout says nothing about which the caller means.
-    if (matches.length === 1) {
-      const [id] = matches[0] as [string, unknown];
-      if (charts.some((chart) => idOf(chart) === id)) return id;
-    }
+    return matches.length === 1 ? matches[0] : undefined;
   }
   return undefined;
 }

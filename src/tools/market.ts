@@ -119,15 +119,13 @@ export function registerMarketTools(define: Definer): void {
       "distribution badly, so excluding them changes the picture rather than trimming it.\n" +
       "chart=true reads a different endpoint returning the chart form of the same idea, not a " +
       "rendering of this one.\n" +
-      "A grouping key is REQUIRED by the endpoint: without one every call answers 400 \"Group by is " +
-      "required\" no matter what else is sent, which is why this tool could not be called at all " +
-      "until the parameter existed. It is refused here rather than spent on a round trip.\n" +
-      "This server knows NEITHER the key nor its values. The key is sent as `group_by`, inferred " +
-      "from the sibling endpoint whose \"OrderBy is a required field\" meant `order_by` — a " +
-      "precedent, not a confirmation. Your value is sent VERBATIM and none is invented: other " +
-      "parameters here are prefixed enums (TRADE_BOOK_MODE_*) while that sibling takes bare 1/2/3, " +
-      "so both forms are worth trying. If a value still 400s, suspect the key. chart=true is a " +
-      "different endpoint and has never been seen to demand it, so it is not required there.\n" +
+      "`group_by` is REQUIRED: without it every call answers 400 \"Group by is required\" whatever " +
+      "else is sent, which is why this tool could not be called at all until the parameter " +
+      "existed. PASS group_by=1 — measured 2026-09-01, that returns the by-price book this tool is " +
+      "named for. 2 is also accepted but answered empty on a closed market, so what it groups by is " +
+      "not established; 0 is read as absent and 3 is refused. Only those four have been tried, so " +
+      "your value is sent verbatim rather than checked against a list. chart=true is a different " +
+      "endpoint and has never been seen to demand it, so it is not required there.\n" +
       "An empty result is normal before the session's first print. It is a per-session view: there " +
       "is no date argument, so this is today.\n" +
       "PENDING VERIFICATION, and precisely which part: the RESPONSE has now been seen live — a " +
@@ -145,7 +143,7 @@ export function registerMarketTools(define: Definer): void {
       group_by: z
         .string()
         .optional()
-        .describe("REQUIRED by the endpoint; accepted values unobserved. Sent verbatim, never guessed."),
+        .describe("REQUIRED. Use 1 for the by-price book; 2 is accepted, 3 is refused. Sent verbatim."),
       limit: z.coerce.number().optional().describe("Max rows. Omitted takes the server default."),
       chart: z.boolean().optional().describe("Read the chart endpoint instead of the table."),
     },

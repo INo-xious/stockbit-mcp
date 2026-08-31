@@ -694,13 +694,18 @@ export interface TradeBookOptions {
    * absent from this interface entirely, so every call this project could make was a call that
    * could not succeed.
    *
-   * TWO things here are unobserved, and only one of them is the caller's to supply. The VALUE is
-   * passed through verbatim because its vocabulary has never been seen. The wire KEY — `group_by`
-   * — is this file's inference: `/order-trade/running-trade` on the same service answers
-   * `"OrderBy is a required field"` for a parameter that really is spelled `order_by`, so the same
-   * transformation is the obvious reading of `"Group by is required"`. Obvious is not observed.
-   * `order_queue` on this same service cost five candidates to settle a key that read just as
-   * obviously, so if a supplied value still 400s, suspect the key before the value.
+   * Settled on the wire 2026-09-01, on the first candidate. The key really is `group_by` — the
+   * same transformation `/order-trade/running-trade` shows, where `"OrderBy is a required field"`
+   * means `order_by`. Values, measured against BBRI:
+   *
+   *   `1` — 200, a book of price levels. This is the view the tool is named for.
+   *   `2` — 200, but `book: []` on a closed market, so what it groups by is NOT established.
+   *   `0` — 400 `Group by is required`; the server reads it as absent rather than as a value.
+   *   `3` — 400 `Your request is invalid`.
+   *
+   * Still passed through VERBATIM rather than mapped to an enum. Only four values have been tried,
+   * and refusing a fifth that this file has never heard of would be the tool telling the caller
+   * what the server accepts on the strength of one afternoon.
    */
   groupBy?: string;
   limit?: number;
@@ -730,14 +735,12 @@ export async function getTradeBook(opts: TradeBookOptions = {}): Promise<unknown
   if (!groupBy && opts.chart !== true) {
     throw new StockbitError(
       "invalid_param",
-      "trade book needs a grouping key: without one the endpoint answers " +
+      "trade book needs group_by: without it the endpoint answers " +
         '400 {"error":"Group by is required"} whatever else is sent, so there is no argument ' +
-        "combination that works. Neither the wire KEY nor its values have been observed. This " +
-        "client sends the key as `group_by`, inferred from the sibling on this same service whose " +
-        '"OrderBy is a required field" turned out to mean `order_by` — a precedent, not a ' +
-        "confirmation. The VALUE is whatever you pass, verbatim: none is invented here. Values on " +
-        "this endpoint's other parameters are prefixed enums (`TRADE_BOOK_MODE_*`), while that " +
-        "same sibling takes bare integers 1/2/3, so both forms are worth a try.",
+        "combination that works without one. Pass group_by=1 for the by-price book, which is the " +
+        "view this tool is named for. Measured 2026-09-01: 1 and 2 are accepted, 0 answers the " +
+        "same 400 as omitting it, and 3 answers `Your request is invalid`. What 2 groups by is not " +
+        "established — it answered with an empty book outside session hours.",
     );
   }
   // Sent exactly as given. Prefixing it the way `mode` is prefixed would be a guess about a

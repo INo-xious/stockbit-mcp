@@ -464,12 +464,12 @@ test("trade book refuses the call the endpoint would refuse, and says the value 
       assert.ok(error instanceof StockbitError);
       assert.equal(error.kind, "invalid_param");
       assert.match(error.message, /group_by/);
-      // The caller has to be told the value is theirs to supply. "Required" alone reads as though
-      // this client knows one and is withholding it.
-      assert.match(error.message, /have been observed/);
-      // And that the KEY is an inference too — `order_queue` on this same service cost five
-      // candidates to settle a key that read just as obviously as this one does.
-      assert.match(error.message, /inferred/);
+      // "Required" on its own leaves the caller guessing at a vocabulary. This client has since
+      // measured one, so the refusal has to hand over the value that works — otherwise it is a
+      // wall rather than an answer.
+      assert.match(error.message, /group_by=1/);
+      // And it must not overstate what that afternoon settled: 2 was accepted but answered empty.
+      assert.match(error.message, /not established/);
       return true;
     },
   );

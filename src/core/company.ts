@@ -376,9 +376,10 @@ async function readShareholdersChart(
     if (error instanceof StockbitError && (error.kind === "auth" || WEBVIEW_TOKEN_REFUSAL.test(error.message))) {
       throw new StockbitError(
         "auth",
-        `The shareholder chart refused the one-shot token it just minted for ${sym}. This is not ` +
-          `your session: the token was minted seconds earlier on the same credential, and the ` +
-          `same call answers this identically with a valid token, with no token and with a junk ` +
+        `The shareholder chart refused the one-shot token it just minted for ${sym}. This is ` +
+          `almost certainly not your session — the mint on the line above SUCCEEDED on that same ` +
+          `credential, so it was working seconds ago — and the same call answers this identically ` +
+          `with a valid token, with no token and with a junk ` +
           `token (measured 2026-09-01), so the \`token\` query parameter this client sends is not ` +
           `the placement the endpoint reads. No value will fix it. Where the token really belongs ` +
           `— a header, or a POST body — takes a capture of Stockbit's own request to settle, so ` +
