@@ -23,11 +23,57 @@ import { launchDebuggableBrowser } from "./launch.js";
 import { captureViaBrowserLogin, clearBrowserSession } from "./login.js";
 import { captureWebSession, readCredentialStorage } from "./websession.js";
 import { findBrowser } from "./browsers.js";
-import { getStore, probeKeychainWrite } from "./store.js";
+import { fallenBackSlots, getStore, probeKeychainWrite } from "./store.js";
 import { hasStoredSession } from "./session.js";
 import { pinnedBrowserExists, readBrowserProfile } from "./browserprofile.js";
 import { tradingPolicy } from "../settings.js";
 import { decodeJwt } from "./session.js";
+
+const FILE_STORE = "AES-256-GCM file (machine+user derived key)";
+
+/**
+ * Why the credential is in the file store rather than the Keychain.
+ *
+ * This used to be one hardcoded sentence — "no OS keychain on this platform" — printed for every
+ * non-Keychain backend, including the common macOS case where the platform has a Keychain and the
+ * WRITE was refused because a background MCP server cannot show the authorisation prompt. Anyone
+ * debugging why their Keychain was not being used was told the wrong reason by the tool they ran to
+ * find out.
+ *
+ * Argument-taking and pure for the reason `backendFor` and `keychainWriteDecision` are: this is a
+ * macOS-only branch, and a branch CI cannot reach on Linux or Windows is a branch nothing checks.
+ *
+ * `refused` and `forced` are NOT exclusive and both facts are printed when both hold, because the
+ * remedies differ and one cancels the other: `keychainAvailable` returns false on
+ * `STOCKBIT_FORCE_FILE_STORE=1` before it ever looks at the platform, so clearing the recorded
+ * fallback while that variable is set changes nothing.
+ */
+export function describeFileBackend(opts: {
+  /** A Keychain write for this slot was refused, and the fallback was recorded. */
+  refused: boolean;
+  /** `STOCKBIT_FORCE_FILE_STORE=1`. */
+  forced: boolean;
+  /** `process.platform`. */
+  platform: string;
+}): string {
+  if (opts.refused) {
+    return (
+      `${FILE_STORE} — the Keychain refused a write, so the credential was moved here. ` +
+      (opts.forced
+        ? "STOCKBIT_FORCE_FILE_STORE=1 also keeps it unused; unset that first."
+        : "Delete the slot's entry from backend.json beside the store to try the Keychain again.")
+    );
+  }
+  if (opts.forced) return `${FILE_STORE} — STOCKBIT_FORCE_FILE_STORE=1, so the Keychain is not used.`;
+  // Not "no OS keychain on this platform": Windows has Credential Manager and Linux has libsecret.
+  // What is true is that this project integrates neither.
+  if (opts.platform !== "darwin") return `${FILE_STORE} — this build integrates the macOS Keychain only.`;
+  // By elimination, and say only that. On darwin with no recorded fallback and no override,
+  // `backendFor` can only have chosen the file store because `keychainAvailable` returned false,
+  // which on darwin means `security -h` could not be run. Nothing here measures that directly:
+  // `keychainAvailable` is not exported, and `probeKeychainWrite` would touch the live Keychain.
+  return `${FILE_STORE} — the macOS \`security\` command could not be run here.`;
+}
 
 export type CheckStatus = "pass" | "fail" | "warn" | "skip";
 
@@ -312,7 +358,11 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
       detail:
         store.backend === "keychain"
           ? "macOS Keychain"
-          : "AES-256-GCM file (machine+user derived key) — no OS keychain on this platform",
+          : describeFileBackend({
+              refused: fallenBackSlots().includes("main"),
+              forced: process.env.STOCKBIT_FORCE_FILE_STORE === "1",
+              platform: process.platform,
+            }),
     });
   } catch (err) {
     checks.push({

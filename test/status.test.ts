@@ -214,6 +214,64 @@ test("a rejection recorded against a token that has since been replaced is not r
     const report = await collectStatus();
     assert.equal(report.auth.main.health, "unknown", "nothing is known about the NEW token");
     assert.doesNotMatch(report.nextStep, /rejected/i);
+    // `health` was fingerprint-filtered and `lastRefresh` was not, so one payload described two
+    // different credentials: a verdict about the token in the store beside a 401 belonging to the
+    // one it replaced. The verdict was the only half anybody had checked.
+    assert.equal(
+      report.auth.main.lastRefresh,
+      undefined,
+      "a 401 against the PREVIOUS token is not a fact about this one",
+    );
+    assert.doesNotMatch(formatStatus(report), /401|REJECTED|last refresh/);
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("a success belonging to another credential cannot out-date this one's rejection", async () => {
+  // The other direction, and the worse one, because it reads as good news. A matching failure
+  // compared against an UNFILTERED lastOk let a success for a different token demote this token's
+  // own 401 to `unknown` — and `status` then printed "last refresh OK at HH:MM" where HH:MM was
+  // the timestamp of the refresh that failed.
+  clearAllSlots();
+  clearSessionHealth();
+  const stored = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  const other = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400 + 1);
+  recordRefreshFailure("main", stored, 401, "HTTP 401");
+  await new Promise((r) => setTimeout(r, 15)); // distinct timestamps
+  recordRefreshOk("main", other);
+  getStore("main").set(stored);
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.health, "failing", "this token WAS rejected, whatever happened to another");
+    assert.equal(report.auth.main.lastRefresh?.ok, false);
+    assert.equal(report.auth.main.lastRefresh?.status, 401);
+    assert.doesNotMatch(formatStatus(report), /last refresh OK/);
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("the verdict and the timestamp always describe the same credential", async () => {
+  // The invariant the defect violated, asserted directly rather than through one scenario:
+  // `unknown` means nothing is recorded about THIS token, so there is no event to quote.
+  clearAllSlots();
+  clearSessionHealth();
+  const stored = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  const other = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400 + 1);
+  recordRefreshFailure("main", other, 401, "HTTP 401");
+  getStore("main").set(stored);
+  try {
+    const report = await collectStatus();
+    for (const [slot, state] of Object.entries(report.auth)) {
+      if (state.health === "unknown") {
+        assert.equal(state.lastRefresh, undefined, `${slot}: unknown must quote no event`);
+      }
+      if (state.health === "ok") assert.equal(state.lastRefresh?.ok, true, `${slot}: ok must quote a success`);
+      if (state.health === "failing") assert.equal(state.lastRefresh?.ok, false, `${slot}: failing must quote a failure`);
+    }
   } finally {
     clearSessionHealth();
     clearAllSlots();
