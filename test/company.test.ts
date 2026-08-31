@@ -67,7 +67,19 @@ const INFO = {
   },
 };
 
-const PROFILE = { data: { description: "Banking", listing_date: "2003-11-10" } };
+/**
+ * Issue #37 REPORTS this shareholder shape; it is not a capture, and `emitten/{symbol}/profile`
+ * has no recorded live row. A rounded magnitude string under an ambiguous unit, beside a clamped
+ * percentage that disagrees with it — 3,242,500 of 40.69 B is about 0.0080%, not `<0.0001%`. Both
+ * must survive byte-identical: the assertion below is what pins that nothing here is recomputed.
+ */
+const PROFILE = {
+  data: {
+    description: "Banking",
+    listing_date: "2003-11-10",
+    shareholder_director_commissioner: [{ name: "DIRECTOR ONE", value: "3.24 M", percentage: "<0.0001%" }],
+  },
+};
 const CONTACT = { data: { address: "Jl. Jenderal Sudirman Kav 44-46", website: "bri.co.id" } };
 const TYPED_INFO_COMPANY = { data: { emitten_type: "company", items: 42 } };
 const TYPED_INFO_BANK = { data: { emitten_type: "bank", items: 51 } };
@@ -128,6 +140,15 @@ function wire(): Call[] {
   return calls.filter((c) => !c.url.includes("login/refresh"));
 }
 
+/**
+ * A per-test payload override, consulted before the fixed routing below.
+ *
+ * Most tests here assert on the REQUEST and share one payload table. A few assert on a ROW SHAPE
+ * and each needs its own; this lets one test swap one payload rather than standing up a second
+ * fetch stub that would drift from this one. Returning undefined falls through to the table.
+ */
+let override: ((path: string) => unknown) | undefined;
+
 before(() => {
   getStore().set("REFRESH");
   resetSession();
@@ -136,6 +157,9 @@ before(() => {
     calls.push({ method: init?.method ?? "GET", url: u });
     const path = pathOf(u);
     if (path.includes("login/refresh")) return json({ data: { access_token: farFutureJwt() } });
+
+    const overridden = override?.(path);
+    if (overridden !== undefined) return json(overridden);
 
     if (path.endsWith("/profile")) return json(PROFILE);
     if (path.endsWith("/contact")) return json(path.includes("ZERO") ? { data: null } : CONTACT);
@@ -163,6 +187,7 @@ before(() => {
 
 beforeEach(() => {
   calls = [];
+  override = undefined;
   clearCache();
 });
 
@@ -225,6 +250,8 @@ test("company_profile makes ONE request by default and returns the body verbatim
   const profile = await getCompanyProfile("BBRI");
 
   assert.deepEqual(wire().map((c) => pathOf(c.url)), ["emitten/BBRI/profile"]);
+  // Exact, so it is also the issue #37 pin: a recomputed percentage, a parsed magnitude or any
+  // added sibling inside `profile` fails here rather than shipping as if the server had checked it.
   assert.deepEqual(profile, { symbol: "BBRI", profile: PROFILE.data });
   assert.equal("emittenType" in profile, false, "the vocabulary is only reported when it was used");
 });
@@ -423,7 +450,109 @@ test("symbol_search v2 sends every filter it was given and nothing it was not", 
   assert.equal(hits.source, "data.result");
   assert.deepEqual(hits.symbols, ["BBRI"], "a person row carries no ticker and is not invented one");
   assert.equal(hits.rowsWithoutSymbol, 1);
+  assert.deepEqual(
+    hits.symbolRows,
+    [{ index: 0, symbol: "BBRI", readFrom: "symbol" }],
+    "a row that carries `symbol` is still read from it, and says so",
+  );
   assert.deepEqual(hits.extra, { people: [{ username: "x" }] }, "the second bucket is not dropped");
+});
+
+/*
+ * The five below are issue #41. A live `/search/v2` row was reported as
+ * `{"id":"DEWA","name":"DEWA","desc":"Darma Henwa Tbk","url":"symbol/DEWA"}` — no `symbol` key at
+ * all — so the projection reported all eight rows of a successful search as ticker-less and handed
+ * back `symbols: []` from the one tool whose job is turning a name into a ticker.
+ */
+
+/** The reported row shape: the ticker in `id`, in `name`, and again in the link. */
+const SEARCH_ROWS = {
+  data: {
+    result: [
+      { id: "DEWA", name: "DEWA", desc: "An Issuer Tbk", url: "symbol/DEWA" },
+      { id: "DEWAZPCH7A", name: "DEWAZPCH7A", desc: "Call Waran DEWA ZP", url: "symbol/DEWAZPCH7A" },
+      { id: "99", name: "somebody", desc: "A Person", url: "user/somebody" },
+    ],
+  },
+};
+
+/** Answer only the v2 search path; everything else falls through to the shared table. */
+const searchReplies = (payload: unknown) => (path: string) => (path.endsWith("search/v2") ? payload : undefined);
+
+test("a search row with no `symbol` key is read from its symbol/<TICKER> link", async () => {
+  override = searchReplies(SEARCH_ROWS);
+  const hits = await search("DEWA");
+  assert.deepEqual(hits.symbols, ["DEWA", "DEWAZPCH7A"], "including the structured warrant");
+  assert.equal(hits.rowsWithoutSymbol, 1, "and only the person row is counted ticker-less");
+  assert.deepEqual(hits.symbolRows, [
+    { index: 0, symbol: "DEWA", readFrom: "url" },
+    { index: 1, symbol: "DEWAZPCH7A", readFrom: "url" },
+  ]);
+  assert.equal(hits.rows.length, 3, "nothing is dropped");
+});
+
+test("a row linking to a person is never mined for a ticker, even though its id is ticker-shaped", async () => {
+  // `isSymbol("99")` is true — digits are in the charset — so without the link gate this row would
+  // publish "99" as a stock, and `normalizeSymbol` would then accept it as a URL path segment.
+  override = searchReplies({ data: { result: [{ id: "99", name: "somebody", url: "user/somebody" }] } });
+  const hits = await search("somebody");
+  assert.deepEqual(hits.symbols, []);
+  assert.equal(hits.rowsWithoutSymbol, 1);
+});
+
+test("a numeric id on a real emitten row does not beat the ticker in its own link", async () => {
+  // The reason `id`/`name` are not mined at all: `isSymbol("12345")` is true, so an id-first probe
+  // would publish "12345" and discard BBRI from the very same row.
+  override = searchReplies({ data: { result: [{ id: "12345", name: "Bank Rakyat Indonesia", url: "symbol/BBRI" }] } });
+  const hits = await search("bank");
+  assert.deepEqual(hits.symbols, ["BBRI"]);
+  assert.deepEqual(hits.symbolRows, [{ index: 0, symbol: "BBRI", readFrom: "url" }]);
+});
+
+test("a leading slash on the link is tolerated; anything else is not a ticker", async () => {
+  override = searchReplies({
+    data: {
+      result: [
+        { id: "a", url: "/symbol/BBRI" },
+        { id: "b", url: "symbol/not a ticker" },
+        { id: "c", url: "https://stockbit.com/symbol/GOTO" },
+        { id: "d" },
+      ],
+    },
+  });
+  const hits = await search("x");
+  assert.deepEqual(
+    hits.symbols,
+    ["BBRI"],
+    "a bare `^symbol/` would have made one upstream reformat return the whole bug, silently",
+  );
+  assert.equal(hits.rowsWithoutSymbol, 3, "an unshaped segment, an absolute URL and a linkless row");
+});
+
+test("index_members and sector_companies keep the strict `symbol` rule", async () => {
+  // The fence. A probe wide enough for a search row would read a sector's numeric id as a ticker,
+  // so the two readers are deliberately separate and this pins that they stayed separate. BOTH
+  // membership call sites are exercised: each one calls `symbolsIn` for itself, so either could
+  // have been switched to the search reader on its own.
+  override = (path) => {
+    if (path.includes("/sector/") && path.endsWith("/company")) {
+      return { data: [{ id: "9", name: "Energy", url: "sector/9" }] };
+    }
+    if (path.includes("emitten/indexes/")) {
+      return { data: { companies: [{ id: "12345", name: "Bank Rakyat Indonesia", url: "symbol/BBRI" }] } };
+    }
+    return undefined;
+  };
+
+  const sector = await getSectorCompanies("9");
+  assert.deepEqual(sector.symbols, [], "no ticker is invented from a sector id or a sector name");
+  assert.equal(sector.rowsWithoutSymbol, 1);
+
+  // A row the SEARCH reader would happily take BBRI off, through its `symbol/<TICKER>` link. This
+  // reader does not look at links at all, so it reports the row ticker-less rather than mining one.
+  const index = await getIndexMembers("LQ45", 10);
+  assert.deepEqual(index.symbols, [], "the link rule belongs to `searchSymbolsIn`, not to this one");
+  assert.equal(index.rowsWithoutSymbol, 1);
 });
 
 test("symbol_search omits absent filters rather than sending them empty", async () => {

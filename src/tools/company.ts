@@ -49,6 +49,14 @@ export function registerCompanyTools(define: Definer): void {
       '"company" is the only value that has been observed; banks and other issuers whose statements ' +
       "differ use another value that is unconfirmed, so an override is accepted but nothing here can " +
       "tell you it is right — a wrong one is likely to come back as a not_found.\n" +
+      "Nothing inside `profile` is parsed. If the body carries percentage- or magnitude-shaped " +
+      "strings — a shareholder block's `percentage`, a `value` like \"3.24 M\" — they are returned " +
+      "as this server received them: not recomputed, not rounded, not cross-checked against each " +
+      "other. Their key names and their units are unconfirmed, and a magnitude suffix is ambiguous " +
+      "on an Indonesian payload (miliar, 1e9, or million, 1e6), so a figure computed from them here " +
+      "would be invented. Treat any percentage there as the upstream's own claim rather than " +
+      "arithmetic this server checked; if you need one, compute it from an unrounded share count " +
+      "and an outstanding-share count, and say that you did.\n" +
       PENDING_NOTE,
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
@@ -200,7 +208,16 @@ export function registerCompanyTools(define: Definer): void {
       'page, type or insider_category. variant "legacy" takes ONLY a keyword and REFUSES the others ' +
       "rather than ignoring them, so a paged call cannot silently collapse to page 1.\n" +
       "Matches are not only companies — people and other entities can appear — so `symbols` holds " +
-      "just the rows that carried a ticker and can be shorter than `rows`.\n" +
+      "just the rows a ticker could be read from and can be shorter than `rows`. Two rules, in this " +
+      "order. A row's own `symbol` field is read FIRST if it has one, whatever else the row says — " +
+      "the reported search rows carry no such field, but a row that does is taken at its word. " +
+      "Otherwise, and only then, the ticker is the last segment of the row's `symbol/<TICKER>` " +
+      "link, so that link governs the FALLBACK: a row linking to a user or a post reaches this step " +
+      "and yields nothing. `id` and `name` are never read, because a row's `id` can be a number and " +
+      "publishing that as a ticker would invent a stock. " +
+      "`symbolRows` gives each ticker its index in `rows` and, in `readFrom`, which " +
+      "key it came from; `\"url\"` there means it was taken off a URL path rather than a field of " +
+      "its own. `rowsWithoutSymbol` counts the rest.\n" +
       "The accepted values for type and insider_category are not settled — those two ARGUMENT " +
       "vocabularies, not this route. An unrecognised value is " +
       "more likely to narrow the result to nothing than to raise an error. A blank keyword is " +
@@ -228,8 +245,10 @@ export function registerCompanyTools(define: Definer): void {
           insiderCategory: a.insider_category as string | undefined,
         }),
       ),
-    // Settled by a live call on 2026-08-29: the route answered from a real account and every
-    // field this tool names was read out of that response. Opts out of the family default.
+    // Live call 2026-08-29: the route answered from a real account. `symbols` was NOT settled by
+    // it — see issue #41, where every row of a successful search was reported ticker-less — and the
+    // row shape it actually returns is recorded in docs/PENDING-VERIFICATION.md. Opts out of the
+    // family default.
     { evidence: "observed" },
 );
 }

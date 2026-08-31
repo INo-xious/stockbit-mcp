@@ -33,7 +33,7 @@ import { z } from "zod";
 import { getJson, postJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
-import { normalizeSymbol } from "../symbol.js";
+import { isSymbol, normalizeSymbol } from "../symbol.js";
 import { StockbitError } from "../http/errors.js";
 
 /* --------------------------- envelope + row location --------------------------- */
@@ -108,10 +108,17 @@ function rowsOf(body: unknown, context: string): RowSet {
 /**
  * Tickers read off rows that carry a string `symbol`, with a count of the rows that did not.
  *
- * `symbol` is not a guess: every emitten-shaped row already mapped in this codebase carries it
- * (`getSectors`, the watchlist members, the screener's `company` block). It is still reported
- * defensively — a non-zero `rowsWithoutSymbol` means the ticker list is not the whole answer and
- * the caller should read `rows`.
+ * FOR THE TWO MEMBERSHIP ROUTES ONLY — index constituents and sector companies. `symbol` is not a
+ * guess on those: every emitten-shaped row already mapped in this codebase carries it (`getSectors`,
+ * the watchlist members, the screener's `company` block). It is still reported defensively — a
+ * non-zero `rowsWithoutSymbol` means the ticker list is not the whole answer and the caller should
+ * read `rows`.
+ *
+ * That justification was never checked against SEARCH, whose rows are a different shape and carry
+ * no `symbol` at all, so this reported every one of them as ticker-less — issue #41. Search has its
+ * own reader below, and the two are deliberately separate: a probe wide enough to find a ticker on
+ * a search row would invent one here, where a sector row's `id` is a numeric sector id and its
+ * `name` is a sector name.
  */
 function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: number } {
   const symbols: string[] = [];
@@ -122,6 +129,83 @@ function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: num
     else rowsWithoutSymbol++;
   }
   return { symbols, rowsWithoutSymbol };
+}
+
+/**
+ * A search row's link, when that link says the row IS an emitten.
+ *
+ * The leading slash is tolerated because a bare `^symbol/` would turn one upstream formatting
+ * change into a silent, total return of issue #41 — every row ticker-less again, invisibly.
+ * Nothing wider than that: an absolute URL has not been seen and guessing at hosts is how a
+ * ticker ends up being read off somebody's profile page.
+ */
+const SYMBOL_URL_RE = /^\/?symbol\/([^/?#]+)$/;
+
+/** One ticker read off a search row, and the wire key it came from. */
+export interface SearchSymbolRow {
+  /** Index into `rows`, so the whole row is one lookup away and nothing is duplicated here. */
+  index: number;
+  symbol: string;
+  /** The wire key it was read from. `"url"` means the last segment of a `symbol/<TICKER>` link. */
+  readFrom: "symbol" | "url";
+}
+
+/**
+ * The ticker on a SEARCH row, which does not carry a `symbol` key.
+ *
+ * A reported live `/search/v2` row is
+ * `{"id":"DEWA","name":"DEWA","desc":"Darma Henwa Tbk","url":"symbol/DEWA"}` — the ticker three
+ * times over and never under the name `symbolsIn` looks for, so the one tool whose whole job is
+ * name → ticker answered `symbols: []` for every row it found (issue #41).
+ *
+ * Two rules, in this order.
+ *
+ * `symbol` FIRST — the old rule, preserved exactly, so no row that yielded a ticker before yields
+ * nothing now. It is read whatever the row's link says, and the only test on it is the one
+ * `symbolsIn` already applied: a non-blank STRING. There is no `isSymbol` test, so an unexpected
+ * spelling still comes back rather than being dropped — but a non-string does not pass:
+ * `{ symbol: 5, url: "symbol/BBRI" }` falls through to the link and yields `BBRI`, not `5`.
+ *
+ * Otherwise the row's LINK, which is a gate and not merely another candidate: `symbol/<TICKER>` is
+ * the response labelling the row an emitten, where `url: "user/<handle>"` labels a person. The
+ * ticker is the segment itself, validated with `isSymbol`.
+ *
+ * `id` and `name` are deliberately NOT mined, which departs from the issue's suggested
+ * `id → name → url` order. On every reported row those three hold the same string, so mining them
+ * can only ever produce a value the link does not — and that value is unverified. `isSymbol` admits
+ * digits (`src/symbol.ts`), so `{ id: "12345", …, url: "symbol/BBRI" }` would publish `"12345"` and
+ * discard the real ticker sitting beside it; `normalizeSymbol` would then accept the invention as a
+ * URL path segment on the next call, and the `not_found` that came back would read as "no such
+ * stock" rather than "we made it up". A row whose link is not ticker-shaped is ticker-less, and
+ * `rowsWithoutSymbol` says so.
+ *
+ * Not uppercased before the shape test: uppercasing would turn a lowercase handle on a
+ * `symbol/`-labelled row into a ticker, and no lowercase ticker has been seen. If Stockbit ever
+ * lowercases them, the honest result is a row this reports as ticker-less — not a guess.
+ */
+function tickerOn(row: Record<string, unknown>): Omit<SearchSymbolRow, "index"> | undefined {
+  const direct = row.symbol;
+  if (typeof direct === "string" && direct.trim() !== "") return { symbol: direct.trim(), readFrom: "symbol" };
+
+  const segment = SYMBOL_URL_RE.exec(typeof row.url === "string" ? row.url.trim() : "")?.[1]?.trim();
+  return segment !== undefined && isSymbol(segment) ? { symbol: segment, readFrom: "url" } : undefined;
+}
+
+/** Tickers off search rows. See `tickerOn` for why this is not `symbolsIn`. */
+function searchSymbolsIn(rows: unknown[]): {
+  symbols: string[];
+  symbolRows: SearchSymbolRow[];
+  rowsWithoutSymbol: number;
+} {
+  const symbolRows: SearchSymbolRow[] = [];
+  let rowsWithoutSymbol = 0;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const found = row && typeof row === "object" ? tickerOn(row as Record<string, unknown>) : undefined;
+    if (found) symbolRows.push({ index, ...found });
+    else rowsWithoutSymbol++;
+  }
+  return { symbols: symbolRows.map((r) => r.symbol), symbolRows, rowsWithoutSymbol };
 }
 
 /* ---------------------------------- profile ---------------------------------- */
@@ -152,7 +236,31 @@ export interface CompanyProfile {
   finItems?: unknown;
 }
 
-/** The profile block alone. */
+/**
+ * The profile block alone, verbatim.
+ *
+ * Nothing inside the body is parsed, and that is a decision rather than an omission — it includes
+ * the percentage- and magnitude-shaped strings a shareholder block carries, where a director's
+ * stake was reported as `percentage: "<0.0001%"` beside `value: "3.24 M"` when the arithmetic gives
+ * about 0.0080% (issue #37).
+ *
+ * Recomputing it would take two numbers this response does not supply. The first is an UNROUNDED
+ * share count: `"3.24 M"` has already been rounded for display, so it yields 3,240,000 whatever the
+ * unit is, and the unit cannot be read here either — `MAGNITUDES` refuses a bare `"m"` on purpose,
+ * because Indonesian *miliar* (1e9) and English *million* (1e6) are a thousandfold apart. The
+ * second is the outstanding share count, which is not in this payload at all: the nearest source is
+ * the `keystats` route, a second request against a body whose fields are likewise returned as-is.
+ * A figure computed from a rounded number under a guessed unit is an invented number, twice over.
+ *
+ * `profile` is also not a `RowSet` — it carries no `source`, so empty, null and absent are not
+ * distinguishable inside it. That too is by design: the body is handed back as it arrived.
+ *
+ * If a computed percentage is ever wanted it does not belong in here, and it does not belong in
+ * `getCompanyProfile`, which is documented and tested as ONE request. It belongs at the caller or
+ * in a tool of its own, after a live call settles the three questions in
+ * `docs/PENDING-VERIFICATION.md` — and then as a NEW key naming both of its inputs, never as a
+ * rewrite of the upstream one.
+ */
 async function getProfile(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   return cached(`companyProfile:${sym}`, CACHE.keystatsTtlMs, async () =>
@@ -458,8 +566,14 @@ export interface SearchResult extends RowSet {
   page?: number;
   type?: string;
   insiderCategory?: string;
-  /** Tickers off the rows that carried one. Search matches people and posts too, so this can be short. */
+  /** Tickers off the rows one could be read from, in row order. Can be shorter than `rows`. */
   symbols: string[];
+  /**
+   * One entry per ticker: its index in `rows` and the wire key it came from. `readFrom: "url"` means
+   * the ticker is the last segment of a `symbol/<TICKER>` link rather than a field of its own.
+   */
+  symbolRows: SearchSymbolRow[];
+  /** Rows no ticker could be read from. Search matches people and posts, so non-zero is normal. */
   rowsWithoutSymbol: number;
 }
 
@@ -520,7 +634,9 @@ export async function search(keyword: string, opts: SearchOptions = {}): Promise
       ...(type !== undefined ? { type } : {}),
       ...(insiderCategory !== undefined ? { insiderCategory } : {}),
       ...set,
-      ...symbolsIn(set.rows),
+      // Kept adjacent to `...set` on purpose: `symbolRows[].index` points into the array that
+      // `rows` will hold, and anything filtering between the two would silently invalidate it.
+      ...searchSymbolsIn(set.rows),
     };
   });
 }
