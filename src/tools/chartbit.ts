@@ -241,7 +241,14 @@ export function registerChartbitTools(define: Definer): void {
       "never touches anything the user drew.\n" +
       "Drawings persist when Stockbit's page autosaves, or immediately if you call `chartbit_save`.\n" +
       "`failed` lists requests the widget accepted but created nothing for — those are NOT on the " +
-      "chart, so do not report them to the user as drawn.",
+      "chart, so do not report them to the user as drawn.\n" +
+      "`ours` is everything this server has recorded drawing on this symbol, and each entry carries " +
+      "`presence`: \"on-chart\" if the live chart still holds it, \"gone\" if it does not, and " +
+      "\"unconfirmed\" if the chart could not be enumerated. `onChart` counts the confirmed ones and " +
+      "`gone` lists the rest — a drawing can disappear because the page reloaded before a save, or " +
+      "because the user deleted it, and neither is an error. Report `onChart`, never `ours.length`.\n" +
+      "Entries are never removed by this check: the record is the only thing distinguishing this " +
+      "server's drawings from the user's own, so a single bad reading must not be able to destroy it.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       annotations: z

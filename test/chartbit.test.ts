@@ -57,6 +57,13 @@ import {
   normalizeDrawingSymbol,
 } from "../src/chartbit/codec.ts";
 import { addOurDrawings, forgetOurDrawings, loadOurDrawings, setOurDrawings } from "../src/chartbit/store.ts";
+import {
+  DRIVER_LOCK_WAIT_MS,
+  driverLockState,
+  resetDriverLock,
+  withDriverLock,
+} from "../src/chartbit/lock.ts";
+import { reconcileOurDrawings } from "../src/chartbit/reconcile.ts";
 import { epochSeconds } from "../src/core/dates.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -189,6 +196,260 @@ test("every point is epoch SECONDS", () => {
   }
   assert.equal(requests[0].points[0].time, ANCHOR, "a level is anchored to the date it was given");
   assert.equal(requests[1].points[0].time, epochSeconds("2026-01-02"));
+});
+
+/* ====================== the ledger tells the truth about the chart (#14) ====================== */
+
+/**
+ * `ours` used to be the local record returned verbatim, as though it described the chart.
+ *
+ * In the field that produced a result listing fourteen entities for a chart holding nine: five
+ * annotations were lost when the page reloaded, and the next draw went on reporting them. The
+ * entity ids were observed at creation; the present-tense claim "these are on the chart now" never
+ * was.
+ */
+const LEDGER = [
+  { tvEntityId: "e1", kind: "level", shape: "horizontal_line", at: "2026-08-24T00:00:00.000Z" },
+  { tvEntityId: "e2", kind: "trend", shape: "trend_line", at: "2026-08-24T00:00:00.000Z" },
+  { tvEntityId: "e3", kind: "zone", shape: "rectangle", at: "2026-08-24T00:00:00.000Z" },
+];
+
+test("a recorded drawing the chart no longer holds is reported gone, not listed as present", () => {
+  const r = reconcileOurDrawings(LEDGER, ["e1", "e3"]);
+  assert.equal(r.reconciled, true);
+  assert.equal(r.onChart, 2);
+  assert.deepEqual(
+    r.ours.map((d) => [d.tvEntityId, d.presence]),
+    [
+      ["e1", "on-chart"],
+      ["e2", "gone"],
+      ["e3", "on-chart"],
+    ],
+  );
+  assert.deepEqual(r.gone.map((d) => d.tvEntityId), ["e2"]);
+});
+
+test("reconciling never shortens the ledger", () => {
+  // The record is the only thing separating this server's drawings from the user's own hand-drawn
+  // analysis. Prune on one bad reading and an orphan can only be removed with `clear scope:"all"` —
+  // the operation that needs confirmation precisely because it destroys work we have never seen.
+  const r = reconcileOurDrawings(LEDGER, []);
+  assert.equal(r.ours.length, LEDGER.length, "every recorded entry survives the check");
+  assert.equal(r.gone.length, 3);
+  assert.equal(r.onChart, 0);
+});
+
+test("an unreadable chart is UNCONFIRMED, which is not the same as an empty one", () => {
+  // The distinction the whole design turns on. `[]` says the chart holds nothing, which would mark
+  // every drawing gone; `null` says we did not look, and inventing "gone" from that would report a
+  // loss that never happened.
+  const unread = reconcileOurDrawings(LEDGER, null, "the page would not answer");
+  assert.equal(unread.reconciled, false);
+  assert.equal(unread.onChart, 0);
+  assert.deepEqual(unread.gone, [], "nothing may be called gone on a reading that was never taken");
+  assert.ok(unread.ours.every((d) => d.presence === "unconfirmed"));
+  assert.equal(unread.note, "the page would not answer");
+
+  const empty = reconcileOurDrawings(LEDGER, []);
+  assert.equal(empty.reconciled, true);
+  assert.equal(empty.gone.length, 3);
+  assert.equal(empty.note, undefined);
+});
+
+test("ids are compared as strings, since the widget's are not guaranteed to be", () => {
+  const numeric = [{ tvEntityId: "7", kind: "level", shape: "horizontal_line", at: "x" }];
+  assert.equal(reconcileOurDrawings(numeric, [7 as unknown as string]).onChart, 1);
+});
+
+test("an empty ledger reconciles cleanly rather than erroring", () => {
+  const r = reconcileOurDrawings([], ["e9"]);
+  assert.deepEqual(r.ours, []);
+  assert.deepEqual(r.gone, []);
+  assert.equal(r.onChart, 0);
+  assert.equal(r.reconciled, true);
+});
+
+/* ============================== the driver mutex (#15) ============================== */
+
+/** Every .ts under a directory, recursively. */
+function allSourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return allSourceFiles(full);
+    return full.endsWith(".ts") ? [full] : [];
+  });
+}
+
+/**
+ * Chart tools share ONE browser window, and nothing serialised them.
+ *
+ * The MCP SDK dispatches without awaiting, so two tool calls arriving together genuinely interleave
+ * in one process. Issuing `chartbit_save` and `chartbit_screenshot` at the same moment did exactly
+ * that in the field: the page reloaded and five unsaved drawings were lost.
+ *
+ * These exercise the primitive directly. The driver cannot be exercised without a browser, so what
+ * connects the two is the source scan at the bottom — the property that makes ONE lock enough.
+ */
+test("the second caller waits for the first, and does not run beside it", async () => {
+  const order: string[] = [];
+  let releaseFirst: () => void = () => {};
+  const firstInside = new Promise<void>((r) => (releaseFirst = r));
+
+  const a = withDriverLock("A", async () => {
+    order.push("a:start");
+    await firstInside;
+    order.push("a:end");
+  });
+  // Queued while A is inside. If nothing serialised, "b:start" would land between A's two lines.
+  const b = withDriverLock("B", async () => {
+    order.push("b:start");
+    order.push("b:end");
+  });
+
+  await delay(20);
+  assert.deepEqual(order, ["a:start"], "B must not have started while A holds the window");
+  releaseFirst();
+  await Promise.all([a, b]);
+  assert.deepEqual(order, ["a:start", "a:end", "b:start", "b:end"]);
+});
+
+test("the lock is released when the work THROWS, not only when it succeeds", async () => {
+  // A failed chart call that kept the lock would take the feature down until the process restarted.
+  await assert.rejects(() => withDriverLock("boom", async () => { throw new Error("nope"); }), /nope/);
+  assert.equal(driverLockState().busy, false);
+  let ran = false;
+  await withDriverLock("after", async () => { ran = true; });
+  assert.ok(ran, "the next caller must be able to take the window");
+});
+
+test("waiters are served first-in-first-out", async () => {
+  const served: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const first = withDriverLock("holder", () => held);
+  const queued = ["one", "two", "three"].map((name) =>
+    withDriverLock(name, async () => {
+      served.push(name);
+    }),
+  );
+  await delay(20);
+  release();
+  await Promise.all([first, ...queued]);
+  assert.deepEqual(served, ["one", "two", "three"], "starvation is not a fair queue");
+});
+
+test("a caller that waits too long is told why, and nothing was changed", async () => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const holder = withDriverLock("drawing on BBRI", () => held);
+  await assert.rejects(
+    () => withDriverLock("screenshotting BBRI", async () => "never", 30),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.match(e.message, /one at a time/);
+      assert.match(e.message, /Nothing was changed/);
+      // Names the CURRENT holder, and says so in those words — after a handoff the blocking call is
+      // not the one we queued behind, and claiming otherwise would invent a cause.
+      assert.match(e.message, /currently busy with drawing on BBRI/);
+      return true;
+    },
+  );
+  release();
+  await holder;
+});
+
+test("the wait timeout stays under the MCP SDK's own request timeout", async () => {
+  // A longer wait is unreachable in the only way that matters: the client gives up at 60s and
+  // cancels, so a message crafted after that is written to a caller that stopped listening.
+  const { DEFAULT_REQUEST_TIMEOUT_MSEC } = await import("@modelcontextprotocol/sdk/shared/protocol.js");
+  assert.ok(
+    DRIVER_LOCK_WAIT_MS < DEFAULT_REQUEST_TIMEOUT_MSEC,
+    `${DRIVER_LOCK_WAIT_MS}ms must be under the client's ${DEFAULT_REQUEST_TIMEOUT_MSEC}ms`,
+  );
+});
+
+test("a stale release cannot hand the window to two callers at once", async () => {
+  // Without an ownership check, A's `finally` would clear whatever `holder` happens to be — B, mid
+  // flight — and the next arrival walks in beside it. That is the collision this module prevents,
+  // reintroduced by its own cleanup path.
+  let releaseA: () => void = () => {};
+  const aInside = new Promise<void>((r) => (releaseA = r));
+  const a = withDriverLock("A", () => aInside);
+  await delay(10);
+
+  resetDriverLock(); // A is still running, but no longer recorded as the holder.
+  let bRunning = false;
+  let releaseB: () => void = () => {};
+  const bInside = new Promise<void>((r) => (releaseB = r));
+  const b = withDriverLock("B", async () => {
+    bRunning = true;
+    await bInside;
+  });
+  await delay(10);
+  assert.ok(bRunning, "B took the free lock");
+
+  releaseA(); // A's finally fires a release it no longer owns.
+  await a;
+  assert.equal(driverLockState().busy, true, "B must still hold the window after A's stale release");
+  assert.equal(driverLockState().what, "B");
+
+  releaseB();
+  await b;
+  assert.equal(driverLockState().busy, false);
+});
+
+test("resetDriverLock rejects what is queued rather than granting it", async () => {
+  // A reset means "whatever was running is no longer accounted for". Handing the window to a queued
+  // call at that moment is the collision, not the recovery.
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const holder = withDriverLock("holder", () => held);
+  const queued = withDriverLock("queued", async () => "ran");
+  await delay(10);
+  resetDriverLock();
+  await assert.rejects(() => queued, /reset/);
+  release();
+  await holder;
+  resetDriverLock();
+});
+
+/**
+ * The property that makes ONE lock sufficient, asserted against the source.
+ *
+ * `withChart` is the only thing that opens a chart session, and no exported driver function calls
+ * another — so the mutex has no re-entrant path to deadlock on. Both are invisible at runtime
+ * without a browser, and both are one edit away from being false.
+ */
+test("every chart session is opened inside the lock, and nothing re-enters it", () => {
+  const driver = readFileSync(join(SRC, "chartbit", "driver.ts"), "utf8");
+
+  // 1. withChart is the only door. Scanned across the WHOLE of src/, not just this directory:
+  // `ChartbitSession` is an exported class with a public static `open`, so any module anywhere
+  // could open the browser outside the mutex, and a guard that watched one file would stay green
+  // while the property it protects was broken.
+  const openers = allSourceFiles(SRC).filter((f) => /ChartbitSession\.open\s*\(/.test(readFileSync(f, "utf8")));
+  assert.deepEqual(
+    openers.map((f) => f.slice(SRC.length + 1)),
+    ["chartbit/driver.ts"],
+    "a module that opens a chart session outside driver.ts drives the browser outside the mutex",
+  );
+  assert.equal((driver.match(/ChartbitSession\.open\s*\(/g) ?? []).length, 1);
+
+  // 2. Every exported driver function goes through withChart, and exactly once each.
+  const exported = [...driver.matchAll(/^export async function (\w+)/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    exported.sort(),
+    ["addStudy", "clearDrawings", "drawAnnotations", "listShapes", "openChart", "saveChart", "screenshotChart"],
+    "a new driver export must be routed through withChart and named here, consciously",
+  );
+  assert.equal((driver.match(/withChart\(\{/g) ?? []).length, exported.length);
+
+  // 3. No export calls another export — that is what makes a non-reentrant mutex safe here.
+  const body = driver.slice(driver.indexOf("export async function"));
+  for (const name of exported) {
+    const calls = [...body.matchAll(new RegExp(`(?<!function )\\b${name}\\s*\\(`, "g"))];
+    assert.equal(calls.length, 0, `${name} is called from inside driver.ts — the mutex would deadlock`);
+  }
 });
 
 /* --------------------- one annotation array, either tool, either spelling --------------------- */
