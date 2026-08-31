@@ -297,9 +297,9 @@ export function renderCandles(opts: CandleChartOptions): string {
   if (volH) {
     cursor += GAP;
     // A session whose volume the response did not carry draws NO bar. A null here used to be a
-    // zero, which drew a full-width bar of height 0.5 that reads as "nothing traded" — a claim
-    // about the session rather than about the payload. `Math.max` over a null would also make
-    // `maxVol` NaN and put `y="NaN"` on every rect in the panel.
+    // zero, which drew a full-width bar of minimum height that reads as "nothing traded" — a claim
+    // about the session rather than about the payload — and `humanAmount(null)` printed "- lots"
+    // into its tooltip. (`Math.max` over a null is NOT the problem: `Math.max(1, null)` is 1.)
     const volumes = bars.map((b) => b.volume).filter((v): v is number => v !== null);
     const maxVol = Math.max(1, ...volumes);
     for (let i = 0; i < n; i++) {
@@ -315,10 +315,14 @@ export function renderCandles(opts: CandleChartOptions): string {
     // some sessions are unreadable the gaps in the panel are explained rather than left to read as
     // sessions that traded nothing.
     const unread = n - volumes.length;
+    const peak = volumes.length === 0 ? null : Math.max(...volumes);
     const caption =
-      volumes.length === 0
+      peak === null
         ? "Volume  ·  not carried by this response"
-        : `Volume  ·  peak ${humanAmount(maxVol)} lots` +
+        // `peak` is the real maximum, NOT `maxVol` — that carries a `Math.max(1, …)` floor so the
+        // bar heights never divide by zero, and printing it for an all-zero window would report a
+        // peak of 1 lot that nobody sent.
+        : `Volume  ·  peak ${humanAmount(peak)} lots` +
           (unread > 0 ? `  ·  ${unread} session${unread === 1 ? "" : "s"} not carried` : "");
     parts.push(
       `<text x="${PAD_L}" y="${(cursor + 10).toFixed(1)}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}">${esc(caption)}</text>`,

@@ -485,12 +485,12 @@ export function registerTools(
       "field (close, high, low, volume, hl2…), or a number. Declare what you reference via " +
       "`overlays`/`panels` — the tool refuses a condition it cannot evaluate rather than storing a " +
       "rule that silently never fires.\n" +
-      "A field the SERIES does not carry is a separate matter from one you did not declare. Not " +
-      "every response carries volume, value or foreign flow; where a bar is missing the field it " +
-      "reads as absent rather than as zero, and a condition referencing it is UNJUDGEABLE on that " +
-      "bar — reported as warming up, not as false. That is deliberate: a rule comparing volume " +
-      "against a figure the response never sent would otherwise fire, or not fire, on a zero " +
-      "nobody reported.\n" +
+      "A field the SERIES does not carry is a separate matter from one you did not declare. Of the " +
+      "referenceable price fields, `volume` is the one a response can omit: where a bar is missing " +
+      "it the value reads as absent rather than as zero, and a condition referencing it is " +
+      "UNJUDGEABLE on that bar — reported as warming up, not as false. That is deliberate: a rule " +
+      "comparing volume against a figure the response never sent would otherwise fire, or not " +
+      "fire, on a zero nobody reported.\n" +
       "Alerts fire once per bar. Nothing is delivered automatically — `alert_check` evaluates them; " +
       "there is no background daemon yet.",
     {
@@ -578,12 +578,11 @@ export function registerTools(
       "A rule that fires is recorded so it does not fire again for the same bar.\n" +
       "`reason` on a rule that did not fire distinguishes 'condition-false' from 'warming-up' — the " +
       "second means the comparison could not be made, which is NOT the same as a no. It covers two " +
-      "situations: not " +
-      "enough history yet, which more bars fix; or an operand the SERIES DOES NOT CARRY — not every " +
-      "response includes volume, value or foreign flow, and where a bar is missing the field it is " +
-      "absent rather than zero. The second never resolves by waiting, however much history arrives, " +
-      "because the field is not in the payload. Check the field is present before widening the " +
-      "window.",
+      "situations: not enough history yet, which more bars fix; or an operand the SERIES DOES NOT " +
+      "CARRY — a response can omit `volume`, and where a bar is missing it the value is absent " +
+      "rather than zero. The second never resolves by waiting, however much history arrives, " +
+      "because the field is not in the payload. Check `volume` is present on the bars before " +
+      "widening the window.",
       {
       symbol: z.string().optional().describe("Only check rules for this ticker"),
       dry_run: z.boolean().optional().describe("Evaluate without recording fires, so a check can be repeated. Default false."),
@@ -1450,9 +1449,9 @@ export function registerTools(
       "cached for six hours once settled — so sweep broadly once, then iterate on the condition.\n" +
       "Misses distinguish `condition-false` from `warming-up` and `no-data`. `warming-up` means the " +
       "comparison could not be made: either not enough history yet, or an operand the series does " +
-      "not carry — a response that omits volume, value or foreign flow leaves that field absent " +
-      "rather than zero, and no amount of extra history will settle it. Truncation is always " +
-      "reported with its reason, so a capped sweep never reads as a complete one.",
+      "not carry — a response that omits `volume` leaves it absent rather than zero, and no amount " +
+      "of extra history will settle that. Truncation is always reported with its reason, so a " +
+      "capped sweep never reads as a complete one.",
     {
       symbols: z.array(z.string()).optional().describe("Explicit tickers. Omit to use movers or trending."),
       universe: z

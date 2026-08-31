@@ -71,12 +71,15 @@ export const StrOrNum = z.coerce.string();
  * destroys the difference between "the field was absent" and "the figure was zero" before any
  * projection can report it — and on this API that difference is the whole answer: "no foreign flow
  * today" and "we have no idea" are not the same claim. This project has now made that mistake in
- * four places, so there is one reader and everything uses it.
+ * four separate modules, so `src/core/` now has one reader and every route there goes through it.
+ * `src/analysis/analyze.ts` and `src/live/tape.ts` still carry their own; the live one does not
+ * guard the empty string at all, and is recorded as an open finding rather than changed from here.
  *
  * ## The rule
  *
  * What the value IS, never a list of empties — enumerating them missed `"  "` once already. A
- * number passes as itself; a string passes only with non-space content; a `{value}` or `{raw}`
+ * number passes as itself; a string passes only when it still has content once separators and
+ * space are removed; a `{value}` or `{raw}`
  * wrapper is unwrapped, because both are live on this API (`src/core/pricefeed.ts` measured
  * `{"value":"3,910"}` beside bare numbers); everything else is absent.
  *
@@ -89,9 +92,13 @@ export const StrOrNum = z.coerce.string();
 export function wireNumber(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return null;
-    const parsed = Number(trimmed.replace(/,/g, ""));
+    // Separators come out BEFORE the emptiness test, not after. With the order reversed a string
+    // of nothing but separators — "," or " , " — has non-space content, passes the guard, becomes
+    // "" during the strip, and `Number("")` is 0. That put the whole defect back for a fourth
+    // time, in the one function every price and every statistic now flows through.
+    const cleaned = value.replace(/,/g, "").trim();
+    if (cleaned === "") return null;
+    const parsed = Number(cleaned);
     return Number.isFinite(parsed) ? parsed : null;
   }
   if (value && typeof value === "object") {

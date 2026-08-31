@@ -69,9 +69,16 @@ export interface Bar {
    * places in this codebase that already had to answer the same question.
    *
    * `open`/`high`/`low`/`close` are always numbers, because a row that cannot yield one is REFUSED
-   * rather than projected — see `toBar`. That is the same call `projectSeries` makes in
-   * `src/core/market.ts`, on the same ground: a series with holes in it is worse than an error,
-   * since every average, pattern and backtest computed from it is quietly wrong rather than absent.
+   * rather than projected — see `toBar`. The ground is that a series with holes in it is worse than
+   * an error: every average, pattern and backtest computed from it is quietly wrong rather than
+   * absent.
+   *
+   * This is STRICTER than `projectSeries` in `src/core/market.ts`, which refuses only `date` and
+   * `close` and falls back open/high/low to the close with a warning. That is deliberate on its
+   * side — the daily chart route is observed sending those three empty, and degrading beats
+   * failing there — and this route has no such observation. If `historical/summary` ever formats a
+   * price that way, this refuses where the chart route degrades, and that asymmetry is the thing to
+   * revisit rather than a bug to patch at the call site.
    */
   /** Lots (1 lot = 100 shares), matching the convention used elsewhere in this API. */
   volume: number | null;

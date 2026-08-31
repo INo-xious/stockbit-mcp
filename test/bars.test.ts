@@ -138,7 +138,7 @@ test("an EMPTY field on the wire is absent, which is where the zero used to be m
       date: day(0),
       open: 1000, high: 1010, low: 990, close: 1005,
       volume: "", value: null, frequency: "  ", change: false,
-      change_percentage: [], foreign_buy: "", foreign_sell: null, net_foreign: "",
+      change_percentage: [], foreign_buy: ",", foreign_sell: null, net_foreign: " , ",
     },
   ];
   const series = await getBars({ symbol: "BBRI", bars: 1 });
@@ -160,7 +160,11 @@ test("a row with an unreadable PRICE is refused, never returned with a price of 
   // `z.coerce.number().parse(null)` is 0, and a close of 0 is not a quiet degradation: an alert
   // rule `close < 100` fires on it, `backtest` divides by an entry price of zero, and the chart
   // collapses its axis. One bad bar poisons every indicator over the series containing it.
-  for (const bad of [null, "", "  ", false, [], "abc"] as unknown[]) {
+  // "," and " , " are in this list deliberately. They have non-space content, so a guard written
+  // as "trim, then check empty, then strip separators" lets them through — they become "" during
+  // the strip and `Number("")` is 0. That is the fourth time this family of empties has defeated a
+  // check on this branch, so the check now strips FIRST.
+  for (const bad of [null, "", "  ", false, [], "abc", ",", " , ", ",,,"] as unknown[]) {
     rowsOverride = [{ date: day(0), open: 1000, high: 1010, low: 990, close: bad, volume: 1200 }];
     clearCache();
     await assert.rejects(

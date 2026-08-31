@@ -14,6 +14,7 @@ import { getBrokerSummary, clearCache } from "../src/core/index.ts";
 import { brokerSummaryTtlFor } from "../src/core/marketdetectors.ts";
 import { getBandarDetector } from "../src/core/brokers.ts";
 import { extractBands } from "../src/core/pricefeed.ts";
+import { wireNumber } from "../src/core/_util.ts";
 import { CACHE } from "../src/config.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -367,4 +368,24 @@ test("a payload of the wrong shape yields nulls rather than throwing", () => {
     assert.equal(bands.ara, null);
     assert.equal(bands.found.length, 0);
   }
+});
+
+/* ------------------------------ the one wire reader ------------------------------ */
+
+test("wireNumber reads a value, or says it could not — it never invents a zero", () => {
+  // Every price and every statistic in src/core/ flows through this. The empties are enumerated
+  // because each one has, at some point on this branch, defeated a check written a different way:
+  // `Number("")`, `Number(null)`, `Number("  ")`, `Number(false)`, `Number([])` and — the one that
+  // reopened it a fourth time — `Number(",".replace(/,/g, ""))` are all 0.
+  for (const empty of [undefined, null, "", "  ", "\t", false, true, [], {}, ",", " , ", ",,,", "abc", NaN, Infinity]) {
+    assert.equal(wireNumber(empty), null, `${JSON.stringify(empty)} carries no number`);
+  }
+  // And the other edge: a real value, including a real zero, still reads.
+  assert.equal(wireNumber(0), 0);
+  assert.equal(wireNumber("0"), 0);
+  assert.equal(wireNumber("1,234"), 1234);
+  assert.equal(wireNumber("-2,500"), -2500);
+  assert.equal(wireNumber(" 42 "), 42);
+  assert.equal(wireNumber({ value: "3,910" }), 3910, "the wrapper shape measured on the bands");
+  assert.equal(wireNumber({ raw: 4510 }), 4510);
 });

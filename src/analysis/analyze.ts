@@ -343,8 +343,13 @@ export function brokerFlowPillar(input: BrokerFlowInput): Pillar {
     }
   } else {
     notes.push(
-      `Foreign flow not read: needs 5 sessions carrying BOTH traded value and foreign net, ` +
-        `saw ${readable.length} of ${recent.length}.`,
+      readable.length < 5
+        ? `Foreign flow not read: needs 5 sessions carrying BOTH traded value and foreign net, ` +
+          `saw ${readable.length} of ${recent.length}.`
+        : // The count gate passed; it is the traded value that is unusable, and saying "saw 20 of
+          // 20" here would name the test that succeeded while the reader looks for the one that did not.
+          `Foreign flow not read: ${readable.length} sessions were readable but their traded value ` +
+          `sums to ${tradedValue}, so the ratio has no denominator.`,
     );
   }
 
