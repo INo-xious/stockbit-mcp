@@ -474,6 +474,15 @@ test("a 401 from the chart is reported as a token PLACEMENT failure, not a dead 
   assert.equal(pathOf(wire()[0].url), "emitten-metadata/shareholders/token");
 });
 
+test("a 401 here is not retried: a one-shot token the server rejected is spent", async () => {
+  // Every other route retries a 401 once, because the refresh in between CHANGES the credential.
+  // This route has no token domain, so there is nothing to refresh and the second request would be
+  // the first request again — with a token the server has already rejected and consumed.
+  await assert.rejects(() => getShareholders("DENY"), StockbitError);
+  assert.equal(wire().length, 2, "one mint, one read — not a second read with the spent token");
+  assert.equal(wire().filter((c) => c.url.includes("/chart")).length, 1);
+});
+
 test("the same refusal under a different status is still diagnosed, because the status is the weak half", async () => {
   // Of the two things the field recorded, the body string was copied out of a response and the
   // 401 beside it is the reporter's annotation — no status for this failure is written down

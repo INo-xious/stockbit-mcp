@@ -146,10 +146,16 @@ export async function getJson<T = unknown>(route: RouteName, opts: GetOptions = 
       // 401 → refresh once, retry immediately (doesn't consume a backoff attempt). Not on a refresh
       // route: a 401 there means the refresh token itself is dead, and refreshing again to fix it
       // would recurse.
-      if (res.status === 401 && !refreshedOn401 && !isRefreshRoute(route)) {
+      //
+      // And not on a route with no token domain. The retry is only worth making because the
+      // refresh CHANGES the credential; where there is nothing to refresh, the second request is
+      // the first request again. The shareholder chart is the case: its credential is a one-shot
+      // token minted before the call, so a retry re-presents a token the server has already
+      // rejected and spent — a round trip guaranteed to teach nothing.
+      const refreshable = isRefreshRoute(route) ? null : domainOf(route);
+      if (res.status === 401 && !refreshedOn401 && refreshable) {
         refreshedOn401 = true;
-        const domain = domainOf(route);
-        if (domain) await forceRefresh(domain, token);
+        await forceRefresh(refreshable, token);
         attempt--; // this loop turn didn't "cost" a retry
         continue;
       }
