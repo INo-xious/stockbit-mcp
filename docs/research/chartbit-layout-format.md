@@ -71,7 +71,30 @@ Two consequences worth stating plainly:
 ## The layout object
 
 Chartbit is a TradingView Charting Library widget (`window.tvWidget`). The saved object is the
-library's standard chart state:
+library's standard chart state.
+
+> **The object below is the INNERMOST of three, and reading a stored layout as if it were the
+> outermost finds nothing.** Measured against a real account on 2026-09-01, `GET
+> /chartbit/charts/{layoutId}` decodes to:
+>
+> ```jsonc
+> { "id": "53e5877c-…-3355424", "name": "Bandarmology", "resolution": "1D", "symbol": "IHSG",
+>   "content": {
+>     "id": "…", "name": "…", "symbol": "IHSG", "resolution": "1D", "symbol_type": "…",
+>     "exchange": "…", "listed_exchange": "…", "short_name": "…", "legs": …,
+>     "description": "…", "is_realtime": …, "theme": "…",
+>     "charts_symbols": "{\"1\":{\"symbol\":\"IHSG\"}}",   // a JSON *string*: chart id -> symbol
+>     "content": { /* the object documented below, with `charts` */ } } }
+> ```
+>
+> `charts_symbols` is the only thing that says which chart shows which symbol, and it is what
+> `chartIdFromLayout` (`src/chartbit/api.ts`) uses to resolve a multi-chart layout. That function
+> walks the `content` chain rather than indexing a fixed depth, because these two shapes already
+> differ by two levels.
+>
+> Layout ids are **not numeric**: `53e5877c-64f5-471b-82a9-e572db648ad1-3355424`. The transport
+> validated that segment with `numericId` until 2026-09-01, which made every route taking a layout
+> id unreachable with any id the account actually has.
 
 ```jsonc
 {

@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
+import { StockbitError } from "../src/http/errors.ts";
 import { registerCompanyTools } from "../src/tools/company.ts";
 import type { Definer, ToolHandler } from "../src/tools/_define.ts";
 import {
@@ -149,7 +150,15 @@ before(() => {
       return json(SUBSIDIARIES);
     }
     if (path.endsWith("shareholders/token")) return json(SHAREHOLDER_TOKEN);
-    if (path.includes("shareholders/") && path.endsWith("/chart")) return json(SHAREHOLDERS);
+    if (path.includes("shareholders/") && path.endsWith("/chart")) {
+      // The refusal the field hit, verbatim. DENY serves it under the 401 the reporter annotated;
+      // DENY400 serves the SAME refusal under a status nobody has recorded, because the status is
+      // the weaker half of that observation.
+      const refusal = { message: "rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found" };
+      if (path.includes("/DENY400/")) return json(refusal, 400);
+      if (path.includes("/DENY/")) return json(refusal, 401);
+      return json(SHAREHOLDERS);
+    }
     if (path.endsWith("classification/company")) return json(CLASSIFICATION_COMPANY);
     if (path.endsWith("emitten/classification")) return json(CLASSIFICATION_TAXONOMY);
     if (path.includes("emitten/indexes/")) return json(INDEX_MEMBERS);
@@ -340,6 +349,51 @@ test("the shareholders cache key carries the year and the type", async () => {
     .filter((c) => c.method === "GET")
     .map((c) => query(c.url).value_year);
   assert.deepEqual(years, ["2024", "2025"], "the repeat was served from cache; the other year was not");
+});
+
+test("a 401 from the chart is reported as a token PLACEMENT failure, not a dead session", async () => {
+  // The tool's own description predicted this failure and the prediction fired: 401
+  // `WebViewToken.FromContext: User Not Found` on a session where everything else worked. The
+  // placement cannot be corrected without a capture, so the one thing this client can do for the
+  // caller is stop them debugging their login.
+  await assert.rejects(
+    () => getShareholders("DENY"),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "auth");
+      assert.equal(error.status, 401);
+      // Three variants of this call — valid token, no token, junk token — answered identically on
+      // 2026-09-01, so the message may not describe the query placement as merely unverified.
+      assert.match(error.message, /query parameter/);
+      assert.match(error.message, /No value will fix it/);
+      // And it must not send the caller off to check their own session, which is fine.
+      assert.match(error.message, /not your session/i);
+      // A caller who wanted the register still needs an answer, and there is one that works.
+      assert.match(error.message, /company_profile/);
+      // The upstream text is kept: dropping it would hide a DIFFERENT auth failure behind this
+      // diagnosis, and the diagnosis is a strong claim to be making about someone else's 401.
+      assert.match(error.message, /WebViewToken\.FromContext/);
+      return true;
+    },
+  );
+  // The token was still minted first, so the failure really is the chart refusing it.
+  assert.equal(pathOf(wire()[0].url), "emitten-metadata/shareholders/token");
+});
+
+test("the same refusal under a different status is still diagnosed, because the status is the weak half", async () => {
+  // Of the two things the field recorded, the body string was copied out of a response and the
+  // 401 beside it is the reporter's annotation — no status for this failure is written down
+  // anywhere in this repo. Keying only on the kind would hand the caller the raw gateway string
+  // for the very failure this branch exists to explain.
+  await assert.rejects(
+    () => getShareholders("DENY400"),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.match(error.message, /No value will fix it/);
+      assert.match(error.message, /WebViewToken\.FromContext/);
+      return true;
+    },
+  );
 });
 
 /* --------------------------------- classification --------------------------------- */

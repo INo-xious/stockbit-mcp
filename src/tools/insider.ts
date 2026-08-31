@@ -130,8 +130,12 @@ export function registerInsiderTools(define: Definer): void {
       "on the reporting cycle rather than daily. Use insider_transactions for the changes between " +
       "snapshots. " +
       LAG +
-      "\nnetwork needs BOTH `root_id` and `root_type` (COMPANY or INVESTOR). Get a company id from " +
-      "mode=companies and a holder id from an insider_transactions row's `insiderId`. `max_depth` " +
+      "\ncompanies is addressed upstream by Stockbit's internal numeric company id, NOT by ticker — " +
+      "sending the ticker answers `Invalid company id`. You still pass `symbol`: the ticker is " +
+      "resolved to its id first, which costs one extra request, and the id comes back as " +
+      "`companyId`. A ticker Stockbit has no id for is refused here rather than upstream.\n" +
+      "network needs BOTH `root_id` and `root_type` (COMPANY or INVESTOR). Get a company id from " +
+      "mode=companies' `companyId` and a holder id from an insider_transactions row's `insiderId`. `max_depth` " +
       "defaults to Stockbit's own 3 and `max_edge_per_node` to 20; raising either grows the graph " +
       "fast.\n" +
       "The payload is returned WHOLE and unprojected, because this shape has not been mapped. " +

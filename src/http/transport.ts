@@ -162,7 +162,23 @@ const SEGMENT_VALIDATORS = {
   postId: numericId("stream post id"),
   sectorId: numericId("sector id"),
   insiderId: numericId("insider id"),
-  layoutId: numericId("chart layout id"),
+  /**
+   * A Chartbit layout id. NOT numeric, though this validator said it was until 2026-09-01.
+   *
+   * `GET /chartbit/charts` was called live on that date and every id it returned looked like
+   * `53e5877c-64f5-471b-82a9-e572db648ad1-3355424` — a UUID, a hyphen, and what is presumably the
+   * account number. `numericId` refused all of them, and refused them HERE, before the request was
+   * built: every route taking this segment (read one layout, save one, delete one, and the chart-id
+   * derivation that `chartbit_drawings` needs) was unreachable with any id the account actually
+   * has. `chartbit_layouts` listing them fine is what hid it — the ids were right there and nothing
+   * could spend one.
+   *
+   * Deliberately loose, on the same reasoning `orderId` above spells out: the charset excludes
+   * every path metacharacter, so a rule looser than reality is survivable, while a rule TIGHTER
+   * than reality refuses the user's own data. That is the mistake being corrected, so it is not
+   * the one to make again by pinning this to the exact shape of two observed ids.
+   */
+  layoutId: pattern("chart layout id", /^[A-Za-z0-9_-]{1,80}$/, "a chart layout id (letters, digits, _ or -)"),
   /**
    * A broker code: two to four uppercase alphanumerics (YP, CC, BK, …).
    *
@@ -455,8 +471,18 @@ export async function authenticatedRequest(
   const placement = PLACEMENT[route.auth];
 
   // The e-IPO refresh carries its credential as a query parameter, so it has to join `params`
-  // before the URL is built — and it is added here rather than by the caller so that no call site
-  // outside this module ever puts a token into a URL.
+  // before the URL is built — and it is added here rather than by the caller, so that a token in a
+  // URL is this module's decision rather than something any call site can do incidentally.
+  //
+  // It is not a property this code enforces, and the comment used to say it was. `getShareholders`
+  // in src/core/company.ts puts a minted one-shot token into `params` itself, because `params` is
+  // an open record and there is no header channel to put it anywhere else: neither
+  // `AuthenticatedRequest` below nor `GetOptions` in client.ts carries headers, and outbound
+  // headers are one literal further down. That call is the only one in `src/` that does this
+  // (`grep -rn "params: {.*token" src/`), and where its token actually belongs is unsettled —
+  // see the note on `readShareholdersChart`. Opening a general per-call headers option to give it
+  // somewhere better to go would let any call site attach arbitrary headers to a bearer-carrying
+  // request, which is a wider change than the one bug needs.
   const effectiveParams: QueryParams =
     placement === "queryToken" ? { ...(params ?? {}), token: token ?? "" } : (params ?? {});
   const url = buildUrl(name, segments, effectiveParams);

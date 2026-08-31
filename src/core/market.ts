@@ -463,7 +463,27 @@ export async function getChartRaw(symbol: string, timeframe: string): Promise<un
 /* ================================ enum vocabularies ================================ */
 
 /** Sides of the running-trade tape. Wire form is `RUNNING_TRADE_ACTION_TYPE_<value>`. */
+/**
+ * The most rows the running-trade tape will ever return, whatever `limit` says.
+ *
+ * OBSERVED BEHAVIOUR, not a documented maximum — the same distinction
+ * `INSIDER_TRANSACTIONS_LIMIT_CEILING` draws next door. Measured directly on 2026-09-01 against
+ * BBRI: `limit=100` returned 100 rows, `limit=101` returned 100, `limit=250` returned 100. Never
+ * an error, always a silent truncation. That agrees with the 2026-08-28 probe recorded on
+ * `getRunningTrade` below and with a 2026-08-31 field report that got byte-identical responses for
+ * 200 and 3000, so the boundary is pinned at 100 rather than merely bracketed.
+ *
+ *
+ * Refused rather than clamped. Nothing in the response marks the truncation, so a caller who asked
+ * for 250 would be handed 100 and no way to notice — and because `order_by` starts every window at
+ * the session open and `offset`/`page` were measured to move nothing, the rows they wanted are not
+ * reachable through this route at any limit. Being told that is the useful answer.
+ */
+export const RUNNING_TRADE_MAX_LIMIT = 100;
+
 export const RUNNING_TRADE_ACTIONS = ["ALL", "BUY", "SELL"] as const;
+/** The three orderings the endpoint accepts. `0` and `4` were measured to be rejected. */
+export const RUNNING_TRADE_ORDER_BY = [1, 2, 3] as const;
 export type RunningTradeAction = (typeof RUNNING_TRADE_ACTIONS)[number];
 
 /** Trade-book views. `BIG_MONEY` restricts to large prints. Wire form is `TRADE_BOOK_MODE_<value>`. */
@@ -516,9 +536,14 @@ export function normalizeSortKey(input: string): string {
  * truncate a caller who asked for more. Non-integers and zero are refused because they reach the
  * wire as literal garbage (`limit=NaN`) and this API answers those with a confident 200.
  */
-function positiveInt(name: string, value: number): number {
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new StockbitError("invalid_param", `${name} must be a positive whole number, got ${String(value)}`);
+function positiveInt(name: string, value: number, max?: number, note?: string): number {
+  if (!Number.isInteger(value) || value <= 0 || (max !== undefined && value > max)) {
+    throw new StockbitError(
+      "invalid_param",
+      max === undefined
+        ? `${name} must be a positive whole number, got ${String(value)}`
+        : `${name} must be a whole number between 1 and ${max}, got ${String(value)}${note ?? ""}`,
+    );
   }
   return value;
 }
@@ -600,8 +625,28 @@ export async function getRunningTrade(opts: RunningTradeOptions = {}): Promise<u
   // Plural. See the note above — the singular form is accepted and ignored.
   if (opts.symbol !== undefined) params.symbols = normalizeSymbol(opts.symbol);
   if (opts.action !== undefined) params.action_type = `RUNNING_TRADE_ACTION_TYPE_${opts.action}`;
-  if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+  if (opts.limit !== undefined) {
+    params.limit = positiveInt(
+      "limit",
+      opts.limit,
+      RUNNING_TRADE_MAX_LIMIT,
+      ` — ${RUNNING_TRADE_MAX_LIMIT} is the largest value this endpoint has been seen to answer, and ` +
+        `200 and 3000 came back identical to each other. Its window always starts at the session ` +
+        `open and offset/page were measured to move nothing, so a bigger limit would not have ` +
+        `reached later prints either. Use broker_flow_intraday for the rest of the session: whole ` +
+        `day, one-minute resolution, per-broker value and volume`,
+    );
+  }
   // Always sent: omitting it is a hard 400, so there is no "unset" worth preserving here.
+  // Refused here when it is outside the measured set, because 0 and 4 were both seen rejected and
+  // a round trip that comes back 400 teaches the caller nothing this file does not already know.
+  if (opts.orderBy !== undefined && !RUNNING_TRADE_ORDER_BY.includes(opts.orderBy)) {
+    throw new StockbitError(
+      "invalid_param",
+      `order_by must be one of ${RUNNING_TRADE_ORDER_BY.join(", ")} — 0 and 4 were both refused ` +
+        `upstream when measured — got ${String(opts.orderBy)}`,
+    );
+  }
   params.order_by = String(opts.orderBy ?? 1);
   const route: RouteName = opts.grouped ? "runningTradeGroup" : "runningTrade";
   return cached(keyFor(route, params), CACHE.defaultTtlMs, () =>
@@ -610,12 +655,22 @@ export async function getRunningTrade(opts: RunningTradeOptions = {}): Promise<u
 }
 
 /**
- * The intraday running-trade chart for one symbol.
+ * The intraday running-trade chart for one symbol: per-broker flow on a one-minute grid.
  *
- * Returned unprojected. The name this is registered under reflects how the project expects to use
- * it, not a claim about the payload: whether it breaks the session down by broker, by price level or
- * by side is unobserved, and reading it as broker flow before that is confirmed would be reading a
- * shape that may not be there.
+ * Returned unprojected. The name this is registered under used to be a hope rather than a claim —
+ * "whether it breaks the session down by broker, by price level or by side is unobserved". Read
+ * live on 2026-09-01 against BBRI, it is by broker and by minute:
+ *
+ *   `data.price_chart_data`  — 335 points, 09:00 → 16:14, each `{date, time, datetime_label,
+ *                              value{raw,formatted}, open, high, low}`
+ *   `data.broker_chart_data` — TWO series, `TYPE_CHART_VALUE` and `TYPE_CHART_VOLUME`, each with a
+ *                              `brokers` code list and `charts: [{broker_code, chart[]}]` on the
+ *                              same grid. Five brokers on that reading, not the whole market.
+ *   also `from`, `to`, `data_last_updated`, `date_session_info`
+ *
+ * Worth knowing beside `getRunningTrade` above: that tape shows only the first 100 prints of the
+ * day and runs eight to ten minutes behind. This covers the whole session at minute resolution, so
+ * it answers the questions the tape cannot.
  */
 export async function getRunningTradeChart(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
@@ -631,6 +686,23 @@ export interface TradeBookOptions {
   mode?: TradeBookMode;
   /** Auction phases to exclude. Sent as repeated parameters, one per value. */
   dataModes?: readonly TradeBookDataMode[];
+  /**
+   * REQUIRED by the endpoint, and it has no default here because none has been observed.
+   *
+   * A 2026-08-31 field report called this route with `mode` set and with `mode` omitted and got
+   * `400 {"error":"Group by is required","kind":"invalid_param"}` both times. The parameter was
+   * absent from this interface entirely, so every call this project could make was a call that
+   * could not succeed.
+   *
+   * TWO things here are unobserved, and only one of them is the caller's to supply. The VALUE is
+   * passed through verbatim because its vocabulary has never been seen. The wire KEY — `group_by`
+   * — is this file's inference: `/order-trade/running-trade` on the same service answers
+   * `"OrderBy is a required field"` for a parameter that really is spelled `order_by`, so the same
+   * transformation is the obvious reading of `"Group by is required"`. Obvious is not observed.
+   * `order_queue` on this same service cost five candidates to settle a key that read just as
+   * obviously, so if a supplied value still 400s, suspect the key before the value.
+   */
+  groupBy?: string;
   limit?: number;
   /** Read the chart form (`tradeBookChart`) instead of the table. */
   chart?: boolean;
@@ -652,6 +724,26 @@ export async function getTradeBook(opts: TradeBookOptions = {}): Promise<unknown
     params.data_mode = opts.dataModes.map((m) => `TRADE_BOOK_DATA_MODE_${m}`);
   }
   if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+  const groupBy = opts.groupBy?.trim();
+  // Only the table route is known to demand it. The chart route is a different endpoint and the
+  // 400 was never seen from it, so requiring it there too would be this file inventing a rule.
+  if (!groupBy && opts.chart !== true) {
+    throw new StockbitError(
+      "invalid_param",
+      "trade book needs a grouping key: without one the endpoint answers " +
+        '400 {"error":"Group by is required"} whatever else is sent, so there is no argument ' +
+        "combination that works. Neither the wire KEY nor its values have been observed. This " +
+        "client sends the key as `group_by`, inferred from the sibling on this same service whose " +
+        '"OrderBy is a required field" turned out to mean `order_by` — a precedent, not a ' +
+        "confirmation. The VALUE is whatever you pass, verbatim: none is invented here. Values on " +
+        "this endpoint's other parameters are prefixed enums (`TRADE_BOOK_MODE_*`), while that " +
+        "same sibling takes bare integers 1/2/3, so both forms are worth a try.",
+    );
+  }
+  // Sent exactly as given. Prefixing it the way `mode` is prefixed would be a guess about a
+  // vocabulary nothing here has seen, and a wrong guess reads as a working call that filters to
+  // something the caller did not ask for.
+  if (groupBy) params.group_by = groupBy;
   const route: RouteName = opts.chart ? "tradeBookChart" : "tradeBook";
   return cached(keyFor(route, params), CACHE.defaultTtlMs, () =>
     readData(route, opts.chart ? "trade book chart" : "trade book", { params }),

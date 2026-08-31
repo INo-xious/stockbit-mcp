@@ -115,7 +115,7 @@ test("the permitted request set on EXODUS is exactly this list", () => {
     "GET /fundachart/templates",
     "GET /insider/company/majorholder",
     "GET /insider/majorholder/ownership",
-    "GET /insider/shareholding/companies/:symbol",
+    "GET /insider/shareholding/companies/:companyId",
     "GET /insider/shareholding/composition/companies/:symbol",
     "GET /insider/shareholding/investors/:insiderId",
     "GET /insider/shareholding/network",
@@ -610,10 +610,17 @@ test("the writable Chartbit surface is exactly the charts, drawings and settings
       assert.equal(isPermitted(method, `${EXODUS}${path}`), false, `${method} ${path} must be rejected`);
     }
   }
-  // A layout id is a path segment on a bearer-carrying DELETE, so it gets the numeric-id validator
-  // rather than anything looser.
+  // A layout id is a path segment on a bearer-carrying DELETE, so what it may contain matters.
+  //
+  // It is NOT numeric, though this test used to assert that it was. `GET /chartbit/charts` was
+  // called live on 2026-09-01 and every id came back looking like
+  // `53e5877c-64f5-471b-82a9-e572db648ad1-3355424`, so the numeric rule refused every real layout
+  // this account has — a rule tighter than reality, which is the failure mode the `orderId`
+  // validator's own comment warns about. The guard that actually matters is unchanged: the charset
+  // admits no path metacharacter, so traversal is still impossible.
   assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/..`), false);
-  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/mine`), false);
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/a/b`), false);
+  assert.equal(isPermitted("DELETE", `${EXODUS}/chartbit/charts/53e5877c-64f5-471b-82a9-e572db648ad1-3355424`), true);
 
   // The study and drawing template lists are readable and NOT writable — creating one has no caller.
   assert.equal(isPermitted("GET", `${EXODUS}/chartbit/studies`), true);

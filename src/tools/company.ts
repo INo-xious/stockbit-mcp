@@ -111,7 +111,16 @@ export function registerCompanyTools(define: Definer): void {
       "\n" +
       "Pending verification: where the minted token belongs on the wire is unconfirmed; it is sent " +
       "as a `token` query parameter. An auth error here on a session that works elsewhere means that " +
-      "placement is wrong, not that the account lacks access.",
+      "placement is wrong, not that the account lacks access.\n" +
+      "THAT HAS NOW HAPPENED AND THIS TOOL DOES NOT WORK. It answered 401 " +
+      "`WebViewToken.FromContext: User Not Found` on 2026-08-31 in a session where everything else " +
+      "succeeded, and on 2026-09-01 the same call returned that identical 401 three ways — with a " +
+      "valid minted token, with no token, and with a junk one. So the `token` query parameter is " +
+      "not the placement this endpoint reads and no value will fix it. Where the token belongs (a " +
+      "header, or a POST body) needs a capture of Stockbit's own request, so the placement is left " +
+      "alone rather than swapped for another guess, and the 401 now explains itself instead of " +
+      "surfacing the raw gateway string. USE company_profile's `shareholder_one_percent` instead: " +
+      "it carries holders, percentages and the scrip/scripless split, and it works.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       value_year: z.coerce

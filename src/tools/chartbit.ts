@@ -75,12 +75,22 @@ export function registerChartbitTools(define: Definer): void {
       "This is analysis context. Levels the user drew by hand are a statement about what they think " +
       "matters, and reading them before offering an opinion is the difference between advice and " +
       "noise.\n" +
-      "All three filters are optional; passing none returns what the account has for the default " +
-      "chart. Times are UNIX seconds. An empty list means nothing is saved for that chart.",
+      "PASS `layout_id`, from chartbit_layouts. Stockbit stores each chart's drawings against the " +
+      "CHART's id rather than the layout's, and this endpoint answers 400 to every call that does " +
+      "not carry one — with no arguments, with `{symbol}`, and with a valid layout_id and symbol " +
+      "together. You do not have to find that id: given layout_id it is decoded out of the layout " +
+      "itself, at the cost of one extra request, and comes back as `chartId` alongside " +
+      "`chartIdDerived: true`. Verified against a real account on 2026-09-01, which is also when " +
+      "the 400 stopped.\n" +
+      "A layout holding several charts is resolved by `symbol`, using the layout's own chart-to-" +
+      "symbol map. If that map names no chart for your symbol, or names more than one, you are " +
+      "asked for `chart_id` rather than given a guess — each chart has its own drawing store, so " +
+      "the wrong id returns another chart's lines and looks like it worked.\n" +
+      "Times are UNIX seconds. An empty list means nothing is saved for that chart.",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI"),
-      layout_id: z.string().optional().describe("Layout id from chartbit_layouts"),
-      chart_id: z.string().optional().describe("Chart id within the layout"),
+      layout_id: z.string().optional().describe("Layout id from chartbit_layouts. Needed unless you pass chart_id."),
+      chart_id: z.string().optional().describe("Chart id within the layout. Derived from the layout when omitted."),
     },
     async (a) =>
       runTool(async () => {
@@ -96,6 +106,7 @@ export function registerChartbitTools(define: Definer): void {
           symbol: result.symbol,
           layoutId: result.layoutId,
           chartId: result.chartId,
+          chartIdDerived: result.chartIdDerived,
           count: result.drawings.length,
           drawings: result.drawings.map(({ raw: _raw, ...drawing }) => drawing),
         };

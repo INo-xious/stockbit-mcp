@@ -66,13 +66,36 @@ export function registerMarketTools(define: Definer): void {
       "default, which is not necessarily ALL.\n" +
       "grouped=true reads a different endpoint that returns the tape aggregated rather than print by " +
       "print. It is not a display option: the two return different payloads.\n" +
+      "THIS TAPE IS NOT LIVE. Measured against the live API during an open session, it runs about " +
+      "EIGHT TO TEN MINUTES BEHIND and refreshes in bursts — its head sat unchanged for over three " +
+      "minutes while the lag grew second for second, and the staleness is at Stockbit's origin, not " +
+      "in a CDN. Do not answer 'what just traded' from it. src/live/tape.ts exists because of this.\n" +
+      "READ THIS BEFORE ASKING IT ABOUT THE CLOSE. Measured 2026-08-28: the window always starts at " +
+      "the SESSION OPEN, at most 100 rows come back however large `limit` is, and `offset`/`page` " +
+      "are accepted but move nothing. So on a busy ticker this tool can only ever show the first " +
+      "100 prints of the day — the last trade before the close is NOT reachable through it at any " +
+      "argument. A limit above 100 is refused here rather than silently truncated. USE " +
+      "broker_flow_intraday for anything about the rest of the session: it covers 09:00 to 16:14 at " +
+      "one-minute resolution with per-broker value and volume, and it is the tool that answers the " +
+      "questions this one cannot.\n" +
+      "`order_by` is required upstream and is NOT a time ordering: 1 is chronological from the open " +
+      "with real trade sizes, 2 and 3 both return lot-ascending rows that were every one a 1-lot " +
+      "trade when measured. None of the three returns the most recent prints and none returns the " +
+      "largest. 1 is the default because it is the only one that answers a question anyone asks.\n" +
       "An empty result is NORMAL outside 09:00-16:00 WIB — the tape is a live feed and nothing " +
       "crosses when the market is shut. Call market_session before treating emptiness as a fault.\n" +
       PENDING,
     {
       symbol: z.string().optional().describe("IDX ticker. Omit for the market-wide tape."),
       action: z.enum(core.RUNNING_TRADE_ACTIONS).optional().describe("ALL, BUY or SELL. Omitted sends no filter."),
-      limit: z.coerce.number().optional().describe("Max rows. Omitted sends no limit and takes the server default."),
+      limit: z.coerce
+        .number()
+        .optional()
+        .describe(`Max rows, 1-${core.RUNNING_TRADE_MAX_LIMIT}. Larger is refused: the endpoint ignores it.`),
+      order_by: z.coerce
+        .number()
+        .optional()
+        .describe("1 chronological from the open (default), 2 and 3 lot-ascending. Not a time ordering."),
       grouped: z.boolean().optional().describe("Read the aggregated view instead of the print-by-print tape."),
     },
     async (a) =>
@@ -81,6 +104,7 @@ export function registerMarketTools(define: Definer): void {
           symbol: a.symbol as string | undefined,
           action: a.action as (typeof core.RUNNING_TRADE_ACTIONS)[number] | undefined,
           limit: a.limit as number | undefined,
+          orderBy: a.order_by as 1 | 2 | 3 | undefined,
           grouped: a.grouped as boolean | undefined,
         }),
       ),
@@ -95,9 +119,22 @@ export function registerMarketTools(define: Definer): void {
       "distribution badly, so excluding them changes the picture rather than trimming it.\n" +
       "chart=true reads a different endpoint returning the chart form of the same idea, not a " +
       "rendering of this one.\n" +
+      "A grouping key is REQUIRED by the endpoint: without one every call answers 400 \"Group by is " +
+      "required\" no matter what else is sent, which is why this tool could not be called at all " +
+      "until the parameter existed. It is refused here rather than spent on a round trip.\n" +
+      "This server knows NEITHER the key nor its values. The key is sent as `group_by`, inferred " +
+      "from the sibling endpoint whose \"OrderBy is a required field\" meant `order_by` — a " +
+      "precedent, not a confirmation. Your value is sent VERBATIM and none is invented: other " +
+      "parameters here are prefixed enums (TRADE_BOOK_MODE_*) while that sibling takes bare 1/2/3, " +
+      "so both forms are worth trying. If a value still 400s, suspect the key. chart=true is a " +
+      "different endpoint and has never been seen to demand it, so it is not required there.\n" +
       "An empty result is normal before the session's first print. It is a per-session view: there " +
       "is no date argument, so this is today.\n" +
-      PENDING,
+      "PENDING VERIFICATION, and precisely which part: the RESPONSE has now been seen live — a " +
+      "`book` of price levels, each with buy/sell/pre_open/post_close/total blocks — but `mode` and " +
+      "`data_modes` have never been observed to be accepted, because until `group_by` existed no " +
+      "call from this project ever reached this endpoint at all. Treat those two as unverified " +
+      "guesses and check the payload rather than assuming a filter was applied.",
     {
       symbol: z.string().optional().describe("IDX ticker. Omit for whatever the endpoint returns market-wide."),
       mode: z.enum(core.TRADE_BOOK_MODES).optional().describe("OVERALL or BIG_MONEY. Omitted sends no mode."),
@@ -105,12 +142,17 @@ export function registerMarketTools(define: Definer): void {
         .array(z.enum(core.TRADE_BOOK_DATA_MODES))
         .optional()
         .describe("Auction phases to exclude: EXCLUDE_PRE and/or EXCLUDE_POST."),
+      group_by: z
+        .string()
+        .optional()
+        .describe("REQUIRED by the endpoint; accepted values unobserved. Sent verbatim, never guessed."),
       limit: z.coerce.number().optional().describe("Max rows. Omitted takes the server default."),
       chart: z.boolean().optional().describe("Read the chart endpoint instead of the table."),
     },
     async (a) =>
       runTool(() =>
         core.getTradeBook({
+          groupBy: a.group_by as string | undefined,
           symbol: a.symbol as string | undefined,
           mode: a.mode as (typeof core.TRADE_BOOK_MODES)[number] | undefined,
           dataModes: a.data_modes as (typeof core.TRADE_BOOK_DATA_MODES)[number][] | undefined,
@@ -122,15 +164,24 @@ export function registerMarketTools(define: Definer): void {
 
   define.read(
     "broker_flow_intraday",
-    "The intraday running-trade chart for one symbol, returned exactly as Stockbit sends it.\n" +
-      "Read the tool name as intent, not as a description of the payload: whether this endpoint " +
-      "breaks the session down by broker, by price level or by side has NOT been observed. Inspect " +
-      "the keys before reporting anything as broker flow. For confirmed per-broker numbers use the " +
-      "broker summary and broker distribution tools instead.\n" +
-      "Covers the current session only, and is empty before the first print of the day.\n" +
-      PENDING,
+    "Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends " +
+      "it. The tool name is now a description of the payload rather than a hope: read live on " +
+      "2026-09-01 against BBRI it carried 335 ONE-MINUTE points spanning 09:00 to 16:14.\n" +
+      "`data.price_chart_data` is the price series — each point `{date, time, datetime_label, " +
+      "value{raw,formatted}, open, high, low}`. `data.broker_chart_data` is a list of TWO series, " +
+      "`TYPE_CHART_VALUE` and `TYPE_CHART_VOLUME`; each carries a `brokers` list of codes and a " +
+      "`charts` array of `{broker_code, chart[]}` on the same minute grid. Beside them sit `from`, " +
+      "`to`, `data_last_updated` and `date_session_info`.\n" +
+      "This is the highest-resolution view of the session this server has, and unlike running_trade " +
+      "it covers the WHOLE session rather than the first 100 prints. Only the top few brokers " +
+      "appear (five on the reading above), so it ranks the session's main participants — it is not " +
+      "a complete broker list. For the full table use broker summary or broker distribution.\n" +
+      "Covers the current session only, and is empty before the first print of the day.",
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
     async (a) => runTool(() => core.getRunningTradeChart(a.symbol as string)),
+    // Settled by a live call on 2026-09-01: every key named above was read out of a real response.
+    // Opts out of the family default, which is `projected` for the rest of these.
+    { evidence: "observed" },
   );
 
   define.read(

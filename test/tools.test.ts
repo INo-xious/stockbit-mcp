@@ -383,6 +383,10 @@ const OBSERVED = [
   "trending",
   "sectors",
   "intraday_prices",
+  // Moved up from PROJECTED on 2026-09-01: called live against BBRI and every key its description
+  // names — the two TYPE_CHART_* series, the broker lists, the minute grid — was read out of the
+  // response. Its docstring used to disclaim knowing its own shape.
+  "broker_flow_intraday",
   "price_performance",
   "orderbook",
   "keystats",
@@ -465,7 +469,6 @@ const PROJECTED = [
   "ownership_composition",
   "running_trade",
   "trade_book",
-  "broker_flow_intraday",
   "market_movers",
   "top_stocks",
   "order_queue",

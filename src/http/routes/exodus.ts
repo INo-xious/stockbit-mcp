@@ -176,10 +176,19 @@ export const EXODUS_ROUTES = {
   /* --------------------------- insider & ownership --------------------------- */
   insiderTransactions: { host: "exodus", method: "GET", template: "/insider/company/majorholder", auth: "main" },
   insiderOwnership: { host: "exodus", method: "GET", template: "/insider/majorholder/ownership", auth: "main" },
+  /**
+   * The segment is a NUMERIC company id, not a ticker.
+   *
+   * Sending the ticker — which this route did until the segment was renamed — answers
+   * `400 {"error":"Invalid company id"}`. `normalizeSymbol` would have accepted `"134"` quite
+   * happily (`^[A-Z0-9]{1,12}$` matches digits), so naming the segment `symbol` was not a harmless
+   * label: it was a validator that agreed with the wrong value. `companyId` refuses a ticker here
+   * instead, and `getShareholdingCompanies` resolves the ticker before it gets this far.
+   */
   shareholdingCompanies: {
     host: "exodus",
     method: "GET",
-    template: "/insider/shareholding/companies/:symbol",
+    template: "/insider/shareholding/companies/:companyId",
     auth: "main",
   },
   shareholdingInvestors: {

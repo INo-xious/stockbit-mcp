@@ -14,6 +14,7 @@ import { StockbitError } from "../src/http/errors.ts";
 import {
   CHART_TIMEFRAMES,
   PRICES_BATCH_MAX,
+  RUNNING_TRADE_MAX_LIMIT,
   getChartRaw,
   getMarketMovers,
   getMarketPrices,
@@ -318,6 +319,50 @@ test("running trade filters are prefixed with the wire vocabulary", async () => 
   ]);
 });
 
+test("a limit past the endpoint's own cap is refused, and the message says why it is pointless", async () => {
+  // 200 and 3000 came back byte-identical in the field, and the 2026-08-28 probe measured the
+  // response capped at 100. Sending 3000 costs a round trip to be handed the same first 100 rows
+  // with nothing marking the truncation — which is how a caller asking about the close gets the
+  // opening auction and never learns it.
+  await assert.rejects(
+    () => getRunningTrade({ symbol: "BBRI", limit: RUNNING_TRADE_MAX_LIMIT + 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /between 1 and 100/);
+      // Naming the cap is not enough on its own: the caller's real question is "then how do I see
+      // the close", and the answer is that this route cannot, at any limit.
+      assert.match(error.message, /session open/);
+      assert.match(error.message, /broker_flow_intraday/);
+      return true;
+    },
+  );
+  assert.equal(requests, 0, "the refusal happens before the request is built");
+});
+
+test("the cap is a boundary, not a ban — the largest reachable limit still goes out", async () => {
+  await getRunningTrade({ symbol: "BBRI", limit: RUNNING_TRADE_MAX_LIMIT });
+  assert.deepEqual(query(lastUrl("/running-trade")), ["limit=100", "order_by=1", "symbols=BBRI"]);
+});
+
+test("order_by is sent as asked, and a value measured to be refused never reaches the wire", async () => {
+  await getRunningTrade({ symbol: "BBRI", orderBy: 2 });
+  assert.deepEqual(query(lastUrl("/running-trade")), ["order_by=2", "symbols=BBRI"]);
+
+  // The tool layer casts an incoming number to 1|2|3, so the type does not stop a 4 at runtime.
+  // 0 and 4 were both measured refused upstream; spending a round trip to be told so is waste.
+  await assert.rejects(
+    () => getRunningTrade({ symbol: "BBRI", orderBy: 4 as 1 | 2 | 3 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /order_by must be one of 1, 2, 3/);
+      return true;
+    },
+  );
+  assert.equal(requests, 1, "only the valid call went out");
+});
+
 test("grouped is a different route, not a query parameter", async () => {
   await getRunningTrade({ grouped: true, symbol: "BBRI" });
   const url = lastUrl("/running-trade/group");
@@ -341,7 +386,7 @@ test("the running-trade cache key includes every argument", async () => {
 test("a null data block is an empty answer, not a throw", async () => {
   responder = () => ({ data: null });
   assert.equal(await getRunningTrade(), null);
-  assert.deepEqual(await getTradeBook(), null);
+  assert.deepEqual(await getTradeBook({ groupBy: "PRICE" }), null);
   clearCache();
   responder = () => ({});
   assert.equal(await getMarketSession(), null);
@@ -386,7 +431,12 @@ test("an invalid symbol never reaches the wire", async () => {
 /* ================================== trade book ================================== */
 
 test("trade book prefixes mode and repeats data_mode", async () => {
-  await getTradeBook({ symbol: "BBRI", mode: "BIG_MONEY", dataModes: ["EXCLUDE_PRE", "EXCLUDE_POST"] });
+  await getTradeBook({
+    symbol: "BBRI",
+    mode: "BIG_MONEY",
+    dataModes: ["EXCLUDE_PRE", "EXCLUDE_POST"],
+    groupBy: "PRICE",
+  });
   const url = lastUrl("/trade-book");
   assert.equal(url.pathname, "/order-trade/trade-book");
   // Repeated keys, not a comma-joined value: this API reads only the first item of a joined list
@@ -399,13 +449,56 @@ test("trade book prefixes mode and repeats data_mode", async () => {
 });
 
 test("an empty data_modes list sends no parameter at all", async () => {
-  await getTradeBook({ symbol: "BBRI", dataModes: [] });
-  assert.deepEqual(query(lastUrl("/trade-book")), ["symbol=BBRI"]);
+  await getTradeBook({ symbol: "BBRI", dataModes: [], groupBy: "PRICE" });
+  assert.deepEqual(query(lastUrl("/trade-book")), ["group_by=PRICE", "symbol=BBRI"]);
 });
 
-test("trade book chart is a different route", async () => {
+test("trade book refuses the call the endpoint would refuse, and says the value is not guessed", async () => {
+  // Every call this project could make before `group_by` existed came back
+  // 400 {"error":"Group by is required"} — with `mode` set and with `mode` omitted alike. There
+  // was no argument combination that worked, which is what made this a dead tool rather than an
+  // awkward one.
+  await assert.rejects(
+    () => getTradeBook({ symbol: "BBRI", mode: "OVERALL", limit: 100 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /group_by/);
+      // The caller has to be told the value is theirs to supply. "Required" alone reads as though
+      // this client knows one and is withholding it.
+      assert.match(error.message, /have been observed/);
+      // And that the KEY is an inference too — `order_queue` on this same service cost five
+      // candidates to settle a key that read just as obviously as this one does.
+      assert.match(error.message, /inferred/);
+      return true;
+    },
+  );
+  assert.equal(requests, 0, "nothing was spent finding out what is already known");
+});
+
+test("group_by goes out verbatim — no prefix is invented for a vocabulary nobody has seen", async () => {
+  // `mode` and `data_mode` are prefixed because their enums were read off the wire. This one was
+  // not, so sending TRADE_BOOK_GROUP_BY_price would be inventing a filter and reading the narrower
+  // answer it produced as the whole one.
+  await getTradeBook({ symbol: "BBRI", groupBy: "  price  " });
+  assert.equal(lastUrl("/trade-book").searchParams.get("group_by"), "price");
+});
+
+test("a blank group_by is refused, not sent as an empty parameter", async () => {
+  await assert.rejects(
+    () => getTradeBook({ symbol: "BBRI", groupBy: "   " }),
+    (error: unknown) => error instanceof StockbitError && error.kind === "invalid_param",
+  );
+  assert.equal(requests, 0);
+});
+
+test("trade book chart is a different route, and is not held to the table's rule", async () => {
+  // The 400 was only ever seen from the table endpoint. Requiring group_by here as well would be
+  // this client inventing a rule for a route it has never called.
   await getTradeBook({ symbol: "BBRI", chart: true });
-  assert.equal(lastUrl("/trade-book/chart").pathname, "/order-trade/trade-book/chart");
+  const url = lastUrl("/trade-book/chart");
+  assert.equal(url.pathname, "/order-trade/trade-book/chart");
+  assert.equal(url.searchParams.get("group_by"), null);
 });
 
 /* ============================ movers, top stocks, queue ============================ */

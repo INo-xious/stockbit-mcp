@@ -309,6 +309,89 @@ async function mintShareholdersToken(): Promise<string> {
   return token;
 }
 
+/**
+ * The refusal the shareholder chart answers when it will not take the minted token.
+ *
+ * `WebViewToken.FromContext` is the gateway naming the token it looked for and did not find, which
+ * is what makes it a placement signal rather than a generic auth failure. Anchored on that phrase
+ * and on `Unauthenticated` so a reworded envelope around the same refusal still matches.
+ */
+const WEBVIEW_TOKEN_REFUSAL = /WebViewToken|Unauthenticated/i;
+
+/**
+ * Read the chart with the minted token, and say what a refusal here actually means.
+ *
+ * **UNVERIFIED: where the minted token belongs.** It is sent as a `token` query parameter, which is
+ * the placement the e-IPO refresh uses, but no capture of this call exists — if the chart answers
+ * 401 with a valid session, the placement is the first thing to move (a header, or the body of a
+ * POST variant).
+ *
+ * That prediction fired. A 2026-08-31 field report got
+ * `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found` (401) from
+ * this call in a session where `insider_transactions`, `broker_summary` and `chartbit_layouts` all
+ * succeeded at the same moment. Two requests were spent to be told nothing.
+ *
+ * ## Measured 2026-09-01: the query parameter makes no difference
+ *
+ * The same call was made three ways on a working credential — with a freshly minted token, with
+ * no `token` parameter at all, and with `token=notarealtoken`. All three answered the identical
+ * 401 with the identical body. A parameter the server reads would be expected to tell a garbage
+ * value apart from a valid one somehow, so this is strong evidence the `token` query parameter is
+ * not read here at all and the placement is simply wrong.
+ *
+ * It is not left as PROOF, and nothing is changed on the strength of it: a request refused at the
+ * same gate every time cannot fully distinguish "the parameter was ignored" from "the parameter
+ * was read and the token rejected for some other reason". What it does settle is that no value in
+ * that query parameter will make this call work, so the next person should not spend time on the
+ * token's VALUE. The remaining candidates are a header and a POST body, and choosing between them
+ * takes a capture of Stockbit's own request — DevTools on the ownership view of a symbol page,
+ * which is a thing a person does in a browser, not something this server can do to itself.
+ *
+ * The placement still cannot be corrected from here — moving it without a capture would be
+ * replacing one guess with another, and the honest thing is to say which guess is standing. So the
+ * 401 is re-raised carrying the diagnosis instead of the raw gateway string: this is a token
+ * PLACEMENT failure, not a session failure and not an entitlement the account lacks. Getting that
+ * reading for free is what turned a dead end into a five-second diagnosis in the field.
+ */
+async function readShareholdersChart(
+  sym: string,
+  valueYear: number | undefined,
+  type: string | undefined,
+  token: string,
+): Promise<unknown> {
+  try {
+    return await getJson("shareholdersChart", {
+      segments: { symbol: sym },
+      // `symbol` is sent as a query parameter as well as a path segment because Stockbit's own
+      // client sends both. Duplication is cheap; a missing filter is a wrong answer.
+      params: { symbol: sym, value_year: valueYear, shareholder_type: type, token },
+    });
+  } catch (error) {
+    // Matched on the KIND *or* the body text, because the two things the field recorded are not
+    // the same strength. The `WebViewToken.FromContext: User Not Found` string was copied out of a
+    // response; the 401 beside it is the reporter's annotation and no status for this failure is
+    // written down anywhere in this repo. A gateway that answered the same rpc error under some
+    // other status would slip past a kind-only test and hand the caller back the raw string —
+    // which is the exact dead end this whole branch exists to remove.
+    if (error instanceof StockbitError && (error.kind === "auth" || WEBVIEW_TOKEN_REFUSAL.test(error.message))) {
+      throw new StockbitError(
+        "auth",
+        `The shareholder chart refused the one-shot token it just minted for ${sym}. This is not ` +
+          `your session: the token was minted seconds earlier on the same credential, and the ` +
+          `same call answers this identically with a valid token, with no token and with a junk ` +
+          `token (measured 2026-09-01), so the \`token\` query parameter this client sends is not ` +
+          `the placement the endpoint reads. No value will fix it. Where the token really belongs ` +
+          `— a header, or a POST body — takes a capture of Stockbit's own request to settle, so ` +
+          `this tool is expected to fail until someone makes one. Read the register through ` +
+          `company_profile's \`shareholder_one_percent\` instead; it carries holders, percentages ` +
+          `and the scrip/scripless split. Upstream said: ${error.message}`,
+        { status: error.status },
+      );
+    }
+    throw error;
+  }
+}
+
 export interface Shareholders extends RowSet {
   symbol: string;
   /** Echoed back so a cached answer can be told apart from the one that was asked for. */
@@ -345,17 +428,7 @@ export async function getShareholders(
   const key = `shareholders:${sym}:${valueYear ?? "-"}:${type ?? "-"}`;
   return cached(key, CACHE.keystatsTtlMs, async () => {
     const token = await mintShareholdersToken();
-    const body = await getJson("shareholdersChart", {
-      segments: { symbol: sym },
-      // `symbol` is sent as a query parameter as well as a path segment because Stockbit's own
-      // client sends both. Duplication is cheap; a missing filter is a wrong answer.
-      //
-      // UNVERIFIED: where the minted token belongs. It is sent as a `token` query parameter, which
-      // is the placement the e-IPO refresh uses, but no capture of this call exists — if the chart
-      // answers 401 with a valid session, this is the first thing to move (a header, or the body of
-      // a POST variant).
-      params: { symbol: sym, value_year: valueYear, shareholder_type: type, token },
-    });
+    const body = await readShareholdersChart(sym, valueYear, type, token);
     return {
       symbol: sym,
       ...(valueYear !== undefined ? { valueYear } : {}),
