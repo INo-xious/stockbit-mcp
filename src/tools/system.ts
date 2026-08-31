@@ -40,7 +40,13 @@ import { z } from "zod";
 import { jsonResult, runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 import { collectStatus, loginFinished, loginStarted, loginStatus } from "../status.js";
-import { captureViaBrowserLogin, findBrowser, findBrowsers } from "../auth/login.js";
+import {
+  captureNeedsProof,
+  captureViaBrowserLogin,
+  findBrowser,
+  findBrowsers,
+  type LoginResult,
+} from "../auth/login.js";
 import { clearBrowserProfile, readBrowserProfile } from "../auth/browserprofile.js";
 import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
@@ -50,12 +56,71 @@ import { clearWebSession } from "../auth/websession.js";
 import { clearAccessCache } from "../auth/accesscache.js";
 import { clearSessionHealth } from "../auth/health.js";
 import { forgetRotated } from "../auth/session.js";
-import { hasStoredSession, resetSession } from "../auth/session.js";
+import { forceRefresh, hasStoredSession, resetSession } from "../auth/session.js";
+import { StockbitError } from "../http/errors.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
 import { stockbitPath } from "../paths.js";
 import { redactValue } from "../redact.js";
 import { browserSuppressed } from "../desktop/browser.js";
+
+/**
+ * Decide what a finished capture is allowed to be called, and prove it when it has to be.
+ *
+ * Exported for the reason `captureNeedsProof` was extracted from `bin/stockbit-auth.ts`: this is
+ * the decision the whole tool exists to get right, and inlined in a `.then()` it is a decision no
+ * test can reach. That is how it shipped saying "captured" for a credential Stockbit refused.
+ *
+ * `captured` used to mean only "bytes were written to the store". Measured on 2026-08-30, the same
+ * call twice nine minutes apart against a healthy browser session: both reported `captured`, one
+ * token worked and the other was dead on arrival. A success value that can mean failure carries no
+ * information, so no automated caller can use `login` as a recovery step.
+ *
+ * The asymmetry is `captureNeedsProof`'s and is argued there: an INTERCEPTED token came out of a
+ * live login response seconds ago and proving it would rotate away the session that login just
+ * established; a HARVESTED one was read out of a cookie, nothing logged in, and four in a row were
+ * rejected on first use while every diagnostic reported healthy.
+ *
+ * Three outcomes rather than two, because `refreshOnce` writes a status-less journal entry for a
+ * transport error. Reporting a dropped network as a rejection would make `status` say "Stockbit
+ * REJECTED this token" about a token nothing ever rejected, and send the user to log in again for
+ * a Wi-Fi blip.
+ */
+export async function settleLogin(result: LoginResult): Promise<void> {
+  if (!result.captured) {
+    loginFinished("no-token");
+    return;
+  }
+
+  // Before anything reads it: the in-memory access token was minted from the credential this login
+  // has just replaced.
+  resetSession("main");
+
+  if (!captureNeedsProof(result.method, false)) {
+    loginFinished("captured");
+    return;
+  }
+
+  try {
+    // `forceRefresh` with no presented token, which is what makes it reach the wire — see the note
+    // on its `presented` parameter. This ROTATES, and rotation stales the browser session the
+    // chartbit driver runs on. That is the price of not reporting a credential that does not work,
+    // and it is only paid for a harvested capture, which is probably worthless anyway.
+    await forceRefresh("main");
+    loginFinished("captured");
+  } catch (err) {
+    // By STATUS, not by `kind`. `refreshOnce` labels every non-2xx `kind: "auth"`, including a 500,
+    // so `kind` cannot separate "Stockbit refused this credential" from "Stockbit was down" — and
+    // that is the whole distinction between the two outcomes below. 401 and 403 are the refusals,
+    // which is `kindForStatus`'s own definition of an auth failure.
+    const rejected =
+      err instanceof StockbitError && (err.status === 401 || err.status === 403);
+    const message = err instanceof Error ? err.message : String(err);
+    // Redacted for the reason the sibling catch is: ask what the message COULD carry, not what it
+    // does today. A fetch failure quotes a URL and a URL here can carry a token.
+    loginFinished(`${rejected ? "captured-but-rejected" : "captured-unproven"}: ${String(redactValue(message))}`);
+  }
+}
 
 /** How long the login lock is held before it is assumed to belong to a dead process. */
 const LOGIN_LOCK_STALE_MS = 20 * 60_000;
@@ -133,7 +198,10 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "If the browser is ALREADY signed in to Stockbit, it no longer waits fifteen minutes for a " +
       "form that will never appear: it reads the credential out of the browser's own session and " +
       "finishes in seconds, and if there is nothing usable there it signs that profile out and " +
-      "re-opens the login page.\n" +
+      "re-opens the login page. A credential read out of the browser that way is PROVEN against " +
+      "Stockbit before `status` calls it captured — nothing logged in, so its expiry says nothing " +
+      "about whether it works. That proof rotates the token, which stales the browser session the " +
+      "chartbit tools drive; a login that showed a real form is trusted without it.\n" +
       "`switch_account: true` is for signing in as a DIFFERENT account — it clears the browser's " +
       "Stockbit session first and never reuses what was there. Ask the user before using it; it " +
       "signs them out of Stockbit in that browser profile.\n" +
@@ -306,10 +374,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     switchAccount: request.switchAccount,
     ...(request.fresh ? { profileDir: "fresh" as const } : {}),
   })
-    .then((result) => {
-      if (result.captured) resetSession("main");
-      loginFinished(result.captured ? "captured" : "no-token");
-    })
+    .then(settleLogin)
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       // Redacted: a capture failure can quote a URL, and a URL here can carry a token.

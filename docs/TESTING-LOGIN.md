@@ -18,7 +18,7 @@ instead of being "it didn't work":
                    C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
                  Opera · 133.0.5932.85
                    C:\Users\<you>\AppData\Local\Programs\Opera\opera.exe
-  ! Token store    AES-256-GCM file (machine+user derived key) — no OS keychain on this platform
+  ! Token store    AES-256-GCM file (machine+user derived key) — this build integrates the macOS Keychain only.
   ✓ Refresh token  present, expires in ~6.9 day(s).
   ✓ Popup capture  token recovered from a self-closing popup in 1054 ms
 ```

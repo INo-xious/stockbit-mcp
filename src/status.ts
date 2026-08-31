@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { getStore, type StoreSlot, type StoreState, fallenBackSlots } from "./auth/store.js";
 import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
 import {
-  lastEventFor,
+  lastEventForToken,
   readHealthJournal,
   slotHealthState,
   type SlotHealthState,
@@ -80,7 +80,18 @@ export interface SlotStatus {
 export interface LoginStatus {
   inProgress: boolean;
   startedAt?: string;
-  /** `captured`, `timeout`, or `error: <redacted>` from the last attempt this process started. */
+  /**
+   * What the last attempt this process started came to. One of:
+   *
+   *   - `captured` — a credential Stockbit accepts. Either intercepted from a live login response,
+   *     or harvested from the browser and then PROVEN against the refresh route.
+   *   - `captured-but-rejected: <redacted>` — stored, and Stockbit refused it (401 or 403). This
+   *     is a failed login however it looks; the bytes landing is not the claim.
+   *   - `captured-unproven: <redacted>` — stored, and the proof could not be made (the network,
+   *     not the credential). Nothing is known about whether it works.
+   *   - `no-token` — the capture finished without one.
+   *   - `error: <redacted>` — the capture itself threw.
+   */
   lastResult?: string;
 }
 
@@ -299,7 +310,7 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
   try {
     const journal = readHealthJournal();
     result.health = slotHealthState(slot, token, result.expired === true, journal);
-    const event = lastEventFor(slot, journal);
+    const event = lastEventForToken(slot, token, journal);
     if (event) {
       result.lastRefresh = {
         at: event.at,
@@ -565,6 +576,27 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       name: "last login",
       status: "fail",
       detail: `${lastLogin} — the browser step may have looked fine; the credential did not land.`,
+    });
+  } else if (lastLogin && lastLogin.startsWith("captured-but-rejected")) {
+    // The credential DID land, which is the whole reason this needs saying separately: every
+    // storage-shaped signal reads healthy, and the only thing wrong with it is the one thing that
+    // matters. It was proven, once, and Stockbit refused it.
+    checks.push({
+      name: "last login",
+      status: "fail",
+      detail:
+        `${lastLogin} — the credential was stored and Stockbit REJECTED it on the first use. ` +
+        "Nothing was logged in: the browser profile was already signed in, so the token was read " +
+        "out of its cookie rather than issued by a login. Log out and log in again so a real form " +
+        "appears.",
+    });
+  } else if (lastLogin && lastLogin.startsWith("captured-unproven")) {
+    checks.push({
+      name: "last login",
+      status: "warn",
+      detail:
+        `${lastLogin} — the credential was stored but could not be proven, and the reason was not ` +
+        "a rejection. Nothing is known about whether it works; try a call and see.",
     });
   }
 

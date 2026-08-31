@@ -135,7 +135,7 @@ export async function getJson<T = unknown>(route: RouteName, opts: GetOptions = 
       if (res.status === 401 && !refreshedOn401 && !isRefreshRoute(route)) {
         refreshedOn401 = true;
         const domain = domainOf(route);
-        if (domain) await forceRefresh(domain);
+        if (domain) await forceRefresh(domain, token);
         attempt--; // this loop turn didn't "cost" a retry
         continue;
       }
@@ -194,7 +194,7 @@ async function writeJson<T = unknown>(
         // The token was rejected, so the handler never ran. Safe to present a fresh one.
         refreshedOn401 = true;
         const domain = domainOf(route);
-        if (domain) await forceRefresh(domain);
+        if (domain) await forceRefresh(domain, token);
         continue;
       }
 

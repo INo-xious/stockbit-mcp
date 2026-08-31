@@ -766,9 +766,46 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
   return (await slotState.inFlight).token;
 }
 
-/** Force a refresh of one domain (used by the HTTP client on a 401). */
-export async function forceRefresh(domain: TokenDomain = "main"): Promise<string> {
-  const rejected = state[domain].current?.token ?? null;
+/**
+ * Force a refresh of one domain (used by the HTTP client on a 401).
+ *
+ * `presented` is the token the failing request actually sent. Pass it whenever you have it.
+ *
+ * Without it this function had to GUESS which token was rejected, by reading the slot's current
+ * one — and the slot is shared, mutable, and routinely moves while a request is still in flight.
+ * A late 401 from a request holding the OLD token therefore named a peer's NEW token as rejected,
+ * dropped it, cleared the shared access cache and spent a rotation replacing a credential that was
+ * working. The parameter turns a guess about shared state into a fact the caller already holds.
+ *
+ * It is optional, and absent means "refresh unconditionally". Every caller that omits it is a
+ * LIVENESS PROOF — `status { live: true }`, `bootstrap --verify`, `login --verify`,
+ * `trading-login`, `trading-check` — whose entire contract is that a request left the machine.
+ * Reading absence as "assume the slot is current" would make all five report success for nothing.
+ */
+export async function forceRefresh(domain: TokenDomain = "main", presented?: string): Promise<string> {
+  // The slot has already moved past the token that failed: a peer refreshed while this request was
+  // in flight, and the 401 is stale news about a credential nobody holds any more. There is nothing
+  // to force — and forcing anyway is destructive, not merely wasteful, because everything below
+  // this line drops a live token and clears a cache other processes are reading.
+  //
+  // Tested against the values in hand rather than by calling `ensureFresh`: `ensureFresh` falls
+  // through to the shared access cache, and on this path the cache has deliberately NOT been
+  // cleared, so it can still hold a dead token a peer wrote. Re-entering it could hand the caller
+  // a second dead token to retry with, having skipped the one line that makes this function safe.
+  if (presented !== undefined) {
+    const cur = state[domain].current;
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      cur &&
+      cur.token !== presented &&
+      cur.expiresAt - now > AUTH.expirySkewSeconds &&
+      mintedFromCurrentCredential(domain, cur)
+    ) {
+      return cur.token;
+    }
+  }
+
+  const rejected = presented ?? state[domain].current?.token ?? null;
   state[domain].current = null;
 
   // Before spending a rotation, ask the BROWSER whether it has already moved on.
@@ -781,7 +818,14 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
   //
   // Anything the cookie holds that is not the token that just failed is newer by definition — the
   // two sides only ever hold one pair — so the comparison against `rejected` is the whole guard.
-  if (domain === "main") {
+  //
+  // Which is why the guard requires a KNOWN failed token. With `rejected` null the comparison is
+  // vacuously true and the cookie is adopted whatever it holds, so this returned before reaching
+  // the wire — and `bin/stockbit-auth.ts` calls `resetSession()` immediately before its proof,
+  // which is precisely how `rejected` becomes null. Every caller that passes no `presented` token
+  // is proving liveness and must send a request; the caller that benefits from this shortcut is
+  // the 401 path, and it always knows which token failed.
+  if (domain === "main" && presented !== undefined) {
     const fromBrowser = browserAccessToken(AUTH.expirySkewSeconds);
     if (fromBrowser && fromBrowser.token !== rejected) {
       const adopted: AccessToken = {

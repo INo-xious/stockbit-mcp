@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   clearSessionHealth,
   lastEventFor,
+  lastEventForToken,
   readHealthJournal,
   recordRefreshFailure,
   recordRefreshOk,
@@ -144,6 +145,48 @@ test("a failure after a success wins, and lastEventFor names it", async () => {
   assert.equal(slotHealthState("main", TOKEN, false), "failing");
   const event = lastEventFor("main");
   assert.equal(event?.status, 401, "the most recent event is the failure");
+});
+
+/* ------------------------- one credential at a time ------------------------- */
+//
+// `slotHealthState` filtered by fingerprint and `lastEventFor` did not, so a caller pairing them —
+// `status` — reported a verdict about one credential beside a timestamp and an HTTP status
+// belonging to another. Observed in the field as `health: "failing"` with a `lastRefresh` 32
+// minutes OLDER than the credential it was describing.
+
+test("lastEventForToken answers only about the token it was given", () => {
+  recordRefreshFailure("main", REPLACED, 401, "HTTP 401");
+  assert.equal(lastEventForToken("main", TOKEN), null, "nothing is recorded about this one");
+  assert.equal(lastEventForToken("main", REPLACED)?.status, 401);
+  assert.equal(lastEventForToken("main", null), null, "no token, no claim");
+  assert.equal(lastEventForToken("securities", REPLACED), null, "and not about another slot");
+});
+
+test("lastEventFor keeps its unfiltered meaning", () => {
+  // It is still the right answer for the web session, which has no token to filter by, and for the
+  // journal read as a record rather than as a verdict. The fix is an addition, not a signature
+  // change — changing it would have broken both callers silently.
+  recordRefreshFailure("main", REPLACED, 401, "HTTP 401");
+  assert.equal(lastEventFor("main")?.status, 401);
+});
+
+test("a success for another credential does not clear this one's rejection", async () => {
+  // `failedAfterSuccess` compared a MATCHING failure against an UNFILTERED lastOk, so a success
+  // belonging to a token the user no longer holds could out-date this token's own 401 and demote
+  // it to `unknown` — the good-news half of the same bug, and the one nobody would have looked at.
+  recordRefreshFailure("main", TOKEN, 401, "HTTP 401");
+  await new Promise((r) => setTimeout(r, 5));
+  recordRefreshOk("main", REPLACED);
+  assert.equal(slotHealthState("main", TOKEN, false), "failing");
+  assert.equal(lastEventForToken("main", TOKEN)?.status, 401);
+});
+
+test("a rejection of another credential does not condemn this one", async () => {
+  recordRefreshOk("main", TOKEN);
+  await new Promise((r) => setTimeout(r, 5));
+  recordRefreshFailure("main", REPLACED, 401, "HTTP 401");
+  assert.equal(slotHealthState("main", TOKEN, false), "ok");
+  assert.equal(lastEventForToken("main", TOKEN)?.status, undefined);
 });
 
 /* --------------------------------- robustness --------------------------------- */
