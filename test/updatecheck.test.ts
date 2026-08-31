@@ -13,9 +13,10 @@
  *
  * Every `fetch` below is injected. Nothing here can reach the network even if the guard were wrong.
  */
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const STORE = mkdtempSync(join(tmpdir(), "stockbit-updatecheck-"));
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
@@ -28,6 +29,7 @@ import {
   REGISTRY_URL,
   UPDATE_CACHE_TTL_MS,
   checkForUpdate,
+  compareVersions,
   isNewer,
 } from "../src/updatecheck.ts";
 import { collectStatus } from "../src/status.ts";
@@ -102,6 +104,33 @@ test("being current says so, without claiming more", async () => {
   const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: registry("1.2.4").impl });
   assert.equal(status.latest, "1.2.4");
   assert.equal(status.isOutdated, false);
+});
+
+test("a build AHEAD of the registry is not reported as 'up to date'", async () => {
+  // The release-bump case: package.json at 1.2.5 while npm still has 1.2.4. "Up to date: 1.2.5 is
+  // the latest release" printed beside `latest: "1.2.4"` is self-refuting.
+  const status = await checkForUpdate({ installed: "1.2.5", fetchImpl: registry("1.2.4").impl });
+  assert.equal(status.latest, "1.2.4");
+  assert.equal(status.isOutdated, false);
+  assert.match(status.note, /AHEAD of the registry/);
+  assert.doesNotMatch(status.note, /Up to date/);
+});
+
+test("a version that cannot be COMPARED is unknown, not 'up to date'", async () => {
+  // The registry answered, so `latest` is a fact and is kept — but nothing was compared, so
+  // `isOutdated` must be absent rather than defaulted to false.
+  const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: registry("weird-build").impl });
+  assert.equal(status.latest, "weird-build");
+  assert.equal(status.isOutdated, undefined, "absent: no comparison was made");
+  assert.match(status.note, /could not be compared/);
+  assert.doesNotMatch(status.note, /Up to date/);
+});
+
+test("compareVersions distinguishes all four outcomes", () => {
+  assert.equal(compareVersions("1.2.5", "1.2.4"), 1);
+  assert.equal(compareVersions("1.2.4", "1.2.5"), -1);
+  assert.equal(compareVersions("1.2.4", "1.2.4"), 0);
+  assert.equal(compareVersions("nope", "1.2.4"), null, "unparseable is its OWN outcome, not 'not ahead'");
 });
 
 test("a check that could not run is ABSENT, never 'up to date'", async () => {
@@ -222,6 +251,80 @@ test("a corrupt or forward-dated cache is ignored rather than trusted", async ()
 });
 
 /* ------------------------- the offline guarantee, on collectStatus ------------------------- */
+
+/**
+ * Every file that SPAWNS a bin must turn the check off in the child.
+ *
+ * This guard exists because the obvious version of the offline argument was wrong, and wrong in a
+ * way no in-process test could see. `collectStatus()` with no options makes no request — true, and
+ * asserted below — but both user-facing callers pass `updateCheck: true`, and the suite spawns
+ * those callers as real child processes. A child does not inherit this suite's stubbed `fetch`, so
+ * `npm test` and `npm run smoke` were both making live requests to registry.npmjs.org while a
+ * comment two files away claimed the suite stayed offline "by construction".
+ *
+ * Hard-coded list, on the `WRITES`-list principle: derived from a grep it would agree with whatever
+ * the code does, and the failure mode being guarded is precisely a NEW spawner nobody thought
+ * about. A file added here must be added consciously, with the switch set.
+ */
+const SPAWNERS = [
+  "test/alertscli.test.ts",
+  "test/authcli.test.ts",
+  "test/batch.test.ts",
+  "test/livecli.test.ts",
+  "test/mcpcli.test.ts",
+  "scripts/smoke.mjs",
+];
+
+/**
+ * Files the scan below flags that do NOT run a bin, with the reason, so the exemption is a decision
+ * on the record rather than a regex quietly tuned until it passed.
+ *
+ * `build-mcpb.mjs` writes `"main": "dist/bin/stockbit-mcp.js"` into a manifest and spawns npm. It
+ * names the path; it never executes it.
+ *
+ * This file matches its own detector, because it necessarily contains the patterns it searches for.
+ */
+const NOT_ACTUALLY_SPAWNERS = ["scripts/build-mcpb.mjs", "test/updatecheck.test.ts"];
+
+test("every file that spawns a bin disables the update check in the child", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  for (const rel of SPAWNERS) {
+    const source = readFileSync(join(root, rel), "utf8");
+    assert.match(
+      source,
+      /STOCKBIT_NO_UPDATE_CHECK:\s*"1"/,
+      `${rel} spawns a bin without disabling the update check — the child will reach registry.npmjs.org`,
+    );
+  }
+});
+
+test("the SPAWNERS list still covers everything that spawns a bin", () => {
+  // The list above is only as good as its coverage, so this finds spawners mechanically and checks
+  // none has appeared outside it. A new one fails HERE, with the reason, rather than silently
+  // adding a network call to the gate.
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const found: string[] = [];
+  for (const dir of ["test", "scripts"]) {
+    for (const entry of readdirSync(join(root, dir))) {
+      const rel = `${dir}/${entry}`;
+      const full = join(root, rel);
+      if (!statSync(full).isFile()) continue;
+      if (!/\.(ts|mjs|cjs)$/.test(entry)) continue;
+      const source = readFileSync(full, "utf8");
+      // Spawns a child that runs one of this package's bins.
+      const spawnsABin =
+        /\b(spawn|execFile|execFileSync|StdioClientTransport)\b/.test(source) &&
+        /["'`](?:\.\.\/)?(?:bin|dist\/bin)\/|join\(\s*ROOT\s*,\s*"bin"|args:\s*\[\s*entry\s*\]/.test(source);
+      if (spawnsABin) found.push(rel);
+    }
+  }
+  const missing = found.filter((f) => !SPAWNERS.includes(f) && !NOT_ACTUALLY_SPAWNERS.includes(f));
+  assert.deepEqual(
+    missing,
+    [],
+    "these spawn a bin but are not in SPAWNERS — add them there AND set STOCKBIT_NO_UPDATE_CHECK in the child",
+  );
+});
 
 test("collectStatus makes NO update request unless the caller asks", async () => {
   // This is what keeps the whole offline suite offline. If the check fired merely because a status

@@ -90,7 +90,14 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "which ROTATES the refresh-token family and therefore ENDS the user\u2019s Stockbit website " +
       "session — the one the chart tools run on. Use `health` instead; only pass `live: true` if the " +
       "user explicitly asks to prove the token with a real request.\n" +
-      "The `market` block does not model public holidays; call `market_session` for that.",
+      "The `market` block reports the IDX clock in WIB with a UTC sibling on each field, and does " +
+      "not model public holidays; call `market_session` for that.\n" +
+      "`server.update` says whether a newer release of this server exists. It costs ONE request to " +
+      "the npm registry — not to Stockbit, carrying only the package name — cached for a day and " +
+      "made by this tool alone. `isOutdated: true` matters: npx caches a resolved tree under a " +
+      "version RANGE, so a user can run a build that is weeks old and nothing else will say so. " +
+      "`latest` and `isOutdated` are ABSENT when the check could not run, which means unknown, NOT " +
+      "up to date — read `update.note`. `STOCKBIT_NO_UPDATE_CHECK=1` turns the request off.",
     {
       live: z
         .boolean()

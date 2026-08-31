@@ -458,6 +458,20 @@ test("every chart session is opened inside the lock, and nothing re-enters it", 
   assert.equal((driver.match(/ChartbitSession\.open\s*\(/g) ?? []).length, 1);
 
   // 2. Every exported driver function goes through withChart, and exactly once each.
+  //
+  // First close the shape hole: this enumerates `export async function`, so an export written as
+  // `export const foo = async () => {…}` that called `evaluateInPage` directly would be invisible
+  // here, would not change the `withChart({` count, and would drive the browser outside the mutex
+  // with this guard still green. So the FORM of every export is pinned too.
+  const exportLines = [...driver.matchAll(/^export .*/gm)].map((m) => m[0]);
+  for (const line of exportLines) {
+    assert.ok(
+      /^export (async function \w+|interface \w+|type \w+|const (CHART_TYPE_NAMES)\b)/.test(line),
+      `unexpected export shape in driver.ts — a callable export that is not \`export async function\` ` +
+        `would bypass the withChart audit below: ${line.slice(0, 90)}`,
+    );
+  }
+
   const exported = [...driver.matchAll(/^export async function (\w+)/gm)].map((m) => m[1]);
   assert.deepEqual(
     exported.sort(),
@@ -565,6 +579,27 @@ test("a null alias is 'no value', not a disagreeing one", () => {
   );
   assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
   assert.equal(request.points[0].price, 1, "the snake_case value must win over a null camelCase one");
+});
+
+test("a null on EITHER side is 'no value' — the two halves behave the same", () => {
+  // The first cut only handled a null camelCase value, so `{from_date: null, fromDate: "…"}` still
+  // threw "they disagree" while its mirror was accepted. Same caller intent, opposite outcome.
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        from_date: null,
+        fromDate: "2026-01-02",
+        from_price: null,
+        fromPrice: 1,
+        to_date: "2026-08-24",
+        to_price: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(request.points[0].price, 1);
 });
 
 test("-0 and 0 are the same coordinate, not a contradiction", () => {

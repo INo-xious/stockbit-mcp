@@ -97,7 +97,7 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
     const { stdout, stderr } = await execFileAsync(process.execPath, ["--import", "tsx", BIN, ...args], {
       encoding: "utf8",
       cwd: ROOT,
-      env: { ...process.env },
+      env: { ...process.env, STOCKBIT_NO_UPDATE_CHECK: "1" },
       timeout: 60_000,
     });
     return { code: 0, stdout, stderr };

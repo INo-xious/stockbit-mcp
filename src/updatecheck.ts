@@ -122,6 +122,18 @@ function writeCache(answer: CachedAnswer): void {
  * would be worse than missing it.
  */
 export function isNewer(latest: string, installed: string): boolean {
+  return compareVersions(latest, installed) === 1;
+}
+
+/**
+ * Order two versions: 1 if `a` is ahead, -1 if behind, 0 if equal, and `null` if either could not
+ * be parsed.
+ *
+ * `null` is a distinct outcome rather than a fold into "not ahead", because the caller has three
+ * things to say and not two. Collapsing "cannot compare" into "not ahead" is what let this module
+ * print "Up to date" for a version it had never successfully compared.
+ */
+export function compareVersions(a: string, b: string): -1 | 0 | 1 | null {
   const parse = (v: string): number[] | null => {
     const core = v.trim().replace(/^v/, "").split(/[-+]/)[0];
     const parts = core.split(".");
@@ -129,14 +141,14 @@ export function isNewer(latest: string, installed: string): boolean {
     const nums = parts.map((p) => (/^\d+$/.test(p) ? Number(p) : NaN));
     return nums.some((n) => !Number.isInteger(n)) ? null : nums;
   };
-  const a = parse(latest);
-  const b = parse(installed);
-  if (!a || !b) return false;
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return null;
   for (let i = 0; i < 3; i++) {
-    if (a[i] > b[i]) return true;
-    if (a[i] < b[i]) return false;
+    if (x[i] > y[i]) return 1;
+    if (x[i] < y[i]) return -1;
   }
-  return false;
+  return 0;
 }
 
 export interface UpdateCheckOptions {
@@ -199,17 +211,51 @@ export async function checkForUpdate(options: UpdateCheckOptions = {}): Promise<
 }
 
 function describe(installed: string, latest: string, checkedAt: string, fromCache: boolean): UpdateStatus {
-  const isOutdated = isNewer(latest, installed);
+  const order = compareVersions(latest, installed);
   const age = fromCache ? " (cached)" : "";
+
+  // Four outcomes, not two. "Up to date" used to be printed for all three of the non-behind cases,
+  // which meant a release bump — package.json ahead of what npm has published yet — reported
+  // "Up to date: 1.2.5 is the latest release" beside `latest: "1.2.4"`, and an unparseable version
+  // reported the same thing having compared nothing at all.
+  if (order === null) {
+    return {
+      installed,
+      latest,
+      checkedAt,
+      note:
+        `The registry's latest is ${latest} and this build reports ${installed}${age}, and those ` +
+        "could not be compared as versions, so whether an update exists is unknown.",
+    };
+  }
+  if (order === 1) {
+    return {
+      installed,
+      latest,
+      isOutdated: true,
+      checkedAt,
+      note:
+        `A newer release exists: ${latest}, you are on ${installed}${age}. ` +
+        "npx caches a resolved tree under a version RANGE, so it will NOT pick this up on its own — " +
+        "run `npx -y stockbit-mcp@latest` or clear `~/.npm/_npx`, then restart the client.",
+    };
+  }
+  if (order === -1) {
+    return {
+      installed,
+      latest,
+      isOutdated: false,
+      checkedAt,
+      note:
+        `This build reports ${installed}, which is AHEAD of the registry's latest (${latest})${age} — ` +
+        "normally a local build or an unpublished release. Nothing to update.",
+    };
+  }
   return {
     installed,
     latest,
-    isOutdated,
+    isOutdated: false,
     checkedAt,
-    note: isOutdated
-      ? `A newer release exists: ${latest}, you are on ${installed}${age}. ` +
-        "npx caches a resolved tree under a version RANGE, so it will NOT pick this up on its own — " +
-        "run `npx -y stockbit-mcp@latest` or clear `~/.npm/_npx`, then restart the client."
-      : `Up to date: ${installed} is the latest release${age}.`,
+    note: `Up to date: ${installed} is the latest release${age}.`,
   };
 }

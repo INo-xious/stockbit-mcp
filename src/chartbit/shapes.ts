@@ -417,13 +417,18 @@ export function normalizeAnnotationKeys<T>(annotation: T): T {
     if (!Object.hasOwn(row, snake)) continue;
     const snakeValue = row[snake];
     const camelValue = row[camel];
-    // `null` is "no value", not a disagreeing one: `annotations` is an open record, so a JSON null
-    // reaches here unfiltered, and `{from_date: "2026-01-02", fromDate: null}` is a caller who
-    // spelled it once — refusing that as a contradiction blames one that does not exist. And
-    // `Object.is` alone separates -0 from 0, which would print "(0) and (0) ... they disagree".
-    const camelIsSet = camelValue !== undefined && camelValue !== null;
+    // `null` is "no value", not a disagreeing one, on EITHER side: `annotations` is an open record,
+    // so a JSON null reaches here unfiltered, and `{from_date: "2026-01-02", fromDate: null}` is a
+    // caller who spelled it once. Refusing that as a contradiction blames one that does not exist —
+    // and the mirror case has to behave the same way, or the same intent gets opposite answers
+    // depending on which half the caller left null.
+    //
+    // `Object.is` alone also separates -0 from 0, which printed "(0) and (0) ... they disagree".
+    const isSet = (v: unknown): boolean => v !== undefined && v !== null;
+    const camelIsSet = isSet(camelValue);
+    const snakeIsSet = isSet(snakeValue);
     const same = Object.is(camelValue, snakeValue) || camelValue === snakeValue;
-    if (camelIsSet && !same) {
+    if (camelIsSet && snakeIsSet && !same) {
       throw new StockbitError(
         "invalid_param",
         `An annotation carries both \`${camel}\` (${JSON.stringify(camelValue)}) and \`${snake}\` ` +
@@ -435,6 +440,8 @@ export function normalizeAnnotationKeys<T>(annotation: T): T {
     delete out[snake];
     // A camelCase `null` is overwritten, not preserved: it carries no coordinate, and leaving it
     // would hand `requireNumber` a null when the caller plainly supplied the value in snake_case.
+    // A snake_case null on its own is copied across unchanged, so the error names the field the
+    // caller actually wrote rather than silently dropping it.
     if (!camelIsSet) out[camel] = snakeValue;
   }
   return (out ?? row) as T;

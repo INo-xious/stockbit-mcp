@@ -202,13 +202,19 @@ test("isVersionToken knows both spellings and nothing else", () => {
   }
 });
 
-test("the version is a REQUIRED argument, so --version can never fall through to running", () => {
-  // It was optional once. That meant a bin declaring `--version` in its flags but forgetting to
-  // pass one would accept the token, return "ok" and START — the exact "an unknown token is
-  // treated as absent" failure this module exists to close, reintroduced one level up. The
-  // signature now makes that unwritable, which is why this asserts the TYPE rather than a branch.
-  assert.equal(gateBareCommandLine.length, 5, "every parameter is required; none may be dropped");
-  assert.equal(bare(["--version"]).result, "version", "and the token is always answered");
+test("--version is always ANSWERED, and can never fall through to running", () => {
+  // The behaviour, asserted directly. `version` was optional once, and the gate then returned "ok"
+  // for a bin that declared `--version` but passed none — so the bin STARTED, which is the exact
+  // "an unknown token is treated as absent" failure this module exists to close, one level up.
+  //
+  // Asserted as behaviour rather than as `gateBareCommandLine.length === 5`: that reads as a
+  // required-parameter check and is not one. TypeScript emits `version?: string` as an ordinary
+  // parameter, so `.length` stays 5 either way and the regression would slip straight through.
+  // Making the parameter required is enforced by `npm run typecheck`; what a runtime test can
+  // prove is that no input reaches "ok" while carrying a version token.
+  for (const argv of [["--version"], ["-v"], ["--version", "--nonsense"], ["-v", "extra"]]) {
+    assert.equal(bare(argv).result, "version", argv.join(" "));
+  }
 });
 
 test("help wins over version, exactly as it wins over everything else", () => {

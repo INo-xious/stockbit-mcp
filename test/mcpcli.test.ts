@@ -55,6 +55,11 @@ function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr:
   const childStore = mkdtempSync(join(tmpdir(), "stockbit-mcpcli-child-"));
   const env = {
     ...process.env,
+    // Offline, like every other test. `status` asks npm whether a newer release exists, and a
+    // SPAWNED bin does not inherit this suite's stubbed `fetch` — so without this the gate would
+    // make a real request to registry.npmjs.org. test/updatecheck.test.ts asserts every spawner
+    // sets it, because one that forgets is silent.
+    STOCKBIT_NO_UPDATE_CHECK: "1",
     STOCKBIT_FORCE_FILE_STORE: "1",
     STOCKBIT_STORE_DIR: childStore,
     STOCKBIT_NO_BROWSER: "1",
@@ -170,7 +175,13 @@ test("every shipped bin answers --version with the same version, and runs nothin
     const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, ["--import", "tsx", bin, "--version"], {
         cwd: ROOT,
-        env: { ...process.env, STOCKBIT_FORCE_FILE_STORE: "1", STOCKBIT_STORE_DIR: STORE, STOCKBIT_NO_BROWSER: "1" },
+        env: {
+          ...process.env,
+          STOCKBIT_FORCE_FILE_STORE: "1",
+          STOCKBIT_STORE_DIR: STORE,
+          STOCKBIT_NO_BROWSER: "1",
+          STOCKBIT_NO_UPDATE_CHECK: "1",
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let stdout = "";

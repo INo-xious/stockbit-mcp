@@ -442,13 +442,12 @@ export async function withBrokerNamesAll<T extends { code: string; name?: string
     // The KIND only. A fetch failure quotes its URL, and a note is not worth widening what this
     // server is willing to write down.
     const why = err instanceof StockbitError ? err.kind : "unreadable";
-    const resolution: NameResolution = {
-      resolved: false,
-      note:
-        `Broker names were not resolved (${why}): the directory could not be read. ` +
-        "The codes and every figure beside them are unaffected.",
-    };
-    return sets.map((rows) => ({ rows: [...rows], resolution }));
+    const note =
+      `Broker names were not resolved (${why}): the directory could not be read. ` +
+      "The codes and every figure beside them are unaffected.";
+    // A fresh `resolution` per set, not one shared reference. Nothing mutates it today, but a
+    // caller that annotated one side's resolution would silently annotate every side's.
+    return sets.map((rows) => ({ rows: [...rows], resolution: { resolved: false, note } }));
   }
 
   const byCode = new Map<string, string>();

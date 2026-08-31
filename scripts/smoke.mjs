@@ -96,6 +96,11 @@ async function runOnce({ label, profileEnv, expectTools, expectPrompts }) {
       STOCKBIT_FORCE_FILE_STORE: "1",
       STOCKBIT_STORE_DIR: store,
       STOCKBIT_NO_BROWSER: "1",
+      // And no network. This smoke calls the `status` tool, which asks npm whether a newer release
+      // exists — so without this, a gate command that is supposed to prove the built binary starts
+      // would instead depend on registry.npmjs.org being reachable, and stall for the timeout when
+      // it is not. `test/updatecheck.test.ts` asserts every spawner sets this.
+      STOCKBIT_NO_UPDATE_CHECK: "1",
       ...(profileEnv === undefined ? {} : { STOCKBIT_TOOLS: profileEnv }),
       ...(process.env.STOCKBIT_TRADING ? { STOCKBIT_TRADING: process.env.STOCKBIT_TRADING } : {}),
     },

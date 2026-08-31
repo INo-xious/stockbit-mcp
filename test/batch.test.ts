@@ -307,7 +307,7 @@ test("`broker --help` returns immediately instead of starting an overnight drip"
   const { stdout } = await execFileAsync(
     process.execPath,
     ["--import", "tsx", bin, "broker", "--help"],
-    { timeout: 30_000, env: { ...process.env, STOCKBIT_STORE_DIR: STORE } },
+    { timeout: 30_000, env: { ...process.env, STOCKBIT_STORE_DIR: STORE, STOCKBIT_NO_UPDATE_CHECK: "1" } },
   );
   assert.match(stdout, /broker/);
   assert.match(stdout, /--kill-file/);
