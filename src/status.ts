@@ -178,8 +178,11 @@ export interface CollectStatusOptions {
    * Explicit for the same reason `live` is: this function is called from tests and from library
    * code, and network work that happens merely because a status report was assembled is network
    * work nobody asked for. The user-facing callers — the `status` tool and `stockbit-auth status` —
-   * pass it; nothing else does, so the offline suite stays offline by construction rather than by
-   * a stub remembering to catch it.
+   * pass it; nothing else does.
+   *
+   * That is NOT what keeps the test suite offline, and an earlier version of this comment claimed
+   * it was. The suite calls the `status` tool, and the tool passes this flag — so the default being
+   * inert protects nothing. `test/_offline.mjs`, preloaded by `npm test`, is the actual guarantee.
    */
   updateCheck?: boolean;
   /** Injected so the update check is testable without the network. Implies `updateCheck`. */

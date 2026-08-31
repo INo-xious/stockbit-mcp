@@ -57,7 +57,13 @@ export interface UpdateStatus {
   installed: string;
   /** The registry's `latest`. ABSENT when the check did not run or could not be read. */
   latest?: string;
-  /** Absent exactly when `latest` is — never a default, because "unknown" is not "current". */
+  /**
+   * Whether `latest` is ahead of `installed`. Never a default, because "unknown" is not "current".
+   *
+   * Absent whenever the question was not ANSWERED, which is two cases and not one: the check did
+   * not run (so `latest` is absent too), or it ran and the two versions could not be compared (so
+   * `latest` is present beside it). Read `note` for which.
+   */
   isOutdated?: boolean;
   /** When the answer behind this was fetched, ISO-8601. Absent when there is no answer. */
   checkedAt?: string;
@@ -109,29 +115,19 @@ function writeCache(answer: CachedAnswer): void {
 }
 
 /**
- * Compare two SemVer-ish versions.
- *
- * Deliberately small, and deliberately NOT a dependency. It answers one question — is `latest`
- * ahead of `installed` — and it is conservative: anything it cannot parse compares as "not ahead",
- * so an unexpected version string produces silence rather than a false alarm telling a user to
- * upgrade to something that does not exist.
- *
- * A prerelease suffix (`1.3.0-beta.1`) is IGNORED on both sides for ordering, which means a
- * prerelease is never announced as an upgrade over the release it precedes. That is the safe
- * direction: this package publishes no prerelease channel today, and recommending one by accident
- * would be worse than missing it.
- */
-export function isNewer(latest: string, installed: string): boolean {
-  return compareVersions(latest, installed) === 1;
-}
-
-/**
  * Order two versions: 1 if `a` is ahead, -1 if behind, 0 if equal, and `null` if either could not
  * be parsed.
  *
- * `null` is a distinct outcome rather than a fold into "not ahead", because the caller has three
- * things to say and not two. Collapsing "cannot compare" into "not ahead" is what let this module
- * print "Up to date" for a version it had never successfully compared.
+ * Deliberately small, and deliberately NOT a dependency. `null` is a distinct outcome rather than a
+ * fold into "not ahead", because the caller has three things to say and not two — collapsing
+ * "cannot compare" into "not ahead" is what let this module print "Up to date" for a pair it had
+ * never successfully compared.
+ *
+ * A prerelease or build suffix (`1.3.0-beta.1`) is IGNORED on both sides, so a prerelease never
+ * orders ahead of the release it precedes. That is the safe direction: this package publishes no
+ * prerelease channel, and recommending one by accident would be worse than missing it. `describe()`
+ * still notices when two equal-ordering strings differ, and says so rather than claiming either is
+ * "the latest release".
  */
 export function compareVersions(a: string, b: string): -1 | 0 | 1 | null {
   const parse = (v: string): number[] | null => {
@@ -249,6 +245,20 @@ function describe(installed: string, latest: string, checkedAt: string, fromCach
       note:
         `This build reports ${installed}, which is AHEAD of the registry's latest (${latest})${age} — ` +
         "normally a local build or an unpublished release. Nothing to update.",
+    };
+  }
+  // Equal by version ORDER. If the strings still differ, the difference is a prerelease or build
+  // suffix that ordering deliberately ignores — and "Up to date: 1.3.0 is the latest release"
+  // printed beside `latest: "1.3.0-beta.1"` is the same self-refutation the ahead case had.
+  if (latest.trim() !== installed.trim()) {
+    return {
+      installed,
+      latest,
+      isOutdated: false,
+      checkedAt,
+      note:
+        `The registry's latest is ${latest} and this build reports ${installed}${age}. They are the ` +
+        "same release; the difference is a prerelease or build suffix, which is not an upgrade.",
     };
   }
   return {
