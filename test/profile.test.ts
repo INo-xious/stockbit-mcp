@@ -182,3 +182,27 @@ test("under the DEFAULT profile the same message does not blame a variable nobod
   assert.doesNotMatch(text, /disabled by STOCKBIT_TOOLS/, "nobody set STOCKBIT_TOOLS");
   assert.match(text, /STOCKBIT_TOOLS=core,pine/, "and it must give the exact value that fixes it");
 });
+
+test("withheldFamilies names the families with NOTHING registered, and only those", () => {
+  const core = describeSurface(parseToolProfile("core"), true);
+  const withheld = new Set(core.withheldFamilies);
+
+  // The property, stated directly rather than as a fixed list: a family is withheld exactly when it
+  // lost at least one tool and kept none.
+  const kept = new Set(core.tools.map((t) => t.family));
+  const lost = new Set(ALL.tools.filter((t) => !core.tools.some((c) => c.name === t.name)).map((t) => t.family));
+  assert.deepEqual([...withheld].sort(), [...lost].filter((f) => !kept.has(f)).sort());
+
+  // The case that made this necessary, and the case that would make it lie.
+  assert.ok(withheld.has("chartbit"), "core registers none of chartbit's tools");
+  assert.equal(
+    withheld.has("trading"),
+    false,
+    "core keeps five trading tools, so telling a user to add `trading` would add nothing",
+  );
+
+  // Derived from what was FILTERED, never from FAMILIES minus what is present: a family declared
+  // before any of its tools exist would otherwise be named, and adding it would register nothing.
+  for (const family of withheld) assert.ok(FAMILIES.includes(family), `${family} is a real family`);
+  assert.deepEqual(ALL.withheldFamilies, [], "the unfiltered surface withholds nothing");
+});

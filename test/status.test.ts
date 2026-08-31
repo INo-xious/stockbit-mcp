@@ -396,6 +396,40 @@ test("trading off with no trading tools registered is not worth mentioning", asy
   clearAllSlots();
 });
 
+test("a family with nothing registered is named, with the exact env value that adds it back", async () => {
+  // The trap this closes: under `core`, all seventeen `chartbit` tools are withheld. Asking for one
+  // got the SDK's bare "not found", and `STOCKBIT_TOOLS` was named nowhere in this report except
+  // the trading branch — so finding the fix meant reading the FAMILIES array out of `dist/`.
+  clearAllSlots();
+  const report = await collectStatus({
+    profileLabel: "core",
+    profileIsDefault: true,
+    missingTools: ["chartbit_draw", "chartbit_save"],
+    missingFamilies: ["chartbit", "corpaction"],
+  });
+  assert.deepEqual(report.server.withheldFamilies, ["chartbit", "corpaction"]);
+
+  const text = formatStatus(report);
+  assert.match(text, /chartbit, corpaction/, "the withheld families must be named");
+  assert.match(text, /STOCKBIT_TOOLS=core,<family>/, "and the exact value that adds one back");
+  // FAMILIES, not tools — `screener` is both a withheld family and a registered tool, so a reader
+  // who takes these for tool names is being misled by a report whose point is not misleading them.
+  assert.match(text, /family names, not tool names/);
+
+  // A fact, not a fault. The trading warn above fires on a genuine contradiction; a default install
+  // that withheld nothing the user asked for must not carry a permanent warning.
+  assert.equal(report.checks.some((c) => c.status !== "ok" && /famil/i.test(c.name)), false);
+  clearAllSlots();
+});
+
+test("withholding nothing says nothing — the profile line stays bare", async () => {
+  clearAllSlots();
+  const report = await collectStatus({ profileLabel: "all" });
+  assert.equal(report.server.withheldFamilies, undefined, "absent, not an empty array");
+  assert.doesNotMatch(formatStatus(report), /have nothing registered/);
+  clearAllSlots();
+});
+
 test("an expired token says so rather than reporting a negative countdown as health", async () => {
   clearAllSlots();
   getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) - 86400));

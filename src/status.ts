@@ -109,6 +109,14 @@ export interface StatusReport {
     platform: string;
     toolProfile: string;
     toolCount?: number;
+    /**
+     * Families this profile withheld ENTIRELY. Absent when nothing is.
+     *
+     * FAMILY names, not tool names, and the difference matters in both directions: `trading` keeps
+     * five tools under `core` so it is not here, while `screener` is here as a family AND is a
+     * registered tool in its own right. Anything rendering this must say which it is naming.
+     */
+    withheldFamilies?: string[];
   };
   auth: Record<StoreSlot, SlotStatus>;
   login: LoginStatus;
@@ -200,6 +208,18 @@ export interface CollectStatusOptions {
    * all" and hijacked `nextStep` away from the advice the user actually needed.
    */
   missingTools?: string[];
+  /**
+   * Families this profile withheld ENTIRELY, so `status` can name the value that adds one back.
+   *
+   * Separate from `missingTools` because the remedies differ. `STOCKBIT_TOOLS=<label>,<family>` is
+   * only true for a family with nothing registered; a family that merely lost some tools is not a
+   * family that is gone, and telling someone to add `trading` when they already have five of its
+   * tools is the same class of wrong answer `missingTools` was written to avoid.
+   *
+   * Passed in rather than derived here: importing the surface would close a cycle through
+   * `register.ts` -> `system.ts` -> this file.
+   */
+  missingFamilies?: string[];
 }
 
 /* ------------------------------- login progress ------------------------------- */
@@ -721,6 +741,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
       toolProfile: options.profileError ? "unparsable" : (options.profileLabel ?? "all"),
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
+      ...(options.missingFamilies?.length ? { withheldFamilies: options.missingFamilies } : {}),
     },
     auth,
     login: loginStatus(),
@@ -887,6 +908,17 @@ export function formatStatus(report: StatusReport): string {
 
   const lines = [
     `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
+    // Named here rather than as a check, because a withheld family is a configuration FACT and not
+    // a fault: `checks` is a fault level, and a permanent warn on every default install is how you
+    // teach someone to ignore the warn that matters. The profile itself was never printed at all
+    // before this, so the line earns its place either way.
+    `Tool profile     ${report.server.toolProfile}${
+      report.server.withheldFamilies?.length
+        ? ` — these tool FAMILIES have nothing registered: ${report.server.withheldFamilies.join(", ")}` +
+          ` (family names, not tool names). Add one and restart the client: ` +
+          `STOCKBIT_TOOLS=${report.server.toolProfile},<family>, or STOCKBIT_TOOLS=all for every tool.`
+        : ""
+    }`,
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${describeBrowserPin(report.store)}`,
     `Last login       ${describeLoginAge(report.store)}`,

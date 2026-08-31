@@ -284,13 +284,16 @@ async function cmdStatus(argv: string[]): Promise<void> {
   let profileLabel: string | undefined;
   let profileIsDefault = false;
   let missingTools: string[] | undefined;
+  let missingFamilies: string[] | undefined;
   let profileError: string | undefined;
   try {
     const known = new Set(describeSurface().tools.map((t) => t.name));
     const resolved = resolveToolProfile(process.env.STOCKBIT_TOOLS, known);
     profileLabel = resolved.profile.label;
     profileIsDefault = resolved.isDefault;
-    missingTools = describeSurface(resolved.profile, resolved.isDefault).skipped;
+    const surface = describeSurface(resolved.profile, resolved.isDefault);
+    missingTools = surface.skipped;
+    missingFamilies = surface.withheldFamilies;
   } catch (err) {
     // An unparsable STOCKBIT_TOOLS stops `stockbit-mcp` from starting. It must not stop `status` —
     // that is the command someone runs to find out why — but staying silent about it and reporting
@@ -302,6 +305,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
     live,
     ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
     ...(missingTools === undefined ? {} : { missingTools }),
+    ...(missingFamilies === undefined ? {} : { missingFamilies }),
     ...(profileError === undefined ? {} : { profileError }),
   });
 

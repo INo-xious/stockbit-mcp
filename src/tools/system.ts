@@ -179,6 +179,11 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
           // place an order with and no explanation anywhere. Names rather than families, because a
           // family with one tool missing is not a family that is gone.
           missingTools: define.skippedNames(),
+          // And which whole FAMILIES it kept out, read at call time for the same reason. `core`
+          // withholds all seventeen `chartbit` tools; asking for one got the SDK's bare "not
+          // found", and the only place this report had ever named `STOCKBIT_TOOLS` outside an
+          // error was the trading branch, so finding the fix meant reading `FAMILIES` in `dist/`.
+          missingFamilies: define.withheldFamilies(),
         }),
       ),
   );
