@@ -863,8 +863,12 @@ export function formatStatus(report: StatusReport): string {
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),
     `Order placing    ${report.trading.mode.toUpperCase()} — ${report.trading.reason}`,
-    `Market           ${report.market.nowWib} WIB (${report.market.weekday}), ${report.market.phase}` +
-      (report.market.nextOpenWib ? `; next open ${report.market.nextOpenWib}` : ""),
+    // Both clocks on the line, because this is where the three-timezone confusion was read. WIB
+    // leads — it is the clock that decides whether a price can move — and the UTC stamp beside it
+    // is what every other timestamp in this server is in.
+    `Market           ${report.market.nowWib} WIB (${report.market.weekday}) = ${report.market.nowUtc}, ` +
+      `${report.market.phase}` +
+      (report.market.nextOpenWib ? `; next open ${report.market.nextOpenWib} WIB = ${report.market.nextOpenUtc}` : ""),
   ];
   if (report.login.inProgress) lines.push(`Login            in progress since ${report.login.startedAt}`);
   else if (report.login.lastResult) lines.push(`Login            last result: ${report.login.lastResult}`);

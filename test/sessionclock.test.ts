@@ -88,6 +88,78 @@ test("it says out loud that it does not know about holidays", () => {
   assert.match(c.note, /market_session/);
 });
 
+/* ------------------------------ the same instant, both clocks ------------------------------ */
+
+/**
+ * One event carried three clock readings in the field — payloads in UTC, this clock in WIB, and a
+ * host machine in a third zone — and correlating them was manual arithmetic every time. Each WIB
+ * field now has a UTC sibling naming the SAME instant, which is the property these assert.
+ */
+test("nowUtc is the same instant as nowWib, and keeps the seconds nowWib drops", () => {
+  const at = new Date("2026-08-25T03:00:14Z"); // 10:00:14 WIB, Tuesday
+  const c = sessionClock(at);
+  assert.equal(c.nowWib, "2026-08-25 10:00");
+  assert.equal(c.nowUtc, "2026-08-25T03:00:14Z");
+});
+
+test("nextOpenUtc accompanies nextOpenWib, and never appears without it", () => {
+  const friday = sessionClock(wib("2026-08-28T12:00")); // in the long Friday break
+  assert.equal(friday.nextOpenWib, "2026-08-28 14:00");
+  assert.equal(friday.nextOpenUtc, "2026-08-28T07:00:00Z");
+
+  // While a session is open there is no next open at all — and so no UTC sibling either.
+  const open = sessionClock(wib("2026-08-25T10:00"));
+  assert.equal(open.nextOpenWib, undefined);
+  assert.equal(open.nextOpenUtc, undefined);
+});
+
+test("the UTC sibling rolls back a DAY where the WIB reading does not", () => {
+  // The case a string rewrite gets wrong. 09:00 WIB on Monday is 02:00Z on Monday, so the date is
+  // unchanged — but the weekend jump from Saturday must land on Monday 02:00Z, not Sunday's.
+  const saturday = sessionClock(wib("2026-08-29T10:00"));
+  assert.equal(saturday.nextOpenWib, "2026-08-31 09:00");
+  assert.equal(saturday.nextOpenUtc, "2026-08-31T02:00:00Z");
+
+  // And the genuine rollover: pre-opening at 08:45 WIB is 01:45Z the SAME day, while any WIB
+  // reading before 07:00 would be the previous UTC day. `wibInstant` is built from the instant
+  // rather than the rendered string precisely so this cannot drift.
+  const beforeOpen = sessionClock(wib("2026-08-25T06:30"));
+  assert.equal(beforeOpen.nowWib, "2026-08-25 06:30");
+  assert.equal(beforeOpen.nowUtc, "2026-08-24T23:30:00Z", "06:30 WIB is the PREVIOUS day in UTC");
+  assert.equal(beforeOpen.nextOpenWib, "2026-08-25 09:00");
+  assert.equal(beforeOpen.nextOpenUtc, "2026-08-25T02:00:00Z");
+});
+
+test("every phase that reports a next open reports both clocks", () => {
+  // A sweep rather than a spot check: the pair is set through one helper, and this is what proves
+  // no branch was missed when a new phase is added.
+  const instants = [
+    "2026-08-25T06:30", // closed, before pre-opening
+    "2026-08-25T08:50", // pre-opening
+    "2026-08-25T12:30", // break
+    "2026-08-25T15:55", // pre-closing
+    "2026-08-25T16:10", // post-closing
+    "2026-08-25T17:00", // closed, after the print
+    "2026-08-29T10:00", // weekend
+  ];
+  for (const at of instants) {
+    const c = sessionClock(wib(at));
+    assert.ok(c.nextOpenWib, `${at} should have a next open`);
+    assert.ok(c.nextOpenUtc, `${at} (${c.phase}) reports nextOpenWib without nextOpenUtc`);
+    assert.match(c.nextOpenUtc, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, at);
+    // The two readings must be seven hours apart — the definition of WIB, asserted rather than
+    // assumed, so a future offset edit cannot silently desynchronise the pair.
+    const utc = Date.parse(c.nextOpenUtc);
+    const asWib = Date.parse(`${c.nextOpenWib.replace(" ", "T")}:00Z`);
+    assert.equal(asWib - utc, 7 * 60 * 60_000, `${at}: ${c.nextOpenWib} vs ${c.nextOpenUtc}`);
+  }
+});
+
+test("nowUtc carries no milliseconds, matching how payloads are stamped", () => {
+  const c = sessionClock(new Date("2026-08-25T03:00:14.789Z"));
+  assert.equal(c.nowUtc, "2026-08-25T03:00:14Z");
+});
+
 test("the daemon's polling window is wider than any single session", () => {
   // It deliberately stays true through the midday break: a daemon that stopped at a session
   // boundary would miss an alert that fires on the post-closing print.
