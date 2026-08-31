@@ -284,8 +284,19 @@ test("a clean page carries no suspectDates key at all", async () => {
   // that ran. Most rows carry neither side of any pair and are never compared.
   const page = await getCorpactions("dividend", "BBRI");
   assert.equal("suspectDates" in page, false);
-  const conversions = await getStockConversion("BUKA");
-  assert.equal("suspectDates" in conversions, false, "a bare `date` is never one side of a pair");
+});
+
+test("a bare `date` is never the EARLIER side of a pair", async () => {
+  // DATE_ORDER's comment says why: `date` is the least specific key this module knows and is as
+  // likely to be an announcement date as anything else, so treating it as the side that must come
+  // first would flag rows that are in a perfectly ordinary order.
+  //
+  // This row is the shape that would prove it: a `date` LATER than a qualified key that is on a
+  // `later` list. It is clean today because no rule takes `date` as an earlier candidate — append
+  // `"date"` to the ex-date rule's `earlier` list and this test fails, which is the point of it.
+  reply = () => ({ data: [{ symbol: "BUKA", date: "2026-05-20", recording_date: "2026-05-10" }] });
+  const page = await getCorpactions("dividend");
+  assert.equal("suspectDates" in page, false);
 });
 
 test("equal, missing and unreadable dates are not suspicions", async () => {

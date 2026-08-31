@@ -40,8 +40,10 @@ export function registerCorpactionTools(define: Definer): void {
       "happened — a RUPS record date after the meeting it gates, a cum date after its ex-date, a " +
       "payment before the record date. That is UPSTREAM data being wrong, not a failure here: the " +
       "row is still returned exactly as Stockbit sent it, and each entry names both wire keys and " +
-      "both values so you can judge the pair yourself. The key spellings are candidates, so a " +
-      "suspicion can be a misread field rather than a bad date. Absent means nothing was out of " +
+      "both values so you can judge the pair yourself — the values NORMALIZED to YYYY-MM-DD, not " +
+      "the wire strings, so read the row itself to see what was actually sent. The key spellings " +
+      "are candidates, so a suspicion can be a misread field rather than a bad date. Absent means " +
+      "nothing was out of " +
       "order — it does NOT mean the dates were checked and cleared, because most rows carry " +
       "neither side of any pair.\n" +
       "For dividends prefer `dividend_calendar`, which also covers stock dividends. ",
@@ -187,7 +189,10 @@ export function registerCorpactionTools(define: Definer): void {
       "one action kind that is about companies not yet listed, so no symbol filter applies. An " +
       "empty list means Stockbit is showing no IPOs right now, which is an ordinary state between " +
       "offerings, not an error. Pair it with `underwriters` for the track record of the houses " +
-      "running a deal. ",
+      "running a deal.\n" +
+      "This is the same reader as `corporate_actions`, so a row here can carry `suspectDates` too — " +
+      "same meaning, same caveat: it flags an impossible date ORDER in upstream's own data, and its " +
+      "absence is not a clean bill. ",
     {
       limit: z.coerce.number().optional().describe("Max rows. Omitted entirely when not given"),
     },

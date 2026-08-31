@@ -201,8 +201,22 @@ test("withheldFamilies names the families with NOTHING registered, and only thos
     "core keeps five trading tools, so telling a user to add `trading` would add nothing",
   );
 
-  // Derived from what was FILTERED, never from FAMILIES minus what is present: a family declared
-  // before any of its tools exist would otherwise be named, and adding it would register nothing.
-  for (const family of withheld) assert.ok(FAMILIES.includes(family), `${family} is a real family`);
+  // Derived from what was FILTERED, never from FAMILIES minus what is present. The difference only
+  // shows on a family that has no tools at all: `FAMILIES` minus present would name it, and send a
+  // reader to set `STOCKBIT_TOOLS=core,<that>` to register nothing. So the assertion is that every
+  // withheld family actually LOST something — which is what makes the remedy true.
+  //
+  // (`assert.ok(FAMILIES.includes(family))` was here and was worthless: `withheldFamilies` returns
+  // `Family[]`, so it cannot fail and pins nothing.)
+  const skippedFamilies = new Set(
+    ALL.tools.filter((t) => !core.tools.some((c) => c.name === t.name)).map((t) => t.family),
+  );
+  for (const family of withheld) {
+    assert.ok(skippedFamilies.has(family), `${family} is named but nothing of it was filtered out`);
+  }
+  const emptyFamilies = FAMILIES.filter((f) => !ALL.tools.some((t) => t.family === f));
+  for (const family of emptyFamilies) {
+    assert.equal(withheld.has(family), false, `${family} has no tools, so adding it would add none`);
+  }
   assert.deepEqual(ALL.withheldFamilies, [], "the unfiltered surface withholds nothing");
 });
