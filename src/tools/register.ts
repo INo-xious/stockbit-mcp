@@ -385,8 +385,23 @@ export function registerTools(
         // Always buyers -> sellers, matching Stockbit. Each seller's bar is its TRUE total, so
         // the picture states the seller's whole position rather than only the slice the drawn
         // buyers account for.
-        const brokers = d.topBuyers;
-        const sellerTotals = new Map(d.topSellers.map((s) => [s.code, s.amount]));
+        // A party whose amount the response did not carry cannot be drawn — a ribbon's whole
+        // meaning is its width — so it is dropped here rather than entering the renderer as a
+        // zero, which would draw a hairline that reads as "traded almost nothing". What was
+        // dropped is COUNTED and reported below; a diagram missing a broker in silence is the
+        // failure this whole change is about.
+        const drawable = <T extends { amount: number | null }>(p: T): p is T & { amount: number } =>
+          typeof p.amount === "number";
+        const brokers = d.topBuyers.filter(drawable).map((b) => ({
+          ...b,
+          distributedWith: b.distributedWith.filter(drawable),
+        }));
+        const sellers = d.topSellers.filter(drawable);
+        const partiesWithoutAmount =
+          d.topBuyers.length - brokers.length +
+          (d.topSellers.length - sellers.length) +
+          d.topBuyers.reduce((n, b) => n + b.distributedWith.filter((p) => !drawable(p)).length, 0);
+        const sellerTotals = new Map(sellers.map((s) => [s.code, s.amount]));
         const svg = renderSankey(brokers, {
           symbol: d.symbol,
           unit: d.amountUnit,
@@ -432,6 +447,9 @@ export function registerTools(
               dataType: d.dataType,
               marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
+              // Above zero means the response did not carry an amount for that many parties, so
+              // they are absent from the diagram. Not the same as a party that traded nothing.
+              partiesWithoutAmount,
               savedTo,
               stockbitUrl: stockbit.url,
               stockbitBrowser: stockbit.action,
@@ -453,6 +471,12 @@ export function registerTools(
       "field (close, high, low, volume, hl2…), or a number. Declare what you reference via " +
       "`overlays`/`panels` — the tool refuses a condition it cannot evaluate rather than storing a " +
       "rule that silently never fires.\n" +
+      "A field the SERIES does not carry is a separate matter from one you did not declare. Not " +
+      "every response carries volume, value or foreign flow; where a bar is missing the field it " +
+      "reads as absent rather than as zero, and a condition referencing it is UNJUDGEABLE on that " +
+      "bar — reported as warming up, not as false. That is deliberate: a rule comparing volume " +
+      "against a figure the response never sent would otherwise fire, or not fire, on a zero " +
+      "nobody reported.\n" +
       "Alerts fire once per bar. Nothing is delivered automatically — `alert_check` evaluates them; " +
       "there is no background daemon yet.",
     {

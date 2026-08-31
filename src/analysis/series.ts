@@ -30,6 +30,7 @@ import {
   macd,
   rsi,
   sma,
+  smaNullable,
   type Series,
 } from "../core/indicators.js";
 
@@ -164,7 +165,9 @@ export function defineSeries(overlays: Overlay[] = [], panels: Panel[] = []): Se
       out.push({
         id: `volSma${p}`, label: `Volume SMA ${p}`, pane: "price",
         pine: `ta.sma(volume, ${p})`,
-        compute: (bars) => sma(bars.map((b) => b.volume), p),
+        // `smaNullable`, not `sma`: volume is the one operand here that can be absent, and a
+        // rolling sum fed a hole poisons every window after it.
+        compute: (bars) => smaNullable(bars.map((b) => b.volume), p),
         color: "",
       });
     } else {

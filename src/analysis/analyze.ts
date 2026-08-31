@@ -319,9 +319,14 @@ export function brokerFlowPillar(input: BrokerFlowInput): Pillar {
   const parts: Array<{ score: number; weight: number }> = [];
 
   /* -- 1. foreign net flow relative to what actually traded -- */
-  const tradedValue = sum(recent.map((b) => b.value));
-  const netForeign = sum(recent.map((b) => b.netForeign));
-  if (recent.length >= 5 && tradedValue > 0) {
+  // Both figures come from the SAME bars, and only from bars that carried both. Summing every
+  // readable `netForeign` over every readable `value` would divide two different populations, and
+  // treating an absent field as 0 — which is what this did before those fields could say "absent" —
+  // silently reported "foreigners were flat" for a session nobody has the flow for.
+  const readable = recent.filter((b) => typeof b.value === "number" && typeof b.netForeign === "number");
+  const tradedValue = sum(readable.map((b) => b.value as number));
+  const netForeign = sum(readable.map((b) => b.netForeign as number));
+  if (readable.length >= 5 && tradedValue > 0) {
     const ratio = netForeign / tradedValue;
     // A net foreign take of 10% of everything that traded over a month is a very large flow; that
     // is the point where this saturates.
@@ -330,10 +335,16 @@ export function brokerFlowPillar(input: BrokerFlowInput): Pillar {
     evidence.foreignNetIdr = round(netForeign, 0);
     evidence.tradedValueIdr = round(tradedValue, 0);
     evidence.foreignShareOfValuePct = round(ratio * 100, 3);
-    evidence.sessionsRead = recent.length;
+    evidence.sessionsRead = readable.length;
+    if (readable.length < recent.length) {
+      // Named, not folded into the average: the ratio describes the sessions it could read, and a
+      // caller comparing two symbols needs to know one of them was scored on fewer.
+      evidence.sessionsUnreadable = recent.length - readable.length;
+    }
   } else {
     notes.push(
-      `Foreign flow not read: needs 5 sessions with traded value, saw ${recent.length}.`,
+      `Foreign flow not read: needs 5 sessions carrying BOTH traded value and foreign net, ` +
+        `saw ${readable.length} of ${recent.length}.`,
     );
   }
 

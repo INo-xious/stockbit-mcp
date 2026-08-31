@@ -151,8 +151,14 @@ const Response = z
 export interface DistributionCounterparty {
   code: string;
   investorType?: string;
-  /** IDR when dataType is VALUE, LOTS when VOLUME (1 lot = 100 shares). Never shares. */
-  amount: number;
+  /**
+   * IDR when dataType is VALUE, LOTS when VOLUME (1 lot = 100 shares). Never shares.
+   *
+   * `null` when the response did not carry an amount for this party. It used to be `?? 0`, which
+   * put a broker in the diagram with a flow of nothing — indistinguishable from one that genuinely
+   * traded nothing with the other side, and it mis-scaled every other ribbon beside it.
+   */
+  amount: number | null;
 }
 
 export interface DistributionBroker extends DistributionCounterparty {
@@ -219,7 +225,7 @@ export function brokerDistributionTtlFor(
 const mapParty = (p: z.output<typeof Party>): DistributionCounterparty => ({
   code: p.code,
   investorType: p.type,
-  amount: p.amount ?? 0,
+  amount: p.amount ?? null,
 });
 
 /**

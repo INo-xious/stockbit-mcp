@@ -127,6 +127,25 @@ test("the level asymmetry between alerts and Pine is deliberate, and the numeric
 
 /* -------------------------------- evaluation is honest -------------------------------- */
 
+test("a rule on a field the series does not carry is unjudgeable, not false", () => {
+  // The alert half of "absent is not zero". `volume` used to be `?? 0` on every bar, so a rule
+  // like `volume > 5000` was evaluated against a figure the response never sent — it answered
+  // "condition-false" with total confidence. Now the operand is absent and the rule says so.
+  // This is the one place a null changes an outcome a user acts on rather than reads.
+  const bars = series([100, 101, 102, 103, 104]).map((b) => ({ ...b, volume: null }));
+  const result = evaluateRule(rule({ left: "volume", op: ">", right: 5000 }), bars, NOW);
+  assert.equal(result.fired, false, "it must not fire on a number nobody sent");
+  assert.notEqual(result.reason, "condition-false", "and it must not claim the comparison was made");
+  assert.equal(result.reason, "warming-up");
+});
+
+test("the same rule is judged normally once the series carries the field", () => {
+  // The other edge: absence must not make a readable series permanently unjudgeable.
+  const bars = series([100, 101, 102, 103, 104]).map((b) => ({ ...b, volume: 9000 }));
+  const result = evaluateRule(rule({ left: "volume", op: ">", right: 5000 }), bars, NOW);
+  assert.equal(result.fired, true);
+});
+
 test("warming up is reported as warming up, not as a no", () => {
   // The difference matters: "not enough history yet" is worth waiting on, "condition false" is not.
   const bars = series([100, 101, 102]); // far too few for RSI 14

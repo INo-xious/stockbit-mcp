@@ -363,14 +363,18 @@ function projectSeries(
       low: read(row, "low") ?? close,
       close,
       average: read(row, "average") ?? close,
-      volume: read(row, "volume") ?? 0,
-      value: read(row, "value") ?? 0,
-      frequency: read(row, "frequency") ?? 0,
-      change: read(row, "change") ?? 0,
-      changePercent: read(row, "changePercent") ?? 0,
-      foreignBuy: read(row, "foreignBuy") ?? 0,
-      foreignSell: read(row, "foreignSell") ?? 0,
-      netForeign: read(row, "netForeign") ?? 0,
+      // No `?? 0` below. open/high/low fall back to the close because a flat candle is a
+      // documented approximation of the same quantity and the warning list says when it happened;
+      // there is no such stand-in for a volume or a foreign flow, so absence is reported as
+      // absence. This route is the one that proves it matters: it sends empty strings.
+      volume: read(row, "volume"),
+      value: read(row, "value"),
+      frequency: read(row, "frequency"),
+      change: read(row, "change"),
+      changePercent: read(row, "changePercent"),
+      foreignBuy: read(row, "foreignBuy"),
+      foreignSell: read(row, "foreignSell"),
+      netForeign: read(row, "netForeign"),
     };
   });
 
@@ -384,9 +388,9 @@ function projectSeries(
   // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `numberish("")` returns null
   // — every bar silently took its close for all three and nothing said so. A field that reads null
   // on every row is as unusable as one that was never there, and the caller has to be told.
-  const flat = (["open", "high", "low"] as const).filter(
-    (f) => unmapped.includes(f) || located.rows.every((row) => read(row, f) === null),
-  );
+  const unreadable = (field: PointField): boolean =>
+    unmapped.includes(field) || located.rows.every((row) => read(row, field) === null);
+  const flat = (["open", "high", "low"] as const).filter(unreadable);
   if (flat.length > 0) {
     warnings.push(
       `No usable ${flat.join("/")} arrived — absent, or present and empty on every bar — so those ` +
@@ -394,8 +398,17 @@ function projectSeries(
         "flat. Do not run candlestick pattern detection or a high/low-based indicator on this series.",
     );
   }
-  if (unmapped.includes("volume")) {
-    warnings.push("No volume field was found; volume is 0 on every bar and is not a real zero.");
+  // The same empty-string trap, one field over. This asked only whether the KEY was missing, and
+  // `keyIn` accepts an empty string as present — so on the observed daily payload, where volume
+  // arrives as "", `unmapped` stayed clean and NO warning fired at all while every bar reported a
+  // volume of 0. Ask whether a usable value arrived, not whether the key did.
+  const absent = (["volume", "value", "frequency", "change", "changePercent", "foreignBuy", "foreignSell", "netForeign"] as const).filter(unreadable);
+  if (absent.length > 0) {
+    warnings.push(
+      `No usable ${absent.join("/")} arrived — absent, or present and empty on every bar — so ` +
+        "those are null rather than zero on every bar. A null is 'the response did not carry it', " +
+        "not 'the figure was zero'.",
+    );
   }
 
   const consumed = new Set(Object.values(mapped));

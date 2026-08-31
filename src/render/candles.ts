@@ -296,9 +296,15 @@ export function renderCandles(opts: CandleChartOptions): string {
   let cursor = priceTop + priceH;
   if (volH) {
     cursor += GAP;
-    const maxVol = Math.max(1, ...bars.map((b) => b.volume));
+    // A session whose volume the response did not carry draws NO bar. A null here used to be a
+    // zero, which drew a full-width bar of height 0.5 that reads as "nothing traded" — a claim
+    // about the session rather than about the payload. `Math.max` over a null would also make
+    // `maxVol` NaN and put `y="NaN"` on every rect in the panel.
+    const volumes = bars.map((b) => b.volume).filter((v): v is number => v !== null);
+    const maxVol = Math.max(1, ...volumes);
     for (let i = 0; i < n; i++) {
       const b = bars[i];
+      if (b.volume === null) continue;
       const h = (b.volume / maxVol) * volH;
       parts.push(
         `<rect x="${(xOf(i) - bodyW / 2).toFixed(1)}" y="${(cursor + volH - h).toFixed(1)}" width="${bodyW.toFixed(1)}" height="${Math.max(0.5, h).toFixed(1)}" fill="${b.close >= b.open ? up : down}" fill-opacity="0.55"><title>${esc(b.date)}: ${esc(humanAmount(b.volume))} lots</title></rect>`,

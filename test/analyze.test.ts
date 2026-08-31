@@ -193,6 +193,31 @@ test("two perfectly uniform sides of DIFFERENT sizes score ~0, not ±100", () =>
   assert.equal(p.evidence.sellConcentration, 0);
 });
 
+test("foreign flow is not scored from sessions whose flow the response did not carry", () => {
+  // This is the pillar the whole `?? 0` question was about. A bar with `netForeign: null` used to
+  // arrive here as 0 and be averaged in as "foreigners were flat that day" — a reading, from a
+  // session nobody has the flow for. Twenty such bars scored a confident neutral.
+  const blind = bars(20).map((b) => ({ ...b, netForeign: null }));
+  const p = brokerFlowPillar({ summary: null, bars: blind, bands: null });
+
+  assert.equal(p.evidence.foreignNetIdr, undefined, "nothing is reported for flow that was not read");
+  assert.ok(
+    p.notes.some((n) => /Foreign flow not read/.test(n) && /0 of 20/.test(n)),
+    `the pillar says how many sessions it could actually read, got ${JSON.stringify(p.notes)}`,
+  );
+});
+
+test("a partly readable window is scored on the sessions it could read, and says how many", () => {
+  // Both figures must come from the SAME sessions: summing every readable netForeign over every
+  // readable value would divide two different populations.
+  const mixed = bars(20, { netForeign: 5e7 }).map((b, i) => (i < 8 ? { ...b, netForeign: null } : b));
+  const p = brokerFlowPillar({ summary: null, bars: mixed, bands: null });
+
+  assert.equal(p.evidence.sessionsRead, 12);
+  assert.equal(p.evidence.sessionsUnreadable, 8, "and the eight it could not read are named, not averaged in");
+  assert.equal(p.evidence.tradedValueIdr, 12 * 1e9, "the denominator covers the same twelve sessions");
+});
+
 test("the genuinely more concentrated side sets the sign, whatever the broker counts", () => {
   // 6 buyers whose top 3 hold 55% (barely above their 50% floor) against 40 sellers whose top 3
   // hold 45% (far above their 7.5% floor). The sellers are unambiguously the concentrated side.

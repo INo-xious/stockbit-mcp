@@ -77,6 +77,24 @@ export function bucketKey(date: string, tf: Timeframe): string {
  * trailing bucket is always flagged, because we genuinely cannot know whether more sessions are
  * coming.
  */
+/**
+ * Sum one field across a bucket, or `null` when any session in that bucket could not be read.
+ *
+ * All-or-nothing on purpose. Summing only the readable sessions would present a partial week as a
+ * whole one — an invention layered on top of the absence it was hiding, and undetectable in the
+ * output, since a week's volume carries nothing that says how many days went into it.
+ * `sessionsPerBar` reports how many sessions the bucket held; it cannot say how many were legible.
+ */
+function sumOrNull(group: Bar[], pick: (bar: Bar) => number | null): number | null {
+  let total = 0;
+  for (const bar of group) {
+    const value = pick(bar);
+    if (value === null) return null;
+    total += value;
+  }
+  return total;
+}
+
 export function resample(bars: Bar[], tf: Timeframe, opts: { includePartial?: boolean } = {}): ResampledSeries {
   if (tf === "D") {
     return { timeframe: "D", bars: [...bars], sessionsPerBar: bars.map(() => 1), partialLast: false, sourceBars: bars.length };
@@ -96,14 +114,20 @@ export function resample(bars: Bar[], tf: Timeframe, opts: { includePartial?: bo
 
   const out: Bar[] = [];
   const sessionsPerBar: number[] = [];
+
   let previousClose: number | null = null;
 
   for (const key of order) {
     const group = groups.get(key)!;
     const first = group[0];
     const last = group[group.length - 1];
-    const volume = group.reduce((a, b) => a + b.volume, 0);
-    const weightedAverage = volume > 0 ? group.reduce((a, b) => a + b.average * b.volume, 0) / volume : last.average;
+    const volume = sumOrNull(group, (b) => b.volume);
+    // A VWAP needs every session's volume. Without them the bucket falls back to the last session's
+    // own average, which is what this already did for a zero-volume week.
+    const weightedAverage =
+      volume !== null && volume > 0
+        ? group.reduce((a, b) => a + b.average * (b.volume as number), 0) / volume
+        : last.average;
 
     const close = last.close;
     const change = previousClose === null ? 0 : close - previousClose;
@@ -118,13 +142,13 @@ export function resample(bars: Bar[], tf: Timeframe, opts: { includePartial?: bo
       close,
       average: Number(weightedAverage.toFixed(4)),
       volume,
-      value: group.reduce((a, b) => a + b.value, 0),
-      frequency: group.reduce((a, b) => a + b.frequency, 0),
+      value: sumOrNull(group, (b) => b.value),
+      frequency: sumOrNull(group, (b) => b.frequency),
       change: Number(change.toFixed(4)),
       changePercent: Number(changePercent.toFixed(4)),
-      foreignBuy: group.reduce((a, b) => a + b.foreignBuy, 0),
-      foreignSell: group.reduce((a, b) => a + b.foreignSell, 0),
-      netForeign: group.reduce((a, b) => a + b.netForeign, 0),
+      foreignBuy: sumOrNull(group, (b) => b.foreignBuy),
+      foreignSell: sumOrNull(group, (b) => b.foreignSell),
+      netForeign: sumOrNull(group, (b) => b.netForeign),
     });
     sessionsPerBar.push(group.length);
     previousClose = close;

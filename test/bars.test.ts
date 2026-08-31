@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/index.ts";
+import { toBar } from "../src/core/bars.ts";
 import { MAX_PAGES, ROWS_PER_PAGE, getBars } from "../src/core/bars.ts";
 
 function farFutureJwt(): string {
@@ -101,6 +102,35 @@ test("bars come back oldest-first", async () => {
   const dates = series.bars.map((b) => b.date);
   assert.deepEqual([...dates].sort(), dates);
   assert.equal(series.bars[series.bars.length - 1].date, day(0), "the last bar must be the newest session");
+});
+
+test("a field the response did not carry is null on the bar, never zero", () => {
+  // The rule this whole projection turns on: "no foreign participation today" and "the response
+  // said nothing about foreign flow" are different answers, and `?? 0` made them the same bytes.
+  // `analyze` read the first from rows that meant the second.
+  const bar = toBar({ date: "2026-08-24", open: 100, high: 110, low: 90, close: 105 });
+  assert.equal(bar.netForeign, null);
+  assert.equal(bar.foreignBuy, null);
+  assert.equal(bar.foreignSell, null);
+  assert.equal(bar.volume, null);
+  assert.equal(bar.value, null);
+  assert.equal(bar.frequency, null);
+  assert.equal(bar.change, null);
+  assert.equal(bar.changePercent, null);
+});
+
+test("a real zero on the wire is kept as a real zero", () => {
+  // The other edge. Absence is not the only thing a zero can mean, and a session that genuinely
+  // saw no foreign flow must still be able to say so.
+  const bar = toBar({ date: "2026-08-24", open: 100, high: 110, low: 90, close: 105, net_foreign: 0, volume: 0 });
+  assert.equal(bar.netForeign, 0);
+  assert.equal(bar.volume, 0);
+});
+
+test("a missing VWAP still falls back to the close, which is an approximation and not an invention", () => {
+  // `average` is deliberately NOT in the group above: the close is a stand-in for the same
+  // quantity on a session with no separate VWAP. There is no such stand-in for a foreign flow.
+  assert.equal(toBar({ date: "2026-08-24", open: 100, high: 110, low: 90, close: 105 }).average, 105);
 });
 
 test("the page walk stops as soon as the request is covered", async () => {

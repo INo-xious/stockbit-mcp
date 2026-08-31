@@ -173,20 +173,28 @@ test("points project onto Bar, oldest first, whatever the encoding", async () =>
     close: 4250,
     average: 4250,
     volume: 1200,
-    value: 0,
-    frequency: 0,
-    change: 0,
-    changePercent: 0,
-    foreignBuy: 0,
-    foreignSell: 0,
-    netForeign: 0,
+    // null, not 0. The fixture carries no value/frequency/change/foreign fields, and a zero here
+    // would be this projection asserting that nothing traded and no foreigner moved — a claim
+    // about the session rather than about the payload, and one no caller could see through.
+    value: null,
+    frequency: null,
+    change: null,
+    changePercent: null,
+    foreignBuy: null,
+    foreignSell: null,
+    netForeign: null,
   });
   assert.equal(series.mapped.date, "time");
   assert.equal(series.mapped.close, "close");
   assert.deepEqual(series.extraKeys, ["foo"]);
   assert.ok(series.unmapped.includes("value"), "value was not in the payload and must be reported");
   assert.ok(!series.unmapped.includes("volume"));
-  assert.deepEqual(series.warnings, [], "everything needed was mapped");
+  // OHLC and volume were all mapped, so there is no "flat candles" warning. The seven fields this
+  // fixture does not carry are named in the other one — they used to be zero-filled in silence,
+  // which is what made `warnings: []` look right here.
+  assert.equal(series.warnings.length, 1);
+  assert.doesNotMatch(series.warnings[0] ?? "", /flat/, "the candles are real, not synthesised from close");
+  assert.match(series.warnings[0] ?? "", /No usable value\/frequency/);
   assert.equal(series.sample.foo, 1, "the raw first point is returned for shape discovery");
 });
 
@@ -226,7 +234,29 @@ test("a close-only payload is usable but says every candle is synthetic", async 
   assert.ok(series.unmapped.includes("volume"));
   assert.equal(series.warnings.length, 2);
   assert.match(series.warnings[0] ?? "", /flat/);
-  assert.match(series.warnings[1] ?? "", /not a real zero/);
+  // The second warning now names EVERY field that arrived unusable, not volume alone — the other
+  // seven zero-filled in complete silence before.
+  assert.match(series.warnings[1] ?? "", /not 'the figure was zero'/);
+  assert.match(series.warnings[1] ?? "", /volume/);
+  assert.match(series.warnings[1] ?? "", /netForeign/);
+  assert.equal(series.bars[0]?.volume, null, "and the bar says absent rather than zero");
+  assert.equal(series.bars[0]?.netForeign, null);
+});
+
+test("a field present but EMPTY on every bar warns too, which is the observed daily payload", async () => {
+  // The reason the old check was wrong. `keyIn` accepts an empty string as present, so `unmapped`
+  // stayed clean and the volume warning never fired at all — while every bar reported volume 0.
+  // /charts/:symbol/daily is documented as sending open/high/low/volume exactly this way.
+  responder = () => ({
+    data: { result: [{ date: "2026-08-24", close: 105, volume: "", value: "", net_foreign: "" }] },
+  });
+  const series = await getSeriesBars("BBRI", "1m");
+  assert.ok(!series.unmapped.includes("volume"), "the KEY is present — that was never the question");
+  assert.equal(series.bars[0]?.volume, null, "but no usable value arrived, so it is absent");
+  assert.ok(
+    series.warnings.some((w) => /volume/.test(w) && /not 'the figure was zero'/.test(w)),
+    "and the caller is told, which is what did not happen before",
+  );
 });
 
 test("an empty series is raised, not returned, so the caller falls back deliberately", async () => {

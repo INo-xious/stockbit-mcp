@@ -45,6 +45,38 @@ export function sma(values: number[], period: number): Series {
 }
 
 /**
+ * Simple moving average over a series that may have holes.
+ *
+ * A `null` anywhere in the window makes that window's average `null`, rather than shrinking the
+ * denominator: the mean of "twenty sessions, one of which we could not read" is not the mean of the
+ * nineteen we could, and reporting it as one would answer a question nobody asked. It is also not
+ * the mean with a zero substituted, which is what this computed before `Bar.volume` could say
+ * "absent" — a single unread session pulled a volume average down by a twentieth and nothing said
+ * so.
+ *
+ * Separate from `sma` rather than replacing it. `sma` takes `number[]` and its rolling sum is
+ * correct there; fed a hole it would poison every later window, which is worse than either answer.
+ */
+export function smaNullable(values: Series, period: number): Series {
+  requirePeriod(period, "smaNullable");
+  const out: Series = new Array(values.length).fill(null);
+  let sum = 0;
+  let holes = 0;
+  for (let i = 0; i < values.length; i++) {
+    const entering = values[i];
+    if (entering === null) holes++;
+    else sum += entering;
+    if (i >= period) {
+      const leaving = values[i - period];
+      if (leaving === null) holes--;
+      else sum -= leaving;
+    }
+    if (i >= period - 1 && holes === 0) out[i] = round(sum / period);
+  }
+  return out;
+}
+
+/**
  * Rolling maximum over a trailing window of `period` values, inclusive of the current one.
  *
  * Matches Pine's `ta.highest(source, n)`, which is why the window includes the current bar — an
