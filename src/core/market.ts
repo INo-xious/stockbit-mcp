@@ -687,7 +687,7 @@ export interface TradeBookOptions {
   /** Auction phases to exclude. Sent as repeated parameters, one per value. */
   dataModes?: readonly TradeBookDataMode[];
   /**
-   * REQUIRED by the endpoint, and it has no default here because none has been observed.
+   * REQUIRED by the endpoint, and left to the caller rather than defaulted.
    *
    * A 2026-08-31 field report called this route with `mode` set and with `mode` omitted and got
    * `400 {"error":"Group by is required","kind":"invalid_param"}` both times. The parameter was

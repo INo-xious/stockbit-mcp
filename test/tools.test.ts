@@ -387,6 +387,11 @@ const OBSERVED = [
   // names — the two TYPE_CHART_* series, the broker lists, the minute grid — was read out of the
   // response. Its docstring used to disclaim knowing its own shape.
   "broker_flow_intraday",
+  // Also moved up on 2026-09-01, and this one had never answered AT ALL: it was sending its
+  // one-shot token as a query parameter the endpoint does not read. Capturing Stockbit's own
+  // request settled the placement, and the chart it then returned is where `series`, the points
+  // and the `timeframes` vocabulary were read from.
+  "shareholders",
   "price_performance",
   "orderbook",
   "keystats",
@@ -457,7 +462,6 @@ const PROJECTED = [
   "company_overview",
   "company_profile",
   "company_contact",
-  "shareholders",
   "sector_companies",
   "seasonality",
   "earnings",

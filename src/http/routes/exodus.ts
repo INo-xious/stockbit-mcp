@@ -135,11 +135,19 @@ export const EXODUS_ROUTES = {
    * READS: it creates nothing and returns a value used immediately by the GET below.
    */
   shareholdersToken: { host: "exodus", method: "POST", template: "/emitten-metadata/shareholders/token", auth: "main" },
+  /**
+   * Authorised by the token `shareholdersToken` mints, NOT by the main session bearer.
+   *
+   * Captured from Stockbit's own client on 2026-09-01: it sends `Authorization: <the 64-hex minted
+   * token>`, raw and with no `Bearer` prefix, and no `token` query parameter at all. Sending the
+   * main bearer here — which is what `auth: "main"` did — answers
+   * `401 WebViewToken.FromContext: User Not Found` on a session where everything else works.
+   */
   shareholdersChart: {
     host: "exodus",
     method: "GET",
     template: "/emitten-metadata/shareholders/:symbol/chart",
-    auth: "main",
+    auth: "webviewToken",
   },
   emittenClassification: { host: "exodus", method: "GET", template: "/emitten/classification", auth: "main" },
   emittenClassificationCompany: {

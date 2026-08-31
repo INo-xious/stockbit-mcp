@@ -488,7 +488,10 @@ test("every route's auth kind is consistent with its host", () => {
   // A carina route drawing on the market-data token would send the wrong credential to the right
   // place — a 401 at best, and at worst a token presented to a host it was not issued for.
   const allowedByHost: Record<Host, string[]> = {
-    exodus: ["main", "refreshMain"],
+    // `webviewToken` is a one-shot credential MINTED BY an exodus route and spent on an exodus
+    // route, so it never leaves the host it was issued for — which is the property this test is
+    // really about. It is listed only here for that reason.
+    exodus: ["main", "refreshMain", "webviewToken"],
     carina: ["securities", "refreshSecurities", "none"],
     sekuritas: ["eipo", "refreshEipo", "none"],
   };
@@ -498,6 +501,21 @@ test("every route's auth kind is consistent with its host", () => {
       `${name} is on ${route.host} but draws on the ${route.auth} credential`,
     );
   }
+});
+
+test("the shareholder chart is the one route that takes a raw, minted credential", () => {
+  // Four things, and each of them was wrong at some point in this route's life.
+  assert.equal(ROUTES.shareholdersChart.auth, "webviewToken");
+  // It is minted by a POST that is itself an ordinary main-session call.
+  assert.equal(ROUTES.shareholdersToken.auth, "main");
+  // Nothing else may quietly adopt this placement: it bypasses the token store, so a route added
+  // with it would send a credential the store never issued and never refreshes.
+  const raw = Object.entries(ROUTES)
+    .filter(([, route]) => route.auth === "webviewToken")
+    .map(([name]) => name);
+  assert.deepEqual(raw, ["shareholdersChart"]);
+  // And it has no domain, so a 401 here must not spend a rotation on the main session.
+  assert.equal(domainOf("shareholdersChart"), null);
 });
 
 test("only the three refresh routes carry a refresh credential", () => {

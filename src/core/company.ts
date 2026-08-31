@@ -240,8 +240,24 @@ export async function getSubsidiaries(symbol: string): Promise<RowSet & { symbol
  * point of checking is that a typo (`202`, `20255`) is refused here rather than becoming a
  * confidently empty chart.
  */
-const MIN_VALUE_YEAR = 1990;
-const MAX_VALUE_YEAR = 2100;
+/**
+ * `value_year` is a WINDOW LENGTH IN MONTHS, not a calendar year.
+ *
+ * It was validated here as a year between 1990 and 2100 until 2026-09-01, which had it exactly
+ * backwards: it would have refused every value that works and accepted only values that do not.
+ * Nobody noticed because the call itself was failing on authentication, so no argument ever
+ * reached the endpoint.
+ *
+ * Stockbit's own client was captured sending `value_year=12`, and the response then names the set
+ * outright in its `timeframe` block — `{"year":"5 Bulan","value":5}`, `{"year":"1 Tahun","value":12}`,
+ * `{"year":"2 Tahun","value":24}`, `{"year":"3 Tahun","value":36}`. "Tahun" is years and "Bulan" is
+ * months, so 12 means one year.
+ *
+ * Not enforced as an enum: those four are what the UI offers, which is not the same as what the
+ * endpoint accepts, and the answer carries the list so a caller can read the real one. A whole
+ * positive number of months is the rule, and the four known-good values are named in the message.
+ */
+const VALUE_YEAR_KNOWN_MONTHS = [5, 12, 24, 36] as const;
 
 /**
  * Pull a token out of the minting response without betting on one field name.
@@ -363,8 +379,12 @@ async function readShareholdersChart(
     return await getJson("shareholdersChart", {
       segments: { symbol: sym },
       // `symbol` is sent as a query parameter as well as a path segment because Stockbit's own
-      // client sends both. Duplication is cheap; a missing filter is a wrong answer.
-      params: { symbol: sym, value_year: valueYear, shareholder_type: type, token },
+      // client sends both — confirmed in the capture, which carried
+      // `?symbol=DEWA&value_year=12&shareholder_type=all`.
+      params: { symbol: sym, value_year: valueYear, shareholder_type: type },
+      // The token goes in a raw `Authorization` header, and the transport puts it there. It is
+      // NOT a query parameter: the captured request had none, and sending one changed nothing.
+      mintedToken: token,
     });
   } catch (error) {
     // Matched on the KIND *or* the body text, because the two things the field recorded are not
@@ -393,11 +413,107 @@ async function readShareholdersChart(
   }
 }
 
+/** One point on one ownership series. A figure that could not be read is absent, never zero. */
+export interface OwnershipPoint {
+  /** The label the endpoint printed, e.g. `"Mar 26"`. */
+  label?: string;
+  /** Percent of shares held, as sent. */
+  percent?: number;
+  /** Seconds since the epoch, when the row carried a parseable one. */
+  unixDate?: number;
+}
+
+/** One line on the ownership chart — `Local` and `Foreign` on the readings seen so far. */
+export interface OwnershipSeries {
+  name?: string;
+  points: OwnershipPoint[];
+}
+
 export interface Shareholders extends RowSet {
   symbol: string;
   /** Echoed back so a cached answer can be told apart from the one that was asked for. */
   valueYear?: number;
   shareholderType?: string;
+  /**
+   * The chart, projected. This endpoint answers with SERIES rather than rows, which is why
+   * `rows`/`source` above report a miss on a perfectly good payload — `source: null` is this code
+   * saying it found nothing array-shaped at the top level, and it is right.
+   */
+  series?: OwnershipSeries[];
+  /**
+   * The window lengths the endpoint itself offers, in months, with its own labels. This is the
+   * `value_year` vocabulary, read from the answer rather than assumed.
+   */
+  timeframes?: Array<{ label?: string; months?: number }>;
+  /** The endpoint's own freshness stamp, verbatim. */
+  lastUpdate?: string;
+}
+
+/** A number the wire sent as a number or a numeric string; anything else is absent. */
+function numberOrAbsent(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function stringOrAbsent(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * Project the ownership chart out of the `data` block.
+ *
+ * Additive and total: everything stays under `extra` as well, so a key this does not name is not a
+ * key this loses. Returns `{}` when the block carries no legend, rather than an empty series list
+ * that would read as "this issuer has no ownership data".
+ */
+function projectOwnershipChart(extra: unknown): Partial<Shareholders> {
+  const data = extra && typeof extra === "object" ? (extra as Record<string, unknown>) : undefined;
+  if (!data) return {};
+
+  const out: Partial<Shareholders> = {};
+
+  const legend = data.legend;
+  if (Array.isArray(legend)) {
+    out.series = legend.map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      const points = Array.isArray(row.chart_data) ? row.chart_data : [];
+      return {
+        ...(stringOrAbsent(row.item_name) !== undefined ? { name: stringOrAbsent(row.item_name) } : {}),
+        points: points.map((p) => {
+          const point = (p ?? {}) as Record<string, unknown>;
+          const label = stringOrAbsent(point.date);
+          const percent = numberOrAbsent(point.value);
+          const unixDate = numberOrAbsent(point.unix_date);
+          return {
+            ...(label !== undefined ? { label } : {}),
+            ...(percent !== undefined ? { percent } : {}),
+            ...(unixDate !== undefined ? { unixDate } : {}),
+          };
+        }),
+      };
+    });
+  }
+
+  const timeframe = data.timeframe;
+  if (Array.isArray(timeframe)) {
+    out.timeframes = timeframe.map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      // The endpoint calls the LABEL `year` ("1 Tahun") and the VALUE the month count. Renamed
+      // here, because a field called `year` holding 12 is the trap this whole fix came out of.
+      const label = stringOrAbsent(row.year);
+      const months = numberOrAbsent(row.value);
+      return { ...(label !== undefined ? { label } : {}), ...(months !== undefined ? { months } : {}) };
+    });
+  }
+
+  const lastUpdate = stringOrAbsent(data.last_update);
+  if (lastUpdate !== undefined) out.lastUpdate = lastUpdate;
+
+  return out;
 }
 
 /**
@@ -413,11 +529,12 @@ export async function getShareholders(
 ): Promise<Shareholders> {
   const sym = normalizeSymbol(symbol);
   if (valueYear !== undefined) {
-    if (!Number.isInteger(valueYear) || valueYear < MIN_VALUE_YEAR || valueYear > MAX_VALUE_YEAR) {
+    if (!Number.isInteger(valueYear) || valueYear < 1) {
       throw new StockbitError(
         "invalid_param",
-        `Invalid value_year ${JSON.stringify(valueYear)}: expected a whole year between ` +
-          `${MIN_VALUE_YEAR} and ${MAX_VALUE_YEAR}`,
+        `Invalid value_year ${JSON.stringify(valueYear)}: it is a WINDOW LENGTH IN MONTHS, not a ` +
+          `calendar year. Stockbit's own client offers ${VALUE_YEAR_KNOWN_MONTHS.join(", ")} ` +
+          `(12 = one year). The answer's \`timeframes\` names the set the endpoint actually served.`,
       );
     }
   }
@@ -430,11 +547,13 @@ export async function getShareholders(
   return cached(key, CACHE.keystatsTtlMs, async () => {
     const token = await mintShareholdersToken();
     const body = await readShareholdersChart(sym, valueYear, type, token);
+    const rowSet = rowsOf(body, "shareholders chart");
     return {
       symbol: sym,
       ...(valueYear !== undefined ? { valueYear } : {}),
       ...(type !== undefined ? { shareholderType: type } : {}),
-      ...rowsOf(body, "shareholders chart"),
+      ...rowSet,
+      ...projectOwnershipChart(rowSet.extra),
     };
   });
 }

@@ -84,6 +84,39 @@ const SUBSIDIARIES_EMPTY = { data: [] };
 const SHAREHOLDER_TOKEN = { data: { data: { token: "sh-token-9f3" } } };
 const SHAREHOLDERS = { data: { chart: [{ name: "Government", percentage: 53.19 }], total: 1 } };
 
+/**
+ * The shape this endpoint really answers with, read off a live account on 2026-09-01.
+ *
+ * Series, not rows — which is why `rows`/`source` report a miss on it — and note `timeframe` names
+ * its values `year` while holding a MONTH COUNT. That trap is the reason `value_year` was validated
+ * as a calendar year for as long as it was.
+ */
+const OWNERSHIP_CHART = {
+  data: {
+    last_update: "3 Aug 26",
+    timeframe: [
+      { year: "5 Bulan", value: 5 },
+      { year: "1 Tahun", value: 12 },
+    ],
+    legend: [
+      {
+        color: "#8250a3",
+        item_name: "Local",
+        chart_data: [
+          { date: "Jun 26", value: 72.59, unix_date: "1782752400" },
+          { date: "Jul 26", value: 73.13, unix_date: "1785430800" },
+        ],
+      },
+      {
+        color: "#00ab6b",
+        item_name: "Foreign",
+        // A hole, to prove an unreadable figure is absent rather than zero.
+        chart_data: [{ date: "Jun 26", value: 27.41, unix_date: "1782752400" }, { date: "Jul 26" }],
+      },
+    ],
+  },
+};
+
 const CLASSIFICATION_TAXONOMY = { data: [{ id: 1, name: "Financials" }] };
 const CLASSIFICATION_COMPANY = { data: { companies: [{ symbol: "BBRI", classification: "Banks" }] } };
 
@@ -104,6 +137,8 @@ const realFetch = globalThis.fetch;
 interface Call {
   method: string;
   url: string;
+  /** Recorded because WHERE a credential is presented is the whole shareholders bug. */
+  headers: Record<string, string>;
 }
 let calls: Call[] = [];
 
@@ -134,7 +169,13 @@ before(() => {
   resetSession();
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     const u = String(url);
-    calls.push({ method: init?.method ?? "GET", url: u });
+    calls.push({
+      method: init?.method ?? "GET",
+      url: u,
+      headers: Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), String(v)]),
+      ),
+    });
     const path = pathOf(u);
     if (path.includes("login/refresh")) return json({ data: { access_token: farFutureJwt() } });
 
@@ -157,6 +198,7 @@ before(() => {
       const refusal = { message: "rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found" };
       if (path.includes("/DENY400/")) return json(refusal, 400);
       if (path.includes("/DENY/")) return json(refusal, 401);
+      if (path.includes("/CHART/")) return json(OWNERSHIP_CHART);
       return json(SHAREHOLDERS);
     }
     if (path.endsWith("classification/company")) return json(CLASSIFICATION_COMPANY);
@@ -305,40 +347,92 @@ test("an unlocatable row array is NOT reported as an empty list", async () => {
 
 /* ---------------------------------- shareholders ---------------------------------- */
 
-test("shareholders mints a token, then spends it on the chart with every filter on the URL", async () => {
-  const held = await getShareholders("BBRI", 2025, "GOVERNMENT");
+test("the minted token goes in a RAW Authorization header, never on the URL", async () => {
+  const held = await getShareholders("BBRI", 12, "all");
 
   assert.equal(wire().length, 2, "one mint, one read");
   assert.equal(wire()[0].method, "POST");
   assert.equal(pathOf(wire()[0].url), "emitten-metadata/shareholders/token");
   assert.equal(wire()[1].method, "GET");
   assert.equal(pathOf(wire()[1].url), "emitten-metadata/shareholders/BBRI/chart");
-  assert.deepEqual(query(wire()[1].url), {
-    symbol: "BBRI",
-    value_year: "2025",
-    shareholder_type: "GOVERNMENT",
-    // UNVERIFIED placement, asserted so that moving it is a deliberate, visible change.
-    token: "sh-token-9f3",
-  });
+
+  // Captured from Stockbit's own client on 2026-09-01: `?symbol=…&value_year=…&shareholder_type=…`
+  // and NO token parameter. Sending one is what made this tool 401 for its whole existence.
+  assert.deepEqual(query(wire()[1].url), { symbol: "BBRI", value_year: "12", shareholder_type: "all" });
+
+  // Raw, with no `Bearer` prefix, and INSTEAD of the session bearer rather than beside it. All
+  // three of those are the fix; asserting only "there is an authorization header" would pass on
+  // the broken version too.
+  assert.equal(wire()[1].headers.authorization, "sh-token-9f3");
 
   assert.equal(held.source, "data.chart", "the single-array fallback found rows under an unknown key");
   assert.deepEqual(held.rows, SHAREHOLDERS.data.chart);
-  assert.deepEqual(held.extra, { total: 1 });
-  assert.equal(held.valueYear, 2025);
+  assert.equal(held.valueYear, 12);
   assert.equal(JSON.stringify(held).includes("sh-token-9f3"), false, "the credential is never returned");
 });
 
 test("an omitted shareholders filter is ABSENT from the query, not blank", async () => {
   await getShareholders("BBRI");
-  const q = query(wire()[1].url);
-  assert.deepEqual(Object.keys(q).sort(), ["symbol", "token"]);
+  assert.deepEqual(Object.keys(query(wire()[1].url)).sort(), ["symbol"]);
 });
 
 test("a nonsense value_year is refused before anything reaches the wire", async () => {
-  await assert.rejects(() => getShareholders("BBRI", 20255), /value_year/);
-  await assert.rejects(() => getShareholders("BBRI", 2025.5), /value_year/);
-  await assert.rejects(() => getShareholders("BBRI", 2025, "   "), /shareholder_type/);
+  // It is a count of MONTHS, so the rule is a whole positive number. It used to be "a calendar
+  // year between 1990 and 2100", which would have refused 12 — the value Stockbit's own client
+  // sends — and accepted 2025, which asks for a 2025-month window.
+  await assert.rejects(() => getShareholders("BBRI", 0), /value_year/);
+  await assert.rejects(() => getShareholders("BBRI", -12), /value_year/);
+  await assert.rejects(() => getShareholders("BBRI", 12.5), /value_year/);
+  await assert.rejects(() => getShareholders("BBRI", 12, "   "), /shareholder_type/);
   assert.deepEqual(wire(), [], "no request, and in particular no token minted");
+
+  // And the message has to teach the unit, or the caller retries with another year.
+  await assert.rejects(() => getShareholders("BBRI", 0), /MONTHS/);
+});
+
+test("the calendar year that used to be required is now accepted as the month count it is", async () => {
+  // Not an endorsement of passing 2025 — it is 168 years of months — but the client no longer
+  // pretends to know that the endpoint refuses it. The tool description says what the unit is.
+  await getShareholders("BBRI", 2025);
+  assert.equal(query(wire()[1].url).value_year, "2025");
+});
+
+test("the ownership chart is projected into series, and an unreadable percent is ABSENT", async () => {
+  const held = await getShareholders("CHART");
+
+  assert.deepEqual(
+    held.series?.map((s) => s.name),
+    ["Local", "Foreign"],
+  );
+  assert.deepEqual(held.series?.[0]?.points, [
+    { label: "Jun 26", percent: 72.59, unixDate: 1782752400 },
+    { label: "Jul 26", percent: 73.13, unixDate: 1785430800 },
+  ]);
+
+  // The second Foreign point carries only a label. It must come back as a point with no percent —
+  // not as a zero, which would read as "foreign ownership fell to nothing that month".
+  const gap = held.series?.[1]?.points?.[1];
+  assert.deepEqual(gap, { label: "Jul 26" });
+  assert.equal("percent" in (gap ?? {}), false);
+
+  // The endpoint names these `year` while they hold months. Renaming them is the point.
+  assert.deepEqual(held.timeframes, [
+    { label: "5 Bulan", months: 5 },
+    { label: "1 Tahun", months: 12 },
+  ]);
+  assert.equal(held.lastUpdate, "3 Aug 26");
+
+  // And the raw payload still comes back underneath, so a key the projection does not name is not
+  // a key the caller loses — `color`, here.
+  assert.equal((held.extra as { legend?: Array<{ color?: string }> })?.legend?.[0]?.color, "#8250a3");
+});
+
+test("a payload with no legend reports no series at all, rather than an empty one", async () => {
+  // `series: []` would read as "this issuer has no ownership data". Absent says the truth: this
+  // response did not carry a legend.
+  const held = await getShareholders("BBRI");
+  assert.equal(held.series, undefined);
+  assert.equal(held.timeframes, undefined);
 });
 
 test("the shareholders cache key carries the year and the type", async () => {

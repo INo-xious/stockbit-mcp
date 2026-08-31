@@ -210,20 +210,7 @@ export interface DrawingsQuery {
   symbol?: string;
 }
 
-/**
- * The chart id inside a decoded layout, which is the id this endpoint is addressed by.
- *
- * TradingView stores the drawings of each chart in a layout separately — that is what the
- * `saveload_separate_drawings_storage` feature flag on the chart page means — and addresses them
- * by the chart's own id within the layout, not by the layout id. `docs/research/chartbit-layout-format.md`
- * records a real decoded layout carrying `charts: [{ …, "chartId": "1" }]`, so the id this project
- * needed has been sitting inside a payload it already reads.
- *
- * The FIRST chart is taken, and only when the layout holds one. A multi-chart layout offers no way
- * to tell from the recorded format which chart a symbol belongs to — the symbol lives inside the
- * MainSeries state, which is not mapped — and picking one of several would be a guess presented as
- * an answer. The caller is told to pass `chart_id` themselves instead.
- */
+/** A plain object, or undefined. Arrays and null are not records for the walks below. */
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

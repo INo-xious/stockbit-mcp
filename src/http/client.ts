@@ -68,6 +68,17 @@ export interface GetOptions {
   segments?: Segments;
   /** Query params; undefined/null values are dropped, arrays repeat the key. */
   params?: QueryParams;
+  /**
+   * A credential this call MINTED, for the one auth kind that has no token store.
+   *
+   * Deliberately a token and not a header: the call site says what it has, and `transport.ts`
+   * still decides where it goes, which is the whole point of the placement table. A general
+   * per-call headers option would let any call site attach anything to a bearer-carrying request.
+   *
+   * Ignored for every route whose auth kind names a domain — those resolve their own credential
+   * and must not be overridable from a call site.
+   */
+  mintedToken?: string;
 }
 
 /**
@@ -77,9 +88,12 @@ export interface GetOptions {
  * credential at all rather than with the main session's, which would be a token sent somewhere it
  * was never issued for.
  */
-async function credentialFor(route: RouteName): Promise<string | undefined> {
+async function credentialFor(route: RouteName, minted?: string): Promise<string | undefined> {
   const domain = domainOf(route);
-  return domain ? ensureFresh(domain) : undefined;
+  // A stored domain always wins: `minted` must never be able to substitute a credential on a route
+  // that has one of its own.
+  if (domain) return ensureFresh(domain);
+  return minted;
 }
 
 /** Read a response body as JSON, falling back to text for the envelope-less short bodies 404s send. */
@@ -109,7 +123,7 @@ export async function getJson<T = unknown>(route: RouteName, opts: GetOptions = 
   try {
     let refreshedOn401 = false;
     for (let attempt = 0; attempt <= RATE.maxRetries; attempt++) {
-      const token = await credentialFor(route);
+      const token = await credentialFor(route, opts.mintedToken);
       let res: Response;
       try {
         res = await authenticatedRequest(route, {
@@ -176,7 +190,7 @@ async function writeJson<T = unknown>(
   try {
     let refreshedOn401 = false;
     for (;;) {
-      const token = await credentialFor(route);
+      const token = await credentialFor(route, opts.mintedToken);
       let res: Response;
       try {
         res = await authenticatedRequest(route, {

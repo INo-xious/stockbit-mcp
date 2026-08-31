@@ -112,7 +112,7 @@ Profile, ownership, management, peers, ratings.
 | `company_profile` | read | The company description block for a ticker: what the business does, and whatever else Stockbit's profile endpoint carries. | Projected | symbol*, include_typed_info, include_fin_items, emitten_type |
 | `company_contact` | read | Registered address, phone, website and investor-relations contacts for a ticker, verbatim. | Projected | symbol* |
 | `company_subsidiaries` | read | The subsidiaries and associates Stockbit lists for a ticker. | Observed | symbol* |
-| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Projected | symbol*, value_year, shareholder_type |
+| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Observed | symbol*, value_year, shareholder_type |
 | `classification` | read | Stockbit's company classification. | Observed | scope |
 | `index_members` | read | The constituents of an IDX index or special board: IDX30, LQ45, KOMPAS100, and the monitoring / syariah lists. | Observed | index_code*, limit* |
 | `sector_companies` | read | The companies in one IDX sector. | Projected | sector_id* |

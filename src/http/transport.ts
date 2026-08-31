@@ -289,17 +289,25 @@ const AUTH_DOMAIN: Record<AuthKind, TokenDomain | null> = {
   refreshSecurities: "securities",
   eipo: "eipo",
   refreshEipo: "eipo",
+  // Null on purpose: this credential is minted per call by the caller, not held in a store, so
+  // there is no domain to refresh and a 401 here must not spend a rotation on the main session.
+  webviewToken: null,
   none: null,
 };
 
 /**
  * Where the credential goes on the wire, per auth kind.
  *
- * Three placements exist because the three refresh chains disagree, and pretending otherwise would
- * mean a call site quietly sending a bearer to a route that reads a query parameter — which fails
- * as a 401 with no hint about why.
+ * Four placements exist because the chains disagree, and pretending otherwise would mean a call
+ * site quietly sending a bearer to a route that reads a query parameter — which fails as a 401
+ * with no hint about why. `getShareholders` spent months as exactly that failure.
+ *
+ * `rawHeaderToken` is `Authorization` with NO `Bearer` prefix. It exists because the shareholder
+ * chart was captured from Stockbit's own client on 2026-09-01 sending `Authorization: <64 hex>`,
+ * the bare minted token. Sending it as `Bearer <token>` is a different header value and this
+ * endpoint does not accept it.
  */
-type Placement = "header" | "bodyRefreshToken" | "queryToken" | "none";
+type Placement = "header" | "rawHeaderToken" | "bodyRefreshToken" | "queryToken" | "none";
 
 const PLACEMENT: Record<AuthKind, Placement> = {
   main: "header",
@@ -308,6 +316,7 @@ const PLACEMENT: Record<AuthKind, Placement> = {
   refreshMain: "header",
   refreshSecurities: "bodyRefreshToken",
   refreshEipo: "queryToken",
+  webviewToken: "rawHeaderToken",
   none: "none",
 };
 
@@ -474,15 +483,13 @@ export async function authenticatedRequest(
   // before the URL is built — and it is added here rather than by the caller, so that a token in a
   // URL is this module's decision rather than something any call site can do incidentally.
   //
-  // It is not a property this code enforces, and the comment used to say it was. `getShareholders`
-  // in src/core/company.ts puts a minted one-shot token into `params` itself, because `params` is
-  // an open record and there is no header channel to put it anywhere else: neither
-  // `AuthenticatedRequest` below nor `GetOptions` in client.ts carries headers, and outbound
-  // headers are one literal further down. That call is the only one in `src/` that does this
-  // (`grep -rn "params: {.*token" src/`), and where its token actually belongs is unsettled —
-  // see the note on `readShareholdersChart`. Opening a general per-call headers option to give it
-  // somewhere better to go would let any call site attach arbitrary headers to a bearer-carrying
-  // request, which is a wider change than the one bug needs.
+  // It IS the property again, as of 2026-09-01. `getShareholders` used to break it: with no header
+  // channel anywhere, it put its minted one-shot token into `params` itself, because `params` is an
+  // open record and there was nowhere else to put it. That placement was wrong — Stockbit's own
+  // client, captured over CDP, sends the token in a raw `Authorization` header and no `token`
+  // parameter at all — so the fix removed the last call site in `src/` that put a credential in a
+  // URL rather than adding a general per-call headers option, which would have let any call site
+  // attach arbitrary headers to a bearer-carrying request.
   const effectiveParams: QueryParams =
     placement === "queryToken" ? { ...(params ?? {}), token: token ?? "" } : (params ?? {});
   const url = buildUrl(name, segments, effectiveParams);
@@ -514,6 +521,8 @@ export async function authenticatedRequest(
       headers: {
         ...defaultHeaders(),
         ...(placement === "header" ? { authorization: `Bearer ${token}` } : {}),
+        // Raw, no scheme. See the placement note above: captured from Stockbit's own client.
+        ...(placement === "rawHeaderToken" ? { authorization: String(token) } : {}),
         ...(effectiveBody !== undefined ? { "content-type": "application/json" } : {}),
       },
       ...(effectiveBody !== undefined ? { body: JSON.stringify(effectiveBody) } : {}),
