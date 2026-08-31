@@ -42,7 +42,13 @@ import {
   SAVE_CHART,
   SET_VIEW,
 } from "../src/chartbit/page-scripts.ts";
-import { DEFAULT_STYLE, studyRequest, toShapeRequest, toShapeRequests } from "../src/chartbit/shapes.ts";
+import {
+  DEFAULT_STYLE,
+  normalizeAnnotationKeys,
+  studyRequest,
+  toShapeRequest,
+  toShapeRequests,
+} from "../src/chartbit/shapes.ts";
 import {
   decodeDrawings,
   decodeLayoutContent,
@@ -183,6 +189,95 @@ test("every point is epoch SECONDS", () => {
   }
   assert.equal(requests[0].points[0].time, ANCHOR, "a level is anchored to the date it was given");
   assert.equal(requests[1].points[0].time, epochSeconds("2026-01-02"));
+});
+
+/* --------------------- one annotation array, either tool, either spelling --------------------- */
+
+/**
+ * `price_chart` took `from_date`/`from_price`/`to_date`/`to_price` while `chartbit_draw` took
+ * `fromDate`/`fromPrice`/`toDate`/`toPrice` — the same conceptual object under two names, so an
+ * array could not be moved between them without rewriting every key. That move is the workflow:
+ * draw locally to check the geometry, then draw for real on the user's chart.
+ */
+test("snake_case coordinates draw exactly what camelCase draws", () => {
+  const snake = toShapeRequests(
+    [{ kind: "trend", from_date: "2026-01-02", from_price: 100, to_date: "2026-08-24", to_price: 200 } as never],
+    CONTEXT,
+  );
+  const camel = toShapeRequests(
+    [{ kind: "trend", fromDate: "2026-01-02", fromPrice: 100, toDate: "2026-08-24", toPrice: 200 }],
+    CONTEXT,
+  );
+  assert.deepEqual(snake, camel);
+  assert.equal(snake[0].points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(snake[0].points[1].price, 200);
+});
+
+test("the snake_case spelling works for every two-point kind, not just trend", () => {
+  // channel and fib take the same four coordinates, and a mapping that covered only `trend` would
+  // leave two kinds behind — the exact half-fix this issue was about.
+  const cases = [
+    { kind: "channel", from_date: "2026-01-02", from_price: 1, to_date: "2026-08-24", to_price: 2, offset: -5 },
+    { kind: "fib", from_date: "2026-01-02", from_price: 1, to_date: "2026-08-24", to_price: 2 },
+  ];
+  for (const annotation of cases) {
+    const [request] = toShapeRequests([annotation as never], CONTEXT);
+    assert.equal(request.points[0].time, epochSeconds("2026-01-02"), annotation.kind);
+    assert.equal(request.points[1].price, 2, annotation.kind);
+  }
+});
+
+test("normalizeAnnotationKeys leaves an annotation with neither spelling alone", () => {
+  const level = { kind: "level", price: 100 };
+  assert.equal(normalizeAnnotationKeys(level), level, "an untouched row is not needlessly copied");
+  // And it is not confused by things that are not objects.
+  assert.equal(normalizeAnnotationKeys(null), null);
+  assert.equal(normalizeAnnotationKeys("nope"), "nope");
+});
+
+test("both spellings of ONE coordinate, disagreeing, is refused rather than picked between", () => {
+  // Silently preferring one of two contradictory numbers would be guessing a point, which this
+  // module refuses everywhere else: a wrong coordinate is a wrong drawing, not a cosmetic miss.
+  assert.throws(
+    () =>
+      toShapeRequests(
+        [
+          {
+            kind: "trend",
+            fromDate: "2026-01-02",
+            from_date: "2020-01-01",
+            fromPrice: 1,
+            toDate: "2026-08-24",
+            toPrice: 2,
+          } as never,
+        ],
+        CONTEXT,
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.equal(e.kind, "invalid_param");
+      assert.match(e.message, /two spellings of ONE coordinate/);
+      return true;
+    },
+  );
+});
+
+test("both spellings AGREEING is accepted — it is not a contradiction", () => {
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        fromDate: "2026-01-02",
+        from_date: "2026-01-02",
+        fromPrice: 1,
+        from_price: 1,
+        toDate: "2026-08-24",
+        toPrice: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
 });
 
 test("each annotation kind maps to the tool it should", () => {

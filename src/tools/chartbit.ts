@@ -248,13 +248,17 @@ export function registerChartbitTools(define: Definer): void {
         .array(z.record(z.unknown()))
         .describe(
           'Annotations: {kind:"level",price,label?} | {kind:"zone",from,to,label?} | ' +
-            '{kind:"trend",fromDate,fromPrice,toDate,toPrice,label?} | ' +
+            '{kind:"trend",from_date,from_price,to_date,to_price,label?} | ' +
             '{kind:"marker",date,price?,label,above?} | ' +
-            '{kind:"channel",fromDate,fromPrice,toDate,toPrice,offset,label?} | ' +
+            '{kind:"channel",from_date,from_price,to_date,to_price,offset,label?} | ' +
             '{kind:"vline",date,label?} | ' +
-            '{kind:"fib",fromDate,fromPrice,toDate,toPrice,label?} — from/to are the START and END ' +
-            'of the move being retraced (swing low then swing high for an up-move); the tool derives ' +
-            'its own levels',
+            '{kind:"fib",from_date,from_price,to_date,to_price,label?} — from/to are the START and ' +
+            'END of the move being retraced (swing low then swing high for an up-move); the tool ' +
+            'derives its own levels. ' +
+            'This is the SAME shape price_chart takes, so an array can be drawn locally to check ' +
+            'the geometry and then passed here unchanged. The camelCase spelling (fromDate, ' +
+            'fromPrice, toDate, toPrice) is also accepted; passing both spellings of one coordinate ' +
+            'with different values is an error rather than a silent choice between them.',
         ),
       anchor_date: z.string().describe("YYYY-MM-DD to anchor time-less tools to, normally the latest bar"),
       replace: z.boolean().optional().describe("Remove this server's previous drawings on this symbol first"),

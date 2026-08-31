@@ -10,6 +10,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "../core/index.js";
 import { withBrokerNames } from "../core/brokers.js";
+import { normalizeAnnotationKeys } from "../chartbit/shapes.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
 import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
@@ -828,13 +829,20 @@ export function registerTools(
             from_price: z.coerce.number().optional(),
             to_date: z.string().optional().describe("trend: end session"),
             to_price: z.coerce.number().optional(),
+            // The camelCase spelling `chartbit_draw` publishes, accepted here so one annotation
+            // array works in both tools. Without these, zod strips the unknown keys and the trend
+            // branch below finds no coordinates — which SILENTLY drew nothing.
+            fromDate: z.string().optional().describe("Alias for `from_date`."),
+            fromPrice: z.coerce.number().optional().describe("Alias for `from_price`."),
+            toDate: z.string().optional().describe("Alias for `to_date`."),
+            toPrice: z.coerce.number().optional().describe("Alias for `to_price`."),
             date: z.string().optional().describe("marker: session"),
             label: z.string().optional(),
             color: z.string().optional(),
           }),
         )
         .optional()
-        .describe("Your own drawings on top of the chart"),
+        .describe("Your own drawings on top of the chart. Same shape chartbit_draw takes."),
       theme: z.enum(["dark", "light"]).optional().describe("Default dark"),
       save_path: z
         .string()
@@ -892,24 +900,27 @@ export function registerTools(
             annotations.push({ kind: "level", price: l.price, label: `${l.kind} ${l.price} (x${l.touches})` });
           }
         }
-        for (const raw of a.annotations ?? []) {
+        for (const given of a.annotations ?? []) {
+          // Either spelling of the two-point coordinates, folded onto the camelCase one the renderer
+          // uses. Shared with chartbit_draw so the two tools cannot drift apart again.
+          const raw = normalizeAnnotationKeys(given);
           if (raw.kind === "level" && raw.price !== undefined) {
             annotations.push({ kind: "level", price: raw.price, label: raw.label, color: raw.color });
           } else if (raw.kind === "zone" && raw.from !== undefined && raw.to !== undefined) {
             annotations.push({ kind: "zone", from: raw.from, to: raw.to, label: raw.label, color: raw.color });
           } else if (
             raw.kind === "trend" &&
-            raw.from_date &&
-            raw.to_date &&
-            raw.from_price !== undefined &&
-            raw.to_price !== undefined
+            raw.fromDate &&
+            raw.toDate &&
+            raw.fromPrice !== undefined &&
+            raw.toPrice !== undefined
           ) {
             annotations.push({
               kind: "trend",
-              fromDate: raw.from_date,
-              fromPrice: raw.from_price,
-              toDate: raw.to_date,
-              toPrice: raw.to_price,
+              fromDate: raw.fromDate,
+              fromPrice: raw.fromPrice,
+              toDate: raw.toDate,
+              toPrice: raw.toPrice,
               label: raw.label,
               color: raw.color,
             });
