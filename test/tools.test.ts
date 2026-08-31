@@ -567,6 +567,29 @@ test("a description that says the route was never observed contradicts any claim
   );
 });
 
+test("a family that registers nothing at all is never named as withheld", () => {
+  // `withheldFamilies` is derived from what registration actually FILTERED, not from FAMILIES minus
+  // the families present. The two agree on every profile this repo can produce today, because all
+  // seventeen families have at least one tool — so only a definer built by hand can tell them
+  // apart, and without this test the choice recorded in plan.md has no guard at all.
+  //
+  // The difference matters the day a family is declared before its tools exist: FAMILIES-minus-
+  // present would name it, and send a reader to set `STOCKBIT_TOOLS=<label>,<family>` to register
+  // nothing. A family that offered nothing lost nothing.
+  const server = new McpServer({ name: "t", version: "0" });
+  const define = makeDefiner(server, new Map(), {
+    profile: { label: "probe", allows: (family) => family === "market" },
+  });
+  const kept = define.family("market", { evidence: "observed" });
+  const filtered = define.family("chartbit", { evidence: "observed" });
+  define.family("pine", { evidence: "observed" }); // declared, registers nothing, offers nothing
+
+  kept.read("kept_one", "A tool the profile allows.", {}, async () => ({ content: [] }));
+  filtered.read("dropped_one", "A tool the profile filters out.", {}, async () => ({ content: [] }));
+
+  assert.deepEqual(define.withheldFamilies(), ["chartbit"]);
+});
+
 /* ------------------------------------------------------------------ *
  * Claim honesty: what an EMPTY answer is allowed to mean.
  *

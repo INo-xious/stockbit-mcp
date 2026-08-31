@@ -190,9 +190,10 @@ export function registerCorpactionTools(define: Definer): void {
       "empty list means Stockbit is showing no IPOs right now, which is an ordinary state between " +
       "offerings, not an error. Pair it with `underwriters` for the track record of the houses " +
       "running a deal.\n" +
-      "This is the same reader as `corporate_actions`, so a row here can carry `suspectDates` too — " +
-      "same meaning, same caveat: it flags an impossible date ORDER in upstream's own data, and its " +
-      "absence is not a clean bill. ",
+      "This is the same reader as `corporate_actions`, so the response CAN carry `suspectDates`. In " +
+      "practice it almost never will: the date pairs that check compares are RUPS and dividend " +
+      "ones, and no IPO date pair is on the list, so expect the field to be absent here even on a " +
+      "row whose own dates are wrong. Read it if it appears; do not read its absence as anything. ",
     {
       limit: z.coerce.number().optional().describe("Max rows. Omitted entirely when not given"),
     },

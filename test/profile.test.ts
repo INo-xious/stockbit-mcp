@@ -201,22 +201,17 @@ test("withheldFamilies names the families with NOTHING registered, and only thos
     "core keeps five trading tools, so telling a user to add `trading` would add nothing",
   );
 
-  // Derived from what was FILTERED, never from FAMILIES minus what is present. The difference only
-  // shows on a family that has no tools at all: `FAMILIES` minus present would name it, and send a
-  // reader to set `STOCKBIT_TOOLS=core,<that>` to register nothing. So the assertion is that every
-  // withheld family actually LOST something — which is what makes the remedy true.
-  //
-  // (`assert.ok(FAMILIES.includes(family))` was here and was worthless: `withheldFamilies` returns
-  // `Family[]`, so it cannot fail and pins nothing.)
-  const skippedFamilies = new Set(
-    ALL.tools.filter((t) => !core.tools.some((c) => c.name === t.name)).map((t) => t.family),
-  );
-  for (const family of withheld) {
-    assert.ok(skippedFamilies.has(family), `${family} is named but nothing of it was filtered out`);
-  }
-  const emptyFamilies = FAMILIES.filter((f) => !ALL.tools.some((t) => t.family === f));
-  for (const family of emptyFamilies) {
-    assert.equal(withheld.has(family), false, `${family} has no tools, so adding it would add none`);
-  }
   assert.deepEqual(ALL.withheldFamilies, [], "the unfiltered surface withholds nothing");
+
+  // The remaining half of the property — that a family which registers NOTHING is never named — is
+  // pinned in test/tools.test.ts ("a family that registers nothing at all is never named as
+  // withheld"), not here. It cannot be tested against the real surface: every one of the seventeen
+  // families has at least one tool today, so the derivation this repo uses and the FAMILIES-minus-
+  // present one it rejects agree on every profile, and an assertion written here would iterate over
+  // an empty list and pin nothing.
+  assert.equal(
+    FAMILIES.filter((f) => !ALL.tools.some((t) => t.family === f)).length,
+    0,
+    "if this ever fails, a family has no tools and the note above needs revisiting",
+  );
 });
