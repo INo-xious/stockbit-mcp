@@ -10,14 +10,71 @@
  * Unset means `core`, not everything — see `DEFAULT_TOOL_PROFILE`. The full surface is not a
  * startup cost, it is a PER-TURN one: 138 tool schemas is roughly 54,400 tokens in the model's
  * context on every message.
+ *
+ * ## The command line is gated, like every other bin
+ *
+ * This entry point used to read `process.argv` nowhere. Every token on the command line therefore
+ * fell through to "start an MCP server on stdio" — so `stockbit-mcp --version` printed the
+ * connection line and exited 0 when stdin closed, and there was no way to ask the installed package
+ * what it was short of reading its `package.json` by hand. That matters more than it sounds:
+ * `npx` caches a caret range, so a user can sit on a stale build indefinitely, and the version is
+ * the first thing anyone needs in order to notice.
+ *
+ * `--version` and `--help` are answered before anything starts, and an unknown flag is a usage
+ * error (exit 2) rather than a silently-started server. The other four bins already worked this
+ * way; `src/cliargs.ts` explains why an unknown token must be an error and never a shrug.
  */
+import { stdout } from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "../src/server.js";
 import { describeSurface } from "../src/tools/surface.js";
 import { resolveToolProfile } from "../src/tools/_profile.js";
 import { logStderr } from "../src/redact.js";
+import { CliParseError, gateBareCommandLine, type CommandSpec } from "../src/cliargs.js";
+import { VERSION } from "../src/version.js";
+
+const MCP_BIN = "stockbit-mcp";
+
+/**
+ * What this bin accepts. One behaviour, two questions about itself, and no positionals.
+ *
+ * Configuration is environment-only and stays that way: an MCP server is launched by a client from
+ * a JSON config, and a flag the client cannot set is a flag nobody can use. `details` says so, so
+ * `--help` sends the reader to the right place instead of implying flags that do not exist.
+ */
+const MCP_SPEC: CommandSpec = {
+  summary: "Run the Stockbit MCP server over stdio.",
+  flags: {
+    "--version": "Print the installed version and exit.",
+    "--help": "Print this usage and exit.",
+  },
+  details: [
+    "Configured by environment, not by flags:",
+    "  STOCKBIT_TOOLS   which tool families to register (default: core; `all` for every tool)",
+    "",
+    "Run `stockbit-auth login` first if this is a new machine.",
+  ],
+};
 
 async function main(): Promise<void> {
+  // Before ANYTHING starts. `--version` writes to stdout deliberately: it is the product of the
+  // command and it exits before the transport is connected, so it cannot collide with the JSON-RPC
+  // stream that owns stdout once the server is running. Everything the running server says goes to
+  // stderr through `logStderr`, for exactly that reason.
+  try {
+    if (gateBareCommandLine(MCP_BIN, MCP_SPEC, process.argv.slice(2), (text) => stdout.write(text), VERSION) !== "ok") {
+      return;
+    }
+  } catch (err) {
+    if (err instanceof CliParseError) {
+      // A usage error, not a runtime one — the same exit 2 `stockbit-auth` uses, so a wrapper can
+      // tell "you typed it wrong" from "it ran and failed".
+      logStderr(err.message);
+      process.exit(2);
+    }
+    throw err;
+  }
+
   // Describing the unfiltered surface first gives `parseToolProfile` the real tool names, so a typo
   // in a single tool name is caught the same way a typo in a family name is.
   const knownTools = new Set(describeSurface().tools.map((t) => t.name));

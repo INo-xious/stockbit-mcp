@@ -27,7 +27,8 @@ import { getBars } from "../src/core/bars.js";
 import { tick, watch, isMarketOpen, type TickResult } from "../src/alerts/daemon.js";
 import { alertLogPath, deliver, telegramTargetFromEnv } from "../src/alerts/notify.js";
 import { loadRules } from "../src/alerts/store.js";
-import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken, isVersionToken } from "../src/cliargs.js";
+import { VERSION } from "../src/version.js";
 import { ALERTS_BIN, ALERTS_COMMANDS, ALERTS_EPILOGUE } from "../src/alerts/cli.js";
 
 function flag(name: string): boolean {
@@ -69,6 +70,12 @@ function report(result: TickResult): void {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "watch";
   const rest = process.argv.slice(3);
+
+  // `--version` as the command word: the package's own answer about itself, on stdout, exit 0.
+  if (isVersionToken(command)) {
+    process.stdout.write(`${VERSION}\n`);
+    return;
+  }
 
   // `--help`, `-h` or `help [command]` as the command word: usage on stdout, natural exit 0.
   if (command === "help" || isHelpToken(command)) {
