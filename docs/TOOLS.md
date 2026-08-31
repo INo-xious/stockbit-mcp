@@ -79,12 +79,12 @@ Who accumulated and who distributed. The data no other market API has.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period |
+| `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period, resolve_names |
 | `broker_distribution` | read | Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers… | Observed | symbol*, data_type, investor_type, market_board, period, from, to, date_from, date_to, start_date, end_date, theme, top_sources, top_targets, save_path, open_in_stockbit, browser |
-| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit |
+| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit, codes |
 | `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Projected | broker_code*, period, market_types, investor_types, sort_by, page, limit |
 | `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Observed | period, sort_by, page, limit |
-| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
+| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type, resolve_names |
 
 ## analysis
 

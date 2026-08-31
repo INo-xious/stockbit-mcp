@@ -42,7 +42,13 @@ import {
   SAVE_CHART,
   SET_VIEW,
 } from "../src/chartbit/page-scripts.ts";
-import { DEFAULT_STYLE, studyRequest, toShapeRequest, toShapeRequests } from "../src/chartbit/shapes.ts";
+import {
+  DEFAULT_STYLE,
+  normalizeAnnotationKeys,
+  studyRequest,
+  toShapeRequest,
+  toShapeRequests,
+} from "../src/chartbit/shapes.ts";
 import {
   decodeDrawings,
   decodeLayoutContent,
@@ -51,6 +57,13 @@ import {
   normalizeDrawingSymbol,
 } from "../src/chartbit/codec.ts";
 import { addOurDrawings, forgetOurDrawings, loadOurDrawings, setOurDrawings } from "../src/chartbit/store.ts";
+import {
+  DRIVER_LOCK_WAIT_MS,
+  driverLockState,
+  resetDriverLock,
+  withDriverLock,
+} from "../src/chartbit/lock.ts";
+import { reconcileOurDrawings } from "../src/chartbit/reconcile.ts";
 import { epochSeconds } from "../src/core/dates.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -183,6 +196,440 @@ test("every point is epoch SECONDS", () => {
   }
   assert.equal(requests[0].points[0].time, ANCHOR, "a level is anchored to the date it was given");
   assert.equal(requests[1].points[0].time, epochSeconds("2026-01-02"));
+});
+
+/* ====================== the ledger tells the truth about the chart (#14) ====================== */
+
+/**
+ * `ours` used to be the local record returned verbatim, as though it described the chart.
+ *
+ * In the field that produced a result listing fourteen entities for a chart holding nine: five
+ * annotations were lost when the page reloaded, and the next draw went on reporting them. The
+ * entity ids were observed at creation; the present-tense claim "these are on the chart now" never
+ * was.
+ */
+const LEDGER = [
+  { tvEntityId: "e1", kind: "level", shape: "horizontal_line", at: "2026-08-24T00:00:00.000Z" },
+  { tvEntityId: "e2", kind: "trend", shape: "trend_line", at: "2026-08-24T00:00:00.000Z" },
+  { tvEntityId: "e3", kind: "zone", shape: "rectangle", at: "2026-08-24T00:00:00.000Z" },
+];
+
+test("a recorded drawing the chart no longer holds is reported gone, not listed as present", () => {
+  const r = reconcileOurDrawings(LEDGER, ["e1", "e3"]);
+  assert.equal(r.reconciled, true);
+  assert.equal(r.onChart, 2);
+  assert.deepEqual(
+    r.ours.map((d) => [d.tvEntityId, d.presence]),
+    [
+      ["e1", "on-chart"],
+      ["e2", "gone"],
+      ["e3", "on-chart"],
+    ],
+  );
+  assert.deepEqual(r.gone.map((d) => d.tvEntityId), ["e2"]);
+});
+
+test("reconciling never shortens the ledger", () => {
+  // The record is the only thing separating this server's drawings from the user's own hand-drawn
+  // analysis. Prune on one bad reading and an orphan can only be removed with `clear scope:"all"` —
+  // the operation that needs confirmation precisely because it destroys work we have never seen.
+  const r = reconcileOurDrawings(LEDGER, []);
+  assert.equal(r.ours.length, LEDGER.length, "every recorded entry survives the check");
+  assert.equal(r.gone.length, 3);
+  assert.equal(r.onChart, 0);
+});
+
+test("an unreadable chart is UNCONFIRMED, which is not the same as an empty one", () => {
+  // The distinction the whole design turns on. `[]` says the chart holds nothing, which would mark
+  // every drawing gone; `null` says we did not look, and inventing "gone" from that would report a
+  // loss that never happened.
+  const unread = reconcileOurDrawings(LEDGER, null, "the page would not answer");
+  assert.equal(unread.reconciled, false);
+  // ABSENT, not zero. Zero here is a measurement — "the chart holds none of them" — and it is the
+  // most alarming thing this type can say; reporting it for a chart nobody looked at is the
+  // "never invent a number" rule broken on the one field that matters most.
+  assert.equal(unread.onChart, undefined);
+  assert.equal("onChart" in unread, false, "the key itself must be absent, not set to undefined");
+  assert.deepEqual(unread.gone, [], "nothing may be called gone on a reading that was never taken");
+  assert.ok(unread.ours.every((d) => d.presence === "unconfirmed"));
+  assert.equal(unread.note, "the page would not answer");
+
+  const empty = reconcileOurDrawings(LEDGER, []);
+  assert.equal(empty.reconciled, true);
+  assert.equal(empty.gone.length, 3);
+  assert.equal(empty.note, undefined);
+});
+
+test("LIST_SHAPES reports a widget it cannot ask as NOT-READY, never as an empty chart", () => {
+  // The bug this closes: the script opened `chart.getAllShapes ? chart.getAllShapes() : []`, so a
+  // widget without that API answered `{ready: true, shapes: []}` — indistinguishable from a chart
+  // holding nothing. Once drawAnnotations began reconciling against this list, that turned "the
+  // widget cannot be asked" into the positive claim "every drawing you just made is gone".
+  //
+  // Asserted on the SOURCE because the failing state needs a widget missing one method, which the
+  // fixture deliberately provides. The prologue's other four guards all report a reason; this was
+  // the only one that answered with a fabricated reading.
+  assert.match(LIST_SHAPES, /typeof chart\.getAllShapes !== "function"/);
+  assert.match(LIST_SHAPES, /ready: false, reason: "no-getAllShapes"/);
+  assert.doesNotMatch(
+    LIST_SHAPES,
+    /chart\.getAllShapes \? chart\.getAllShapes\(\) : \[\]/,
+    "a missing API must not fall back to an empty list",
+  );
+});
+
+test("ids are compared as strings, since the widget's are not guaranteed to be", () => {
+  const numeric = [{ tvEntityId: "7", kind: "level", shape: "horizontal_line", at: "x" }];
+  assert.equal(reconcileOurDrawings(numeric, [7 as unknown as string]).onChart, 1);
+});
+
+test("an empty ledger reconciles cleanly rather than erroring", () => {
+  const r = reconcileOurDrawings([], ["e9"]);
+  assert.deepEqual(r.ours, []);
+  assert.deepEqual(r.gone, []);
+  assert.equal(r.onChart, 0);
+  assert.equal(r.reconciled, true);
+});
+
+/* ============================== the driver mutex (#15) ============================== */
+
+/** Every .ts under a directory, recursively. */
+function allSourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return allSourceFiles(full);
+    return full.endsWith(".ts") ? [full] : [];
+  });
+}
+
+/**
+ * Chart tools share ONE browser window, and nothing serialised them.
+ *
+ * The MCP SDK dispatches without awaiting, so two tool calls arriving together genuinely interleave
+ * in one process. Issuing `chartbit_save` and `chartbit_screenshot` at the same moment did exactly
+ * that in the field: the page reloaded and five unsaved drawings were lost.
+ *
+ * These exercise the primitive directly. The driver cannot be exercised without a browser, so what
+ * connects the two is the source scan at the bottom — the property that makes ONE lock enough.
+ */
+test("the second caller waits for the first, and does not run beside it", async () => {
+  const order: string[] = [];
+  let releaseFirst: () => void = () => {};
+  const firstInside = new Promise<void>((r) => (releaseFirst = r));
+
+  const a = withDriverLock("A", async () => {
+    order.push("a:start");
+    await firstInside;
+    order.push("a:end");
+  });
+  // Queued while A is inside. If nothing serialised, "b:start" would land between A's two lines.
+  const b = withDriverLock("B", async () => {
+    order.push("b:start");
+    order.push("b:end");
+  });
+
+  await delay(20);
+  assert.deepEqual(order, ["a:start"], "B must not have started while A holds the window");
+  releaseFirst();
+  await Promise.all([a, b]);
+  assert.deepEqual(order, ["a:start", "a:end", "b:start", "b:end"]);
+});
+
+test("the lock is released when the work THROWS, not only when it succeeds", async () => {
+  // A failed chart call that kept the lock would take the feature down until the process restarted.
+  await assert.rejects(() => withDriverLock("boom", async () => { throw new Error("nope"); }), /nope/);
+  assert.equal(driverLockState().busy, false);
+  let ran = false;
+  await withDriverLock("after", async () => { ran = true; });
+  assert.ok(ran, "the next caller must be able to take the window");
+});
+
+test("waiters are served first-in-first-out", async () => {
+  const served: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const first = withDriverLock("holder", () => held);
+  const queued = ["one", "two", "three"].map((name) =>
+    withDriverLock(name, async () => {
+      served.push(name);
+    }),
+  );
+  await delay(20);
+  release();
+  await Promise.all([first, ...queued]);
+  assert.deepEqual(served, ["one", "two", "three"], "starvation is not a fair queue");
+});
+
+test("a caller that waits too long is told why, and nothing was changed", async () => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const holder = withDriverLock("drawing on BBRI", () => held);
+  await assert.rejects(
+    () => withDriverLock("screenshotting BBRI", async () => "never", 30),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.match(e.message, /one at a time/);
+      assert.match(e.message, /Nothing was changed/);
+      // Names the CURRENT holder, and says so in those words — after a handoff the blocking call is
+      // not the one we queued behind, and claiming otherwise would invent a cause.
+      assert.match(e.message, /currently busy with drawing on BBRI/);
+      return true;
+    },
+  );
+  release();
+  await holder;
+});
+
+test("the wait timeout stays under the MCP SDK's own request timeout", async () => {
+  // A longer wait is unreachable in the only way that matters: the client gives up at 60s and
+  // cancels, so a message crafted after that is written to a caller that stopped listening.
+  const { DEFAULT_REQUEST_TIMEOUT_MSEC } = await import("@modelcontextprotocol/sdk/shared/protocol.js");
+  assert.ok(
+    DRIVER_LOCK_WAIT_MS < DEFAULT_REQUEST_TIMEOUT_MSEC,
+    `${DRIVER_LOCK_WAIT_MS}ms must be under the client's ${DEFAULT_REQUEST_TIMEOUT_MSEC}ms`,
+  );
+});
+
+test("a stale release cannot hand the window to two callers at once", async () => {
+  // Without an ownership check, A's `finally` would clear whatever `holder` happens to be — B, mid
+  // flight — and the next arrival walks in beside it. That is the collision this module prevents,
+  // reintroduced by its own cleanup path.
+  let releaseA: () => void = () => {};
+  const aInside = new Promise<void>((r) => (releaseA = r));
+  const a = withDriverLock("A", () => aInside);
+  await delay(10);
+
+  resetDriverLock(); // A is still running, but no longer recorded as the holder.
+  let bRunning = false;
+  let releaseB: () => void = () => {};
+  const bInside = new Promise<void>((r) => (releaseB = r));
+  const b = withDriverLock("B", async () => {
+    bRunning = true;
+    await bInside;
+  });
+  await delay(10);
+  assert.ok(bRunning, "B took the free lock");
+
+  releaseA(); // A's finally fires a release it no longer owns.
+  await a;
+  assert.equal(driverLockState().busy, true, "B must still hold the window after A's stale release");
+  assert.equal(driverLockState().what, "B");
+
+  releaseB();
+  await b;
+  assert.equal(driverLockState().busy, false);
+});
+
+test("resetDriverLock rejects what is queued rather than granting it", async () => {
+  // A reset means "whatever was running is no longer accounted for". Handing the window to a queued
+  // call at that moment is the collision, not the recovery.
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const holder = withDriverLock("holder", () => held);
+  const queued = withDriverLock("queued", async () => "ran");
+  await delay(10);
+  resetDriverLock();
+  await assert.rejects(() => queued, /reset/);
+  release();
+  await holder;
+  resetDriverLock();
+});
+
+/**
+ * The property that makes ONE lock sufficient, asserted against the source.
+ *
+ * `withChart` is the only thing that opens a chart session, and no exported driver function calls
+ * another — so the mutex has no re-entrant path to deadlock on. Both are invisible at runtime
+ * without a browser, and both are one edit away from being false.
+ */
+test("every chart session is opened inside the lock, and nothing re-enters it", () => {
+  const driver = readFileSync(join(SRC, "chartbit", "driver.ts"), "utf8");
+
+  // 1. withChart is the only door. Scanned across the WHOLE of src/, not just this directory:
+  // `ChartbitSession` is an exported class with a public static `open`, so any module anywhere
+  // could open the browser outside the mutex, and a guard that watched one file would stay green
+  // while the property it protects was broken.
+  const openers = allSourceFiles(SRC).filter((f) => /ChartbitSession\.open\s*\(/.test(readFileSync(f, "utf8")));
+  assert.deepEqual(
+    openers.map((f) => f.slice(SRC.length + 1)),
+    ["chartbit/driver.ts"],
+    "a module that opens a chart session outside driver.ts drives the browser outside the mutex",
+  );
+  assert.equal((driver.match(/ChartbitSession\.open\s*\(/g) ?? []).length, 1);
+
+  // 2. Every exported driver function goes through withChart, and exactly once each.
+  //
+  // First close the shape hole: this enumerates `export async function`, so an export written as
+  // `export const foo = async () => {…}` that called `evaluateInPage` directly would be invisible
+  // here, would not change the `withChart({` count, and would drive the browser outside the mutex
+  // with this guard still green. So the FORM of every export is pinned too.
+  const exportLines = [...driver.matchAll(/^export .*/gm)].map((m) => m[0]);
+  for (const line of exportLines) {
+    assert.ok(
+      /^export (async function \w+|interface \w+|type \w+|const (CHART_TYPE_NAMES)\b)/.test(line),
+      `unexpected export shape in driver.ts — a callable export that is not \`export async function\` ` +
+        `would bypass the withChart audit below: ${line.slice(0, 90)}`,
+    );
+  }
+
+  const exported = [...driver.matchAll(/^export async function (\w+)/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    exported.sort(),
+    ["addStudy", "clearDrawings", "drawAnnotations", "listShapes", "openChart", "saveChart", "screenshotChart"],
+    "a new driver export must be routed through withChart and named here, consciously",
+  );
+  assert.equal((driver.match(/withChart\(\{/g) ?? []).length, exported.length);
+
+  // 3. No export calls another export — that is what makes a non-reentrant mutex safe here.
+  const body = driver.slice(driver.indexOf("export async function"));
+  for (const name of exported) {
+    const calls = [...body.matchAll(new RegExp(`(?<!function )\\b${name}\\s*\\(`, "g"))];
+    assert.equal(calls.length, 0, `${name} is called from inside driver.ts — the mutex would deadlock`);
+  }
+});
+
+/* --------------------- one annotation array, either tool, either spelling --------------------- */
+
+/**
+ * `price_chart` took `from_date`/`from_price`/`to_date`/`to_price` while `chartbit_draw` took
+ * `fromDate`/`fromPrice`/`toDate`/`toPrice` — the same conceptual object under two names, so an
+ * array could not be moved between them without rewriting every key. That move is the workflow:
+ * draw locally to check the geometry, then draw for real on the user's chart.
+ */
+test("snake_case coordinates draw exactly what camelCase draws", () => {
+  const snake = toShapeRequests(
+    [{ kind: "trend", from_date: "2026-01-02", from_price: 100, to_date: "2026-08-24", to_price: 200 } as never],
+    CONTEXT,
+  );
+  const camel = toShapeRequests(
+    [{ kind: "trend", fromDate: "2026-01-02", fromPrice: 100, toDate: "2026-08-24", toPrice: 200 }],
+    CONTEXT,
+  );
+  assert.deepEqual(snake, camel);
+  assert.equal(snake[0].points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(snake[0].points[1].price, 200);
+});
+
+test("the snake_case spelling works for every two-point kind, not just trend", () => {
+  // channel and fib take the same four coordinates, and a mapping that covered only `trend` would
+  // leave two kinds behind — the exact half-fix this issue was about.
+  const cases = [
+    { kind: "channel", from_date: "2026-01-02", from_price: 1, to_date: "2026-08-24", to_price: 2, offset: -5 },
+    { kind: "fib", from_date: "2026-01-02", from_price: 1, to_date: "2026-08-24", to_price: 2 },
+  ];
+  for (const annotation of cases) {
+    const [request] = toShapeRequests([annotation as never], CONTEXT);
+    assert.equal(request.points[0].time, epochSeconds("2026-01-02"), annotation.kind);
+    assert.equal(request.points[1].price, 2, annotation.kind);
+  }
+});
+
+test("normalizeAnnotationKeys leaves an annotation with neither spelling alone", () => {
+  const level = { kind: "level", price: 100 };
+  assert.equal(normalizeAnnotationKeys(level), level, "an untouched row is not needlessly copied");
+  // And it is not confused by things that are not objects.
+  assert.equal(normalizeAnnotationKeys(null), null);
+  assert.equal(normalizeAnnotationKeys("nope"), "nope");
+});
+
+test("both spellings of ONE coordinate, disagreeing, is refused rather than picked between", () => {
+  // Silently preferring one of two contradictory numbers would be guessing a point, which this
+  // module refuses everywhere else: a wrong coordinate is a wrong drawing, not a cosmetic miss.
+  assert.throws(
+    () =>
+      toShapeRequests(
+        [
+          {
+            kind: "trend",
+            fromDate: "2026-01-02",
+            from_date: "2020-01-01",
+            fromPrice: 1,
+            toDate: "2026-08-24",
+            toPrice: 2,
+          } as never,
+        ],
+        CONTEXT,
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.equal(e.kind, "invalid_param");
+      assert.match(e.message, /two spellings of ONE coordinate/);
+      return true;
+    },
+  );
+});
+
+test("a null alias is 'no value', not a disagreeing one", () => {
+  // `annotations` is an open record, so a JSON null reaches the normalizer unfiltered. Treating it
+  // as a rival value refuses `{from_date: "…", fromDate: null}` — a caller who spelled it once —
+  // by blaming a contradiction that does not exist.
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        from_date: "2026-01-02",
+        fromDate: null,
+        from_price: 1,
+        fromPrice: null,
+        to_date: "2026-08-24",
+        to_price: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(request.points[0].price, 1, "the snake_case value must win over a null camelCase one");
+});
+
+test("a null on EITHER side is 'no value' — the two halves behave the same", () => {
+  // The first cut only handled a null camelCase value, so `{from_date: null, fromDate: "…"}` still
+  // threw "they disagree" while its mirror was accepted. Same caller intent, opposite outcome.
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        from_date: null,
+        fromDate: "2026-01-02",
+        from_price: null,
+        fromPrice: 1,
+        to_date: "2026-08-24",
+        to_price: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
+  assert.equal(request.points[0].price, 1);
+});
+
+test("-0 and 0 are the same coordinate, not a contradiction", () => {
+  // `Object.is(-0, 0)` is false, which produced the self-refuting message "carries both (0) and
+  // (0) ... they disagree".
+  const [request] = toShapeRequests(
+    [
+      { kind: "trend", fromDate: "2026-01-02", fromPrice: -0, from_price: 0, toDate: "2026-08-24", toPrice: 2 } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].price, -0);
+});
+
+test("both spellings AGREEING is accepted — it is not a contradiction", () => {
+  const [request] = toShapeRequests(
+    [
+      {
+        kind: "trend",
+        fromDate: "2026-01-02",
+        from_date: "2026-01-02",
+        fromPrice: 1,
+        from_price: 1,
+        toDate: "2026-08-24",
+        toPrice: 2,
+      } as never,
+    ],
+    CONTEXT,
+  );
+  assert.equal(request.points[0].time, epochSeconds("2026-01-02"));
 });
 
 test("each annotation kind maps to the tool it should", () => {

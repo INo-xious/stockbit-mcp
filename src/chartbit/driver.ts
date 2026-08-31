@@ -26,6 +26,7 @@
 import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { ChartbitSession, type ChartTab } from "./session.js";
+import { withDriverLock } from "./lock.js";
 import { captureWebSession, saveWebSession, webSessionLaunchBlocker } from "../auth/websession.js";
 import { syncStoreFromBrowser } from "../auth/resync.js";
 import { evaluateInPage } from "./evaluate.js";
@@ -53,6 +54,7 @@ import {
   type OurDrawing,
 } from "./store.js";
 import { getChartDrawings } from "./api.js";
+import { reconcileOurDrawings, type OurDrawingStatus } from "./reconcile.js";
 
 /** Chart types the widget accepts, by the name a caller would use. Values are TradingView's. */
 const CHART_TYPES = {
@@ -96,7 +98,26 @@ function requireReady<T extends PageResult>(result: T | undefined, what: string)
   return result;
 }
 
+/**
+ * The one door to the chart browser.
+ *
+ * Every exported function in this module is a single call to this, and none of them calls another —
+ * so this is a true choke point, and the mutex below cannot deadlock on a re-entrant call because
+ * there is no path that re-enters. `ChartbitSession.open` has exactly one caller: line 127 of this
+ * function. `test/chartbit.test.ts` asserts both properties by scanning the source, because they
+ * are what makes one lock here sufficient.
+ */
 async function withChart<T>(
+  options: { symbol: string; headless?: boolean; what: string },
+  work: (tab: ChartTab, session: ChartbitSession) => Promise<T>,
+): Promise<T> {
+  // Serialised BEFORE the session check and the launch, not after: two calls arriving together
+  // must not both decide to launch a browser, and must not both attach to one window and take
+  // turns mutating the same tab. That interleaving is what lost five drawings in the field.
+  return withDriverLock(`${options.what} ${options.symbol}`, () => openAndWork(options, work));
+}
+
+async function openAndWork<T>(
   options: { symbol: string; headless?: boolean },
   work: (tab: ChartTab, session: ChartbitSession) => Promise<T>,
 ): Promise<T> {
@@ -175,7 +196,7 @@ export interface ChartState {
 /** Open the chart page for a symbol, optionally changing resolution or chart type. */
 export async function openChart(options: OpenChartOptions): Promise<ChartState> {
   const symbol = normalizeSymbol(options.symbol);
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "opening the chart for" }, async (tab, session) => {
     if (options.resolution || options.chartType) {
       const view = await evaluateInPage<PageResult & { symbol: string | null; resolution: string | null }>(
         tab.cdp,
@@ -208,7 +229,24 @@ export interface DrawResult {
   failed: Array<{ kind: string; label?: string; shape: string }>;
   /** Removed first, when `replace` was set. */
   replaced: number;
-  ours: OurDrawing[];
+  /**
+   * Everything this server has recorded drawing on this symbol, each entry saying whether the chart
+   * still holds it.
+   *
+   * `presence` is the whole point. This list used to be the local record returned verbatim, as
+   * though it described the chart — which is how a result once listed fourteen entities for a chart
+   * holding nine. Read `onChart` for how many are confirmed, and `gone` for the ones that are not.
+   */
+  ours: OurDrawingStatus[];
+  /** Recorded drawings the chart no longer holds. Empty when the reading was clean. */
+  gone: OurDrawingStatus[];
+  /**
+   * How many entries in `ours` the chart confirmed. ABSENT when `reconciled` is false — a zero
+   * there would report "the chart holds none of them" for a chart nobody managed to look at.
+   */
+  onChart?: number;
+  /** False when the live chart could not be enumerated, so no `presence` above is a reading. */
+  reconciled: boolean;
   notes: string[];
 }
 
@@ -235,7 +273,7 @@ export async function drawAnnotations(options: DrawOptions): Promise<DrawResult>
   // Mapped before the browser opens: a bad annotation should fail without launching anything.
   const requests = toShapeRequests(options.annotations, { anchorDate: options.anchorDate, style: options.style });
 
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "drawing on" }, async (tab, session) => {
     let replaced = 0;
     if (options.replace) {
       const previous = loadOurDrawings(symbol);
@@ -275,8 +313,50 @@ export async function drawAnnotations(options: DrawOptions): Promise<DrawResult>
       }
     }
 
-    const ours = created.length ? addOurDrawings(symbol, created) : loadOurDrawings(symbol);
-    return { symbol, drawn: created.length, failed, replaced, ours, notes: session.notes };
+    const ledger = created.length ? addOurDrawings(symbol, created) : loadOurDrawings(symbol);
+
+    // Ask the chart what it actually holds, before answering for it.
+    //
+    // Free, in the sense that matters: the tab is already open, already on this symbol and already
+    // widget-ready, because the draw above needed it. So this forces no browser launch — the
+    // objection that would otherwise sink reconcile-on-read never applies on this path.
+    //
+    // `LIST_SHAPES` rather than a second, lighter "just the ids" script: the two would have to be
+    // kept in agreement forever, and a reconcile that disagreed with what `chartbit_shapes` shows
+    // the user would be worse than no reconcile at all.
+    //
+    // A failure here must not fail the draw. The shapes ARE on the chart; not being able to
+    // enumerate them afterwards is a gap in what we can say, not a gap in what happened — so the
+    // reading is null, every entry reads `unconfirmed`, and the note says why.
+    let liveIds: string[] | null = null;
+    let why: string | undefined;
+    try {
+      const listed = await evaluateInPage<PageResult & { shapes: Array<{ id: unknown }> }>(
+        tab.cdp,
+        tab.sessionId,
+        LIST_SHAPES,
+      );
+      const ready = requireReady(listed, "checking which drawings the chart still holds");
+      liveIds = (ready.shapes ?? []).map((shape) => String(shape.id));
+    } catch (err) {
+      why =
+        "The drawings were created, but the chart could not be enumerated afterwards, so `ours` " +
+        `reports what was recorded rather than what is on the chart (${err instanceof StockbitError ? err.kind : "unreadable"}).`;
+    }
+
+    const { ours, gone, onChart, reconciled, note } = reconcileOurDrawings(ledger, liveIds, why);
+    return {
+      symbol,
+      drawn: created.length,
+      failed,
+      replaced,
+      ours,
+      gone,
+      // Omitted, not zeroed, when there was no reading — see `Reconciliation.onChart`.
+      ...(onChart === undefined ? {} : { onChart }),
+      reconciled,
+      notes: note ? [...session.notes, note] : session.notes,
+    };
   });
 }
 
@@ -291,7 +371,7 @@ export async function addStudy(options: {
 }): Promise<{ symbol: string; study: string; id: string | null; notes: string[] }> {
   const symbol = normalizeSymbol(options.symbol);
   const request = studyRequest(options.study, options.inputs ?? []);
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "adding a study to" }, async (tab, session) => {
     const result = await evaluateInPage<PageResult & { id: string | null }>(tab.cdp, tab.sessionId, CREATE_STUDY, {
       substitutions: { [PLACEHOLDERS.studyRequest]: request },
     });
@@ -335,7 +415,7 @@ export async function clearDrawings(options: {
     );
   }
 
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "clearing drawings from" }, async (tab, session) => {
     if (options.scope === "all") {
       const result = await evaluateInPage<PageResult & { before: number; after: number }>(
         tab.cdp,
@@ -434,7 +514,7 @@ export async function listShapes(options: {
   }
   const wanted = names ?? (requested ? [requested] : null);
 
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "listing drawings on" }, async (tab, session) => {
     const result = await evaluateInPage<PageResult & { shapes: Array<Omit<ShapeRecord, "ours">> }>(
       tab.cdp,
       tab.sessionId,
@@ -467,7 +547,7 @@ export async function screenshotChart(options: {
   headless?: boolean;
 }): Promise<{ symbol: string; base64: string; notes: string[] }> {
   const symbol = normalizeSymbol(options.symbol);
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "screenshotting" }, async (tab, session) => {
     const shot = (await tab.cdp.send(
       "Page.captureScreenshot",
       { format: "png", captureBeyondViewport: false },
@@ -512,7 +592,7 @@ export async function saveChart(options: {
   headless?: boolean;
 }): Promise<SaveChartResult> {
   const symbol = normalizeSymbol(options.symbol);
-  return withChart({ symbol, headless: options.headless }, async (tab, session) => {
+  return withChart({ symbol, headless: options.headless, what: "saving the chart for" }, async (tab, session) => {
     const result = await evaluateInPage<PageResult & { saved: boolean; reason: string | null }>(
       tab.cdp,
       tab.sessionId,

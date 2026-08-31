@@ -15,6 +15,8 @@ import {
   getBandarDetector,
   getBrokerActivity,
   getBrokerDirectory,
+  withBrokerNames,
+  withBrokerNamesAll,
   getBrokerTop,
 } from "../src/core/brokers.ts";
 import { getBrokerSummary } from "../src/core/marketdetectors.ts";
@@ -159,6 +161,9 @@ const requests = { directory: 0, activity: 0, top: 0, summary: 0 };
 /** What the next activity call should answer with. Lets one test drive an empty/odd envelope. */
 let activityBody: unknown = ACTIVITY_BODY;
 
+/** Set non-200 to make the directory route fail, so name resolution's degraded path is exercised. */
+let directoryStatus = 200;
+
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -188,6 +193,7 @@ before(() => {
     }
     if (u.includes("marketdetectors/brokers")) {
       requests.directory++;
+      if (directoryStatus !== 200) return new Response("upstream is unhappy", { status: directoryStatus });
       return json(DIRECTORY_BODY);
     }
     if (u.includes("broker/activity")) {
@@ -222,6 +228,7 @@ beforeEach(() => {
   clearCache();
   seenUrls.length = 0;
   activityBody = ACTIVITY_BODY;
+  directoryStatus = 200;
   requests.directory = 0;
   requests.activity = 0;
   requests.top = 0;
@@ -277,6 +284,161 @@ test("directory: a different limit is a different cache entry", async () => {
   await getBrokerDirectory({ limit: 20 });
   assert.equal(requests.directory, 2, "a narrower page must not be answered from the wide one");
   assert.equal(lastUrl("marketdetectors/brokers").searchParams.get("limit"), "20");
+});
+
+test("directory: codes keeps only those houses, and costs no extra request", async () => {
+  // The point of the filter: resolving two codes out of a broker_summary used to mean pulling all
+  // 112 rows and joining locally. It is applied to the cached directory, so it is the SAME fetch.
+  await getBrokerDirectory({ limit: 3 });
+  assert.equal(requests.directory, 1);
+
+  const one = await getBrokerDirectory({ limit: 3, codes: ["CC"] });
+  assert.equal(requests.directory, 1, "the filter must be served from the cached directory");
+  assert.equal(one.count, 1);
+  assert.deepEqual(
+    one.brokers.map((b) => b.code),
+    ["CC"],
+  );
+  assert.deepEqual(one.filteredTo, ["CC"]);
+  assert.deepEqual(one.notFound, [], "an empty notFound is the good answer, and is stated not omitted");
+});
+
+test("directory: a code the directory does not carry is NAMED, not silently dropped", async () => {
+  const dir = await getBrokerDirectory({ limit: 3, codes: ["YP", "ZZ"] });
+  assert.deepEqual(
+    dir.brokers.map((b) => b.code),
+    ["YP"],
+  );
+  assert.deepEqual(dir.notFound, ["ZZ"]);
+  // The count describes what came back, so it cannot disagree with the list beside it.
+  assert.equal(dir.count, dir.brokers.length);
+});
+
+test("directory: codes is case-insensitive and deduplicated", async () => {
+  const dir = await getBrokerDirectory({ limit: 3, codes: ["cc", "CC", " yp "] });
+  assert.deepEqual(dir.filteredTo, ["CC", "YP"], "normalized, deduplicated, in the order asked");
+  assert.equal(dir.count, 2);
+  assert.deepEqual(dir.notFound, []);
+});
+
+test("directory: filtering never mutates the shared cache entry", async () => {
+  // `full` is the object every later caller of that cache key receives. Trimming it in place would
+  // hand the next caller this caller's filter — the trap getBandarDetector documents when it sorts.
+  await getBrokerDirectory({ limit: 3, codes: ["CC"] });
+  const all = await getBrokerDirectory({ limit: 3 });
+  assert.equal(all.count, 3, "the unfiltered directory must still be whole");
+  assert.equal(all.filteredTo, undefined);
+  assert.equal(all.notFound, undefined);
+  assert.equal(requests.directory, 1, "all of it from one fetch");
+});
+
+test("directory: a malformed or empty codes list is refused before the wire", async () => {
+  await assert.rejects(
+    () => getBrokerDirectory({ codes: ["AK!"] }),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.equal(e.kind, "invalid_param");
+      return true;
+    },
+  );
+  // Empty is refused rather than read as "no filter": the two readings are opposite, and guessing
+  // is how a caller asking for nothing receives the whole exchange.
+  await assert.rejects(() => getBrokerDirectory({ codes: [] }), StockbitError);
+  await assert.rejects(() => getBrokerDirectory({ codes: "AK" }), StockbitError);
+  assert.equal(requests.directory, 0);
+});
+
+/* ------------------------------- resolving names ------------------------------- */
+
+test("names: a code the directory carries gains its house, one absent from it does not", async () => {
+  const { rows, resolution } = await withBrokerNames([
+    { code: "YP", netValueIdr: 100 },
+    { code: "ZZ", netValueIdr: -50 },
+  ]);
+  assert.equal(resolution.resolved, true);
+  assert.equal(resolution.note, undefined);
+  assert.equal(rows[0].name, "Mirae Asset Sekuritas Indonesia");
+  // Absent, not "unknown": a placeholder would make an unresolved code and a nameless broker read
+  // the same, which is the whole reason this project refuses defaults.
+  assert.equal(rows[1].name, undefined);
+  assert.equal(rows[1].netValueIdr, -50, "the figures are untouched either way");
+});
+
+test("names: the join normalizes the row's code, which the wire does not", async () => {
+  // The two sides arrive differently normalized. A directory code has passed `isCode` and is upper
+  // case by construction; a summary row's `code` is `netbs_broker_code` verbatim off the wire. A
+  // raw join would lose the name for a lower-case row and lose it SILENTLY — indistinguishable
+  // from a broker the directory has never heard of.
+  const { rows } = await withBrokerNames([{ code: "yp" }, { code: " cc " }]);
+  assert.equal(rows[0].name, "Mirae Asset Sekuritas Indonesia");
+  assert.equal(rows[1].name, "Mandiri Sekuritas");
+});
+
+test("names: a directory that cannot be read costs the names, never the numbers", async () => {
+  directoryStatus = 500;
+  const { rows, resolution } = await withBrokerNames([{ code: "YP", netValueIdr: 100 }]);
+  assert.equal(resolution.resolved, false);
+  assert.ok(resolution.note, "a failure must say so rather than look like an empty directory");
+  assert.match(resolution.note, /not resolved/);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "YP");
+  assert.equal(rows[0].name, undefined);
+  assert.equal(rows[0].netValueIdr, 100, "the flow figure survives a lookup failure");
+});
+
+test("names: the note carries the failure KIND and no URL", async () => {
+  directoryStatus = 401;
+  const { resolution } = await withBrokerNames([{ code: "YP" }]);
+  assert.equal(resolution.resolved, false);
+  assert.doesNotMatch(resolution.note ?? "", /https?:\/\//, "a note must not quote the request URL");
+  assert.doesNotMatch(resolution.note ?? "", /stockbit\.com/i);
+});
+
+test("names: the caller's rows are copied, never written into", async () => {
+  const input = [{ code: "YP" }];
+  const { rows } = await withBrokerNames(input);
+  assert.equal(input[0].name, undefined, "the array handed in must come back unchanged");
+  assert.notEqual(rows[0], input[0]);
+});
+
+test("names: several row-sets share ONE directory read, even when it fails", async () => {
+  // A summary has two sides. Resolving them with two calls is invisible on success — the second is
+  // a cache hit — and doubles the damage on failure: two failed requests, and two identical notes
+  // of which the caller keeps one.
+  directoryStatus = 500;
+
+  // Measured against a ONE-set call rather than against the literal number 1: the HTTP client
+  // retries a 500, so the raw request count is the retry budget, not the number of reads. What
+  // must hold is that two sides cost the same as one.
+  await withBrokerNames([{ code: "YP" }]);
+  const oneSet = requests.directory;
+  assert.ok(oneSet > 0, "the failing path must actually have tried");
+
+  clearCache();
+  requests.directory = 0;
+  const out = await withBrokerNamesAll([[{ code: "YP" }], [{ code: "CC" }]]);
+  assert.equal(requests.directory, oneSet, "two sides must cost one directory read, not two");
+  assert.equal(out.length, 2);
+  for (const side of out) {
+    assert.equal(side.resolution.resolved, false);
+    assert.ok(side.resolution.note);
+  }
+  assert.equal(out[0].rows[0].code, "YP");
+  assert.equal(out[1].rows[0].code, "CC");
+});
+
+test("names: the shared read resolves every set on success too", async () => {
+  const out = await withBrokerNamesAll([[{ code: "YP" }], [{ code: "CC" }, { code: "ZZ" }]]);
+  assert.equal(requests.directory, 1);
+  assert.equal(out[0].rows[0].name, "Mirae Asset Sekuritas Indonesia");
+  assert.equal(out[1].rows[0].name, "Mandiri Sekuritas");
+  assert.equal(out[1].rows[1].name, undefined, "a code the directory lacks still gets no name");
+});
+
+test("names: resolving reuses the cached directory rather than fetching per call", async () => {
+  await withBrokerNames([{ code: "YP" }]);
+  await withBrokerNames([{ code: "CC" }]);
+  assert.equal(requests.directory, 1, "the join is free once the directory is warm");
 });
 
 test("directory: a rejected page size never reaches the wire", async () => {

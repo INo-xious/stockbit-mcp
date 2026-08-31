@@ -1,6 +1,6 @@
 /**
  * Strict command-line validation for the shipped CLIs — `stockbit-auth`, `stockbit-live`,
- * `stockbit-alerts`.
+ * `stockbit-alerts`, `stockbit-batch`, and `stockbit-mcp`.
  *
  * Exists because of 2026-08-29: `stockbit-auth login --help` opened a real browser login, harvested
  * the signed-in session and overwrote the stored credential. Every bin read its flags with bespoke
@@ -73,6 +73,22 @@ export function isHelpToken(token: string): boolean {
   return token === "--help" || token === "-h";
 }
 
+/**
+ * True for the two spellings of "tell me the version instead of running anything".
+ *
+ * Same shape as `isHelpToken`, and for the same reason: asking a command ABOUT itself must never
+ * be answered by RUNNING it. `stockbit-mcp --version` started an MCP server on stdio and printed
+ * nothing about the version, so the only way to learn what was installed was to read
+ * `node_modules/stockbit-mcp/package.json` by hand — and the version was the first thing that
+ * mattered, because npx had silently pinned a stale caret range.
+ *
+ * `-v` rather than `-V` because nothing in these bins uses `-v` for anything else; there is no
+ * verbose flag to collide with.
+ */
+export function isVersionToken(token: string): boolean {
+  return token === "--version" || token === "-v";
+}
+
 /** Every flag name a command accepts, boolean and value flags together, in declaration order. */
 function flagNames(spec: CommandSpec): string[] {
   return [...Object.keys(spec.flags ?? {}), ...Object.keys(spec.valueFlags ?? {})];
@@ -117,7 +133,23 @@ export function gateCommandLine(
     return "help";
   }
 
-  const seeHelp = `Run \`${bin} ${cmd} --help\``;
+  validateTokens(bin, cmd, spec, argv);
+  return "ok";
+}
+
+/**
+ * Check every token of one already-selected command line against its spec.
+ *
+ * `cmd` is the subcommand, or `undefined` for a bin that has NO subcommands — `stockbit-mcp` takes
+ * flags and nothing else. Both callers share this body so the two forms cannot drift into two
+ * different ideas of what is acceptable, and every message is assembled from the same two pieces:
+ * the bare form reads `stockbit-mcp: unknown flag "--verison"` where the subcommand form reads
+ * `stockbit-auth login: unknown flag "--verison"`.
+ */
+function validateTokens(bin: string, cmd: string | undefined, spec: CommandSpec, argv: readonly string[]): void {
+  const subject = cmd ?? bin;
+  const prefix = cmd === undefined ? bin : `${bin} ${cmd}`;
+  const seeHelp = `Run \`${prefix} --help\``;
   const flags = spec.flags ?? {};
   const valueFlags = spec.valueFlags ?? {};
   const positionals: string[] = [];
@@ -139,9 +171,9 @@ export function gateCommandLine(
       if (next === undefined || next.startsWith("--")) {
         const p = valueFlags[name].placeholder;
         throw new CliParseError(
-          cmd,
+          subject,
           token,
-          `${bin} ${cmd}: ${name} needs a value — write ${name} ${p} or ${name}=${p}. ${seeHelp}.`,
+          `${prefix}: ${name} needs a value — write ${name} ${p} or ${name}=${p}. ${seeHelp}.`,
         );
       }
       i++; // The next token is the value.
@@ -150,15 +182,15 @@ export function gateCommandLine(
 
     if (name in flags) {
       if (eq !== -1) {
-        throw new CliParseError(cmd, token, `${bin} ${cmd}: ${name} does not take a value. ${seeHelp}.`);
+        throw new CliParseError(subject, token, `${prefix}: ${name} does not take a value. ${seeHelp}.`);
       }
       continue;
     }
 
     throw new CliParseError(
-      cmd,
+      subject,
       token,
-      `${bin} ${cmd}: unknown flag ${JSON.stringify(token)}. ${accepts(cmd, spec)}. ${seeHelp} for what each does.`,
+      `${prefix}: unknown flag ${JSON.stringify(token)}. ${accepts(subject, spec)}. ${seeHelp} for what each does.`,
     );
   }
 
@@ -166,11 +198,47 @@ export function gateCommandLine(
   if (!spec.variadicTail && positionals.length > slots) {
     const extra = positionals[slots];
     const takes = slots
-      ? `${cmd} takes at most ${slots} positional argument${slots === 1 ? "" : "s"} (${spec.usage ?? ""})`.replace(" ()", "")
-      : `${cmd} accepts no positional arguments`;
-    throw new CliParseError(cmd, extra, `${bin} ${cmd}: unexpected argument ${JSON.stringify(extra)}. ${takes}. ${seeHelp}.`);
+      ? `${subject} takes at most ${slots} positional argument${slots === 1 ? "" : "s"} (${spec.usage ?? ""})`.replace(" ()", "")
+      : `${subject} accepts no positional arguments`;
+    throw new CliParseError(subject, extra, `${prefix}: unexpected argument ${JSON.stringify(extra)}. ${takes}. ${seeHelp}.`);
   }
+}
 
+/**
+ * The same gate for a bin that has no subcommands at all.
+ *
+ * `stockbit-mcp` is the whole reason this exists. It read `process.argv` nowhere, so every token on
+ * its command line fell through to "start an MCP server on stdio" — `--version` included, which is
+ * how asking the package what it was produced a running server and no version. The other four bins
+ * were already gated; this one had no subcommand to hang a `CommandTable` entry on.
+ *
+ * Help and version are answered HERE, before any caller can act, for the reason `gateCommandLine`
+ * answers help first: the command you are asking ABOUT must never be the command that RUNS.
+ *
+ * `version` is REQUIRED, and that is the point. It was optional once, which meant a bin declaring
+ * `--version` in its flags but forgetting to pass one would accept the token, fall through, and
+ * START — the exact "a token the parser does not know is treated as absent" failure this whole
+ * module exists to close, reintroduced one level up. A required parameter makes that unwritable.
+ *
+ * @returns "help" or "version" when it has already written the answer, "ok" to proceed.
+ * @throws {CliParseError} on an unknown flag or an unexpected positional.
+ */
+export function gateBareCommandLine(
+  bin: string,
+  spec: CommandSpec,
+  argv: readonly string[],
+  write: (text: string) => void,
+  version: string,
+): "help" | "version" | "ok" {
+  if (argv.some(isHelpToken)) {
+    write(formatBareUsage(bin, spec));
+    return "help";
+  }
+  if (argv.some(isVersionToken)) {
+    write(`${version}\n`);
+    return "version";
+  }
+  validateTokens(bin, undefined, spec, argv);
   return "ok";
 }
 
@@ -217,7 +285,35 @@ export function formatUsage(bin: string, commands: CommandTable, cmd?: string, e
     lines.push(`  ${label(name).padEnd(width)}  ${commands[name].summary}`);
     lines.push(...flagLines(commands[name], `  ${" ".repeat(width)}  `));
   }
-  lines.push("", `Run \`${bin} <command> --help\` for one command. Unknown flags are an error, never ignored.`);
+  lines.push(
+    "",
+    `Run \`${bin} <command> --help\` for one command. Unknown flags are an error, never ignored.`,
+    // Named here rather than in each bin's table because `--version` is not a flag OF a command —
+    // it is asked of the bin, before any command word. Leaving it out is the drift this generated
+    // usage exists to prevent: all five bins answer it, and the help text has to say so.
+    `Run \`${bin} --version\` (or -v) for the installed version.`,
+  );
+  if (epilogue?.length) lines.push("", ...epilogue);
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Usage for a bin that has no subcommands.
+ *
+ * Separate from `formatUsage` because that function's whole shape is a command LIST: its signature
+ * line is `bin <a|b|c>` and every row is a command. A bin with one behaviour and a couple of flags
+ * has no list to print, and rendering it through the same function yields `Usage: stockbit-mcp <>`.
+ */
+export function formatBareUsage(bin: string, spec: CommandSpec, epilogue?: readonly string[]): string {
+  const signature = [bin, spec.usage, flagNames(spec).length ? "[flags]" : undefined].filter(Boolean).join(" ");
+  const lines = [`Usage: ${signature}`, `  ${spec.summary}`];
+  const perFlag = flagLines(spec, "  ");
+  if (perFlag.length) lines.push("", ...perFlag);
+  // A blank `details` entry stays blank rather than becoming two spaces — this block is the only
+  // place a caller writes free-form paragraphs, and trailing whitespace in shipped help text is
+  // the kind of thing that shows up in a diff forever.
+  if (spec.details?.length) lines.push("", ...spec.details.map((d) => (d ? `  ${d}` : "")));
+  lines.push("", "Unknown flags are an error, never ignored.");
   if (epilogue?.length) lines.push("", ...epilogue);
   return lines.join("\n") + "\n";
 }

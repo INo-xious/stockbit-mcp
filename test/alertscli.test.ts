@@ -97,6 +97,11 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   try {
     const env = {
       ...process.env,
+      // Offline, like every other test. `status` asks npm whether a newer release exists, and a
+      // SPAWNED bin does not inherit this suite's stubbed `fetch` — so without this the gate would
+      // make a real request to registry.npmjs.org. test/updatecheck.test.ts asserts every spawner
+      // sets it, because one that forgets is silent.
+      STOCKBIT_NO_UPDATE_CHECK: "1",
       STOCKBIT_FORCE_FILE_STORE: "1",
       STOCKBIT_STORE_DIR: childStore,
       // Nothing to deliver to, even if a handler were somehow reached.

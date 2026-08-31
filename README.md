@@ -99,7 +99,10 @@ flowchart LR
 - **No scraping, and no UI automation for data.** Your own browser is used for three things and
   nothing else: the one-time login, drawing on your own chart, and opening Stockbit when you ask to
   look at it. Nothing is ever read out of the page.
-- **Nothing leaves your machine** except to Stockbit, and to channels you configured.
+- **Nothing leaves your machine** except to Stockbit, to channels you configured, and — when you
+  run `status` — one request to the npm registry asking whether a newer release exists. That one
+  carries the package name and nothing else, it is cached for a day, and
+  `STOCKBIT_NO_UPDATE_CHECK=1` turns it off.
 - **No short selling** — IDX retail has none — and **no financial advice**.
 
 ## Prerequisites
@@ -219,16 +222,23 @@ updates described next.
 
 ## Staying up to date
 
-Every configuration above uses `npx -y stockbit-mcp` with no version, and that is deliberate: **npx
-re-resolves the newest release each time the server starts.** A new version reaches you the next time
-your client launches it, with nothing to do.
+Every configuration above uses `npx -y stockbit-mcp` with no version. **Do not rely on that alone to
+keep you current.**
 
-That is measured, not assumed. With 1.1.0 already sitting in the npx cache, the next bare
-`npx -y stockbit-mcp` ran 1.1.1.
+This section used to promise that npx re-resolves the newest release on every start, on the strength
+of one measurement: with 1.1.0 in the cache, the next bare `npx -y stockbit-mcp` ran 1.1.1. That
+measurement was real and the conclusion drawn from it was wrong. npx caches a resolved tree under a
+version RANGE, so a cache entry holding `^1.2.2` with 1.2.2 installed is *already satisfied* by 1.2.4
+and is reused without asking the registry. Observed in the field: a server sat on 1.2.2 while 1.2.4
+was published, and only two `~/.npm/_npx` directories deleted by hand moved it.
+
+So the server now tells you instead. `status` compares its own version against the registry — one
+cached request a day, `STOCKBIT_NO_UPDATE_CHECK=1` to turn it off — and says so when you are behind.
+`stockbit-mcp --version` answers the same question from a shell.
 
 | How you installed | Do you get new versions automatically? |
 |---|---|
-| `npx -y stockbit-mcp` (every config above) | **Yes** — on the next launch |
+| `npx -y stockbit-mcp` (every config above) | **Not reliably.** Run `npx -y stockbit-mcp@latest`, or clear `~/.npm/_npx` |
 | `npm i -g stockbit-mcp` | No. Run `npm update -g stockbit-mcp` |
 | Desktop Extension (`.mcpb`) | **No.** Download the new `.mcpb` from [Releases](https://github.com/INo-xious/stockbit-mcp/releases) |
 | From source | No. `git pull && npm ci && npm run build` |

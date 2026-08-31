@@ -9,6 +9,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "../core/index.js";
+import { withBrokerNamesAll } from "../core/brokers.js";
+import { normalizeAnnotationKeys } from "../chartbit/shapes.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
 import { barIndexOn, plottedBars, renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
@@ -264,7 +266,12 @@ export function registerTools(
       "A row omits `netLots` or `netValueIdr` when that figure could not be read — missing on the " +
       "wire, empty, or in a format this server refuses to guess at. Absent is NOT zero, it means " +
       "unknown, so do not sum these rows without checking. `unreadable` on the envelope names the " +
-      "wire keys and counts, per side, how many listed brokers a total over these rows would miss.",
+      "wire keys and counts, per side, how many listed brokers a total over these rows would miss.\n" +
+      "`resolve_names: true` adds the securities house to each row as `name`, joining against the " +
+      "`brokers` directory so you do not have to. The directory is cached for five minutes, so " +
+      "this is usually free. It is best-effort: if the directory cannot be read the rows and every " +
+      "figure on them are unchanged and `names.note` says why, and a code the directory does not " +
+      "carry simply has no `name` — an unresolved code is not a nameless broker.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`."),
@@ -296,10 +303,14 @@ export function registerTools(
             "LAST_3_MONTHS, YEAR_TO_DATE. The server aggregates the whole window in ONE request, so " +
             "YEAR_TO_DATE costs the same as today. Ignored when from/to are given.",
         ),
+      resolve_names: z
+        .boolean()
+        .optional()
+        .describe("Add each broker's securities house as `name`, joined from the cached directory."),
     },
     async (a) =>
-      runTool(() =>
-        core.getBrokerSummary({
+      runTool(async () => {
+        const summary = await core.getBrokerSummary({
           symbol: a.symbol,
           limit: a.limit,
           period: a.period,
@@ -312,8 +323,23 @@ export function registerTools(
           date_to: a.date_to,
           start_date: a.start_date,
           end_date: a.end_date,
-        }),
-      ),
+        });
+        if (!a.resolve_names) return summary;
+        // New arrays, never a mutation: `summary` is the shared cache entry, and writing names into
+        // its rows would hand them to every later caller that did not ask for them.
+        //
+        // Both sides through ONE directory read. Two calls would be invisible on success (the
+        // second is a cache hit) and would double the damage on failure: two failed requests, and
+        // two identical notes of which only one is kept.
+        const [buyers, sellers] = await withBrokerNamesAll([summary.buyers, summary.sellers]);
+        const note = buyers.resolution.note ?? sellers.resolution.note;
+        return {
+          ...summary,
+          buyers: buyers.rows,
+          sellers: sellers.rows,
+          names: { resolved: buyers.resolution.resolved && sellers.resolution.resolved, ...(note ? { note } : {}) },
+        };
+      }),
   );
 
   defBandar.read(
@@ -911,13 +937,26 @@ export function registerTools(
             from_price: coordinate(),
             to_date: z.string().optional().describe("trend: end session"),
             to_price: coordinate(),
+            // The camelCase spelling `chartbit_draw` publishes, accepted here so one annotation
+            // array works in both tools. Without these, zod strips the unknown keys and the trend
+            // branch below finds no coordinates — which SILENTLY drew nothing.
+            //
+            // The two price aliases go through `coordinate()`, not a bare `z.coerce.number()`: the
+            // absence-is-not-zero rule is a property of the COORDINATE, not of how it was spelled,
+            // and a plain coerce here would let `fromPrice: null` reach the handler as the price 0
+            // through the new spelling — reinstating, on the alias, the exact defect the snake_case
+            // field was fixed for.
+            fromDate: z.string().optional().describe("Alias for `from_date`."),
+            fromPrice: coordinate().describe("Alias for `from_price`."),
+            toDate: z.string().optional().describe("Alias for `to_date`."),
+            toPrice: coordinate().describe("Alias for `to_price`."),
             date: z.string().optional().describe("marker: session"),
             label: z.string().optional(),
             color: z.string().optional(),
           }),
         )
         .optional()
-        .describe("Your own drawings on top of the chart"),
+        .describe("Your own drawings on top of the chart. Same shape chartbit_draw takes."),
       theme: z.enum(["dark", "light"]).optional().describe("Default dark"),
       save_path: z
         .string()
@@ -995,26 +1034,31 @@ export function registerTools(
         const noSession = (dates: string[]): string => `no session on or after ${dates.join(" or ")} in ${window}`;
         const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
-        for (const [index, raw] of (a.annotations ?? []).entries()) {
+        for (const [index, given] of (a.annotations ?? []).entries()) {
+          // Either spelling of the two-point coordinates, folded onto the camelCase one the renderer
+          // uses. Shared with chartbit_draw so the two tools cannot drift apart again. It runs
+          // BEFORE the guards below, so each coordinate is tested once, under one name, however the
+          // caller spelled it — two ladders reading two spellings is how the two tools drifted.
+          const raw = normalizeAnnotationKeys(given);
           if (raw.kind === "level" && num(raw.price)) {
             annotations.push({ kind: "level", price: raw.price, label: raw.label, color: raw.color });
             drawn.level++;
           } else if (raw.kind === "zone" && num(raw.from) && num(raw.to)) {
             annotations.push({ kind: "zone", from: raw.from, to: raw.to, label: raw.label, color: raw.color });
             drawn.zone++;
-          } else if (raw.kind === "trend" && raw.from_date && raw.to_date && num(raw.from_price) && num(raw.to_price)) {
+          } else if (raw.kind === "trend" && raw.fromDate && raw.toDate && num(raw.fromPrice) && num(raw.toPrice)) {
             annotations.push({
               kind: "trend",
-              fromDate: raw.from_date,
-              fromPrice: raw.from_price,
-              toDate: raw.to_date,
-              toPrice: raw.to_price,
+              fromDate: raw.fromDate,
+              fromPrice: raw.fromPrice,
+              toDate: raw.toDate,
+              toPrice: raw.toPrice,
               label: raw.label,
               color: raw.color,
             });
             // Still handed to the renderer — its prices widen the price scale either way — but a
             // line with no bar to anchor to is not drawn, so it is not counted as drawn.
-            const missing = [raw.from_date, raw.to_date].filter((d) => barIndexOn(plotted, d) < 0);
+            const missing = [raw.fromDate, raw.toDate].filter((d) => barIndexOn(plotted, d) < 0);
             if (missing.length === 0) drawn.trend++;
             else notDrawn.push({ index, kind: "trend", reason: noSession(missing) });
           } else if (raw.kind === "marker" && raw.date && raw.label && (raw.price === undefined || num(raw.price))) {

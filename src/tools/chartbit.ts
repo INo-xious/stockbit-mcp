@@ -252,20 +252,36 @@ export function registerChartbitTools(define: Definer): void {
       "never touches anything the user drew.\n" +
       "Drawings persist when Stockbit's page autosaves, or immediately if you call `chartbit_save`.\n" +
       "`failed` lists requests the widget accepted but created nothing for — those are NOT on the " +
-      "chart, so do not report them to the user as drawn.",
+      "chart, so do not report them to the user as drawn.\n" +
+      "`ours` is everything this server has recorded drawing on this symbol, and each entry carries " +
+      "`presence`: \"on-chart\" if the live chart still holds it, \"gone\" if it does not, and " +
+      "\"unconfirmed\" if the chart could not be read.\n" +
+      "CHECK `reconciled` FIRST. When it is true the chart was read: `onChart` counts what it still " +
+      "holds and `gone` lists what it does not — a drawing can vanish because the page reloaded " +
+      "before a save, or because the user deleted it, and neither is an error. When `reconciled` is " +
+      "false NOTHING was read: `onChart` is absent and `gone` is empty, and that means unknown, NOT " +
+      "zero and NOT nothing-lost. Say the chart could not be checked; do not report a count.\n" +
+      "Entries are never removed by this check: the record is the only thing distinguishing this " +
+      "server's drawings from the user's own, so a single bad reading must not be able to destroy it.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       annotations: z
         .array(z.record(z.unknown()))
         .describe(
           'Annotations: {kind:"level",price,label?} | {kind:"zone",from,to,label?} | ' +
-            '{kind:"trend",fromDate,fromPrice,toDate,toPrice,label?} | ' +
+            '{kind:"trend",from_date,from_price,to_date,to_price,label?} | ' +
             '{kind:"marker",date,price?,label,above?} | ' +
-            '{kind:"channel",fromDate,fromPrice,toDate,toPrice,offset,label?} | ' +
+            '{kind:"channel",from_date,from_price,to_date,to_price,offset,label?} | ' +
             '{kind:"vline",date,label?} | ' +
-            '{kind:"fib",fromDate,fromPrice,toDate,toPrice,label?} — from/to are the START and END ' +
-            'of the move being retraced (swing low then swing high for an up-move); the tool derives ' +
-            'its own levels',
+            '{kind:"fib",from_date,from_price,to_date,to_price,label?} — from/to are the START and ' +
+            'END of the move being retraced (swing low then swing high for an up-move); the tool ' +
+            'derives its own levels. ' +
+            'The coordinate keys are the SAME ones price_chart takes, so an array written for it can ' +
+            'be drawn locally to check the geometry and then passed here unchanged. Note the ' +
+            'reverse is only true for level/zone/trend/marker: price_chart renders those four and ' +
+            'rejects channel, vline and fib. The camelCase spelling (fromDate, ' +
+            'fromPrice, toDate, toPrice) is also accepted; passing both spellings of one coordinate ' +
+            'with different values is an error rather than a silent choice between them.',
         ),
       anchor_date: z.string().describe("YYYY-MM-DD to anchor time-less tools to, normally the latest bar"),
       replace: z.boolean().optional().describe("Remove this server's previous drawings on this symbol first"),

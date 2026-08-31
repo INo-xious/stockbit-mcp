@@ -369,7 +369,82 @@ export function toShapeRequest(annotation: DrawableAnnotation, context: ShapeCon
 
 /** Map a whole set. Order is preserved so a caller can correlate results to inputs by index. */
 export function toShapeRequests(annotations: DrawableAnnotation[], context: ShapeContext): ShapeRequest[] {
-  return annotations.map((annotation) => toShapeRequest(annotation, context));
+  return annotations.map((annotation) => toShapeRequest(normalizeAnnotationKeys(annotation), context));
+}
+
+/**
+ * The snake_case spelling of the four two-point coordinates, and the camelCase one they map onto.
+ *
+ * These four are the ONLY keys the two annotation APIs ever disagreed about: `kind`, `price`,
+ * `from`, `to`, `date`, `label`, `color`, `above`, `dashed` and `offset` are already spelled the
+ * same in both.
+ */
+const COORDINATE_ALIASES: Readonly<Record<string, string>> = {
+  from_date: "fromDate",
+  from_price: "fromPrice",
+  to_date: "toDate",
+  to_price: "toPrice",
+};
+
+/**
+ * Accept either spelling of a two-point annotation's coordinates.
+ *
+ * `price_chart` takes `from_date`/`from_price`/`to_date`/`to_price` — snake_case, like every other
+ * tool parameter in this server — and maps them onto the renderer's camelCase `Annotation`.
+ * `chartbit_draw` never had that mapping and published the internal spelling directly, so the same
+ * conceptual object had two names and an annotation array could not be moved between the two tools
+ * without rewriting every key. That move is the natural workflow: draw locally to check the
+ * geometry, then draw for real on the user's chart.
+ *
+ * Both spellings are accepted rather than one being renamed away, because `annotations` is an open
+ * record on the `chartbit_draw` side: a hard rename would take callers that work today straight to
+ * an error, and would do the same to any saved recipe carrying the old keys. camelCase stays the
+ * internal shape; snake_case is what both tool schemas document.
+ *
+ * A row carrying BOTH spellings of one coordinate with DIFFERENT values is refused rather than
+ * resolved by precedence. This module's whole discipline is that a coordinate must never be
+ * guessed — an invented point is a wrong drawing, not a cosmetic miss — and silently preferring one
+ * of two contradictory numbers is a guess.
+ */
+export function normalizeAnnotationKeys<T>(annotation: T): T {
+  if (annotation === null || typeof annotation !== "object" || Array.isArray(annotation)) return annotation;
+  const row = annotation as Record<string, unknown>;
+  let out: Record<string, unknown> | undefined;
+  for (const [snake, camel] of Object.entries(COORDINATE_ALIASES)) {
+    // `hasOwn`, not `in`: `in` walks the prototype chain, so a polluted `Object.prototype` would
+    // make every annotation appear to carry a coordinate it never had — and a coordinate this
+    // module did not receive is exactly the thing it must never invent.
+    if (!Object.hasOwn(row, snake)) continue;
+    const snakeValue = row[snake];
+    const camelValue = row[camel];
+    // `null` is "no value", not a disagreeing one, on EITHER side: `annotations` is an open record,
+    // so a JSON null reaches here unfiltered, and `{from_date: "2026-01-02", fromDate: null}` is a
+    // caller who spelled it once. Refusing that as a contradiction blames one that does not exist —
+    // and the mirror case has to behave the same way, or the same intent gets opposite answers
+    // depending on which half the caller left null.
+    //
+    // `Object.is` alone also separates -0 from 0, which printed "(0) and (0) ... they disagree".
+    const isSet = (v: unknown): boolean => v !== undefined && v !== null;
+    const camelIsSet = isSet(camelValue);
+    const snakeIsSet = isSet(snakeValue);
+    const same = Object.is(camelValue, snakeValue) || camelValue === snakeValue;
+    if (camelIsSet && snakeIsSet && !same) {
+      throw new StockbitError(
+        "invalid_param",
+        `An annotation carries both \`${camel}\` (${JSON.stringify(camelValue)}) and \`${snake}\` ` +
+          `(${JSON.stringify(snakeValue)}). They are two spellings of ONE coordinate and they ` +
+          "disagree, so nothing was drawn. Pass one of them.",
+      );
+    }
+    out ??= { ...row };
+    delete out[snake];
+    // A camelCase `null` is overwritten, not preserved: it carries no coordinate, and leaving it
+    // would hand `requireNumber` a null when the caller plainly supplied the value in snake_case.
+    // A snake_case null on its own is copied across unchanged, so the error names the field the
+    // caller actually wrote rather than silently dropping it.
+    if (!camelIsSet) out[camel] = snakeValue;
+  }
+  return (out ?? row) as T;
 }
 
 /**

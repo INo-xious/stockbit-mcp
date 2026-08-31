@@ -50,7 +50,8 @@ import { logStderr, redactValue } from "../src/redact.js";
 import { collectStatus, formatStatus } from "../src/status.js";
 import { resolveToolProfile } from "../src/tools/_profile.js";
 import { describeSurface } from "../src/tools/surface.js";
-import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken, isVersionToken } from "../src/cliargs.js";
+import { VERSION } from "../src/version.js";
 import { AUTH_BIN, AUTH_COMMANDS } from "../src/auth/cli.js";
 
 async function promptSecret(question: string): Promise<string> {
@@ -303,6 +304,9 @@ async function cmdStatus(argv: string[]): Promise<void> {
 
   const report = await collectStatus({
     live,
+    // Same reason as the `status` tool: this is where a user looks when something is wrong, and
+    // "you are three releases behind" is often the answer.
+    updateCheck: true,
     ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
     ...(missingTools === undefined ? {} : { missingTools }),
     ...(missingFamilies === undefined ? {} : { missingFamilies }),
@@ -741,6 +745,14 @@ async function cmdTradingForget(): Promise<void> {
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "status";
   const argv = process.argv.slice(3);
+
+  // `--version` as the command word, answered on the same rule as help: a question ABOUT the
+  // package, so stdout and exit 0, and never by running a command. `login --version` is still an
+  // unknown flag on `login` — this is the bare form only.
+  if (isVersionToken(cmd)) {
+    stdout.write(`${VERSION}\n`);
+    return;
+  }
 
   // `--help`, `-h` or `help [command]` as the command word. Requested help is the command's product,
   // so it goes to stdout and exits 0 — the same rule that already puts `status --json` there.
