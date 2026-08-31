@@ -310,8 +310,18 @@ export function renderCandles(opts: CandleChartOptions): string {
         `<rect x="${(xOf(i) - bodyW / 2).toFixed(1)}" y="${(cursor + volH - h).toFixed(1)}" width="${bodyW.toFixed(1)}" height="${Math.max(0.5, h).toFixed(1)}" fill="${b.close >= b.open ? up : down}" fill-opacity="0.55"><title>${esc(b.date)}: ${esc(humanAmount(b.volume))} lots</title></rect>`,
       );
     }
+    // The label states what it actually knows. With no readable session there is no peak — the
+    // `Math.max(1, …)` floor would otherwise print "peak 1 lots", a figure from nowhere — and where
+    // some sessions are unreadable the gaps in the panel are explained rather than left to read as
+    // sessions that traded nothing.
+    const unread = n - volumes.length;
+    const caption =
+      volumes.length === 0
+        ? "Volume  ·  not carried by this response"
+        : `Volume  ·  peak ${humanAmount(maxVol)} lots` +
+          (unread > 0 ? `  ·  ${unread} session${unread === 1 ? "" : "s"} not carried` : "");
     parts.push(
-      `<text x="${PAD_L}" y="${(cursor + 10).toFixed(1)}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}">Volume  ·  peak ${esc(humanAmount(maxVol))} lots</text>`,
+      `<text x="${PAD_L}" y="${(cursor + 10).toFixed(1)}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}">${esc(caption)}</text>`,
     );
     cursor += volH;
   }

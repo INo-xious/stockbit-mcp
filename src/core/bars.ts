@@ -98,19 +98,27 @@ export interface BarSeries {
 const Row = z
   .object({
     date: z.string(),
+    // OHLC stay REQUIRED and keep plain coercion. See the note on `Bar` — a row that cannot yield a
+    // price is a different problem from one missing a statistic, and it is not this change's to
+    // settle. Recorded in progress.md as an open finding.
     open: z.coerce.number(),
     high: z.coerce.number(),
     low: z.coerce.number(),
     close: z.coerce.number(),
-    average: z.coerce.number().optional(),
-    volume: z.coerce.number().optional(),
-    value: z.coerce.number().optional(),
-    frequency: z.coerce.number().optional(),
-    change: z.coerce.number().optional(),
-    change_percentage: z.coerce.number().optional(),
-    foreign_buy: z.coerce.number().optional(),
-    foreign_sell: z.coerce.number().optional(),
-    net_foreign: z.coerce.number().optional(),
+    // Deliberately NOT `z.coerce.number().optional()`. `z.coerce.number()` is `Number()`, and
+    // `Number("")`, `Number(null)`, `Number("  ")`, `Number(false)` and `Number([])` are every one
+    // of them 0 — so an empty field would reach `toBar` as the FIGURE ZERO and the absence would be
+    // destroyed one layer before anything could report it, making `number | null` on `Bar` pure
+    // decoration. The value is carried through untouched and read by `optionalNumber` below.
+    average: z.unknown(),
+    volume: z.unknown(),
+    value: z.unknown(),
+    frequency: z.unknown(),
+    change: z.unknown(),
+    change_percentage: z.unknown(),
+    foreign_buy: z.unknown(),
+    foreign_sell: z.unknown(),
+    net_foreign: z.unknown(),
   })
   .passthrough();
 
@@ -125,6 +133,27 @@ const Response = z
   })
   .passthrough();
 
+/**
+ * One optional wire number, or `null` when the response did not carry a usable one.
+ *
+ * The rule is what the value IS, not a list of empties: a number passes as itself, a string only
+ * when it has non-space content, and everything else — `undefined`, `null`, `""`, `"  "`, `false`,
+ * `[]` — is absent. `src/core/market.ts` names the same trap for its own reader, and the annotation
+ * coordinates in `src/tools/register.ts` are the same rule at the tool boundary.
+ *
+ * A non-numeric string like `"abc"` is absent too rather than `NaN`: `NaN` is not a figure, and
+ * every consumer would have to guard it separately. Thousands separators are stripped, because a
+ * "1,234" that read as NaN would be a readable number reported as unreadable.
+ */
+function optionalNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (text === "") return null;
+  const parsed = Number(text.replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /** Project one wire row onto `Bar`. Exported so the absence rules above are testable offline. */
 export function toBar(r: z.output<typeof Row>): Bar {
   return {
@@ -137,15 +166,15 @@ export function toBar(r: z.output<typeof Row>): Bar {
     // approximation of the same quantity, not a number invented out of nothing. The eight below
     // have no such stand-in — there is nothing a missing foreign flow could sensibly be — so they
     // report absence instead of a zero nobody sent.
-    average: r.average ?? r.close,
-    volume: r.volume ?? null,
-    value: r.value ?? null,
-    frequency: r.frequency ?? null,
-    change: r.change ?? null,
-    changePercent: r.change_percentage ?? null,
-    foreignBuy: r.foreign_buy ?? null,
-    foreignSell: r.foreign_sell ?? null,
-    netForeign: r.net_foreign ?? null,
+    average: optionalNumber(r.average) ?? r.close,
+    volume: optionalNumber(r.volume),
+    value: optionalNumber(r.value),
+    frequency: optionalNumber(r.frequency),
+    change: optionalNumber(r.change),
+    changePercent: optionalNumber(r.change_percentage),
+    foreignBuy: optionalNumber(r.foreign_buy),
+    foreignSell: optionalNumber(r.foreign_sell),
+    netForeign: optionalNumber(r.net_foreign),
   };
 }
 

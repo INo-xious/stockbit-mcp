@@ -71,12 +71,19 @@ export function bucketKey(date: string, tf: Timeframe): string {
  *     lots-to-shares constant, which is one silent unit assumption too many in this codebase.
  *   - **`changePercent` is recomputed against the PREVIOUS bucket's close.** Summing daily percent
  *     changes is arithmetically wrong — they compound — and it looks right to three decimal places.
+ *     The FIRST bucket has no previous close, so its change is `null`: "no prior bucket in this
+ *     window" is not "a week that moved nowhere".
+ *   - **A summed field is `null` if ANY session in the bucket lacked it**, rather than the sum of
+ *     the ones that were there. See `sumOrNull` directly below.
  *
  * `partialLast` is derived structurally: a bucket is complete if and only if a later bucket exists
  * in the input. That needs no holiday calendar and is conservative in the right direction — the
  * trailing bucket is always flagged, because we genuinely cannot know whether more sessions are
  * coming.
+ *
+ * (This block documents `resample`, which follows `sumOrNull` below.)
  */
+
 /**
  * Sum one field across a bucket, or `null` when any session in that bucket could not be read.
  *
@@ -130,8 +137,11 @@ export function resample(bars: Bar[], tf: Timeframe, opts: { includePartial?: bo
         : last.average;
 
     const close = last.close;
-    const change = previousClose === null ? 0 : close - previousClose;
-    const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+    // The first bucket has no bucket before it, so its change is UNKNOWN rather than zero — the
+    // same rule the fields below now follow. A 0 here reads as "flat week" for what is really "no
+    // prior week in this window".
+    const change = previousClose === null ? null : close - previousClose;
+    const changePercent = previousClose === null || previousClose === 0 ? null : ((close - previousClose) / previousClose) * 100;
 
     out.push({
       // The last session's date: a bucket never claims a day that has not traded.
@@ -144,8 +154,8 @@ export function resample(bars: Bar[], tf: Timeframe, opts: { includePartial?: bo
       volume,
       value: sumOrNull(group, (b) => b.value),
       frequency: sumOrNull(group, (b) => b.frequency),
-      change: Number(change.toFixed(4)),
-      changePercent: Number(changePercent.toFixed(4)),
+      change: change === null ? null : Number(change.toFixed(4)),
+      changePercent: changePercent === null ? null : Number(changePercent.toFixed(4)),
       foreignBuy: sumOrNull(group, (b) => b.foreignBuy),
       foreignSell: sumOrNull(group, (b) => b.foreignSell),
       netForeign: sumOrNull(group, (b) => b.netForeign),

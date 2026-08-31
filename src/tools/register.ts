@@ -397,10 +397,19 @@ export function registerTools(
           distributedWith: b.distributedWith.filter(drawable),
         }));
         const sellers = d.topSellers.filter(drawable);
-        const partiesWithoutAmount =
-          d.topBuyers.length - brokers.length +
-          (d.topSellers.length - sellers.length) +
-          d.topBuyers.reduce((n, b) => n + b.distributedWith.filter((p) => !drawable(p)).length, 0);
+        // DISTINCT broker codes, not occurrences. One broker with no amount appears once as a top
+        // buyer and again as a counterparty of four others; counting rows reported it five times
+        // and made the number unreadable against `brokersCharted`.
+        const missingCodes = new Set<string>();
+        for (const side of [d.topBuyers, d.topSellers]) {
+          for (const party of side) {
+            if (!drawable(party)) missingCodes.add(party.code);
+            for (const counterparty of party.distributedWith) {
+              if (!drawable(counterparty)) missingCodes.add(counterparty.code);
+            }
+          }
+        }
+        const brokersWithoutAmount = missingCodes.size;
         const sellerTotals = new Map(sellers.map((s) => [s.code, s.amount]));
         const svg = renderSankey(brokers, {
           symbol: d.symbol,
@@ -447,9 +456,10 @@ export function registerTools(
               dataType: d.dataType,
               marketBoard: d.marketBoard,
               brokersCharted: Math.min(brokers.length, a.top_sources ?? 8),
-              // Above zero means the response did not carry an amount for that many parties, so
-              // they are absent from the diagram. Not the same as a party that traded nothing.
-              partiesWithoutAmount,
+              // DISTINCT brokers the response carried no amount for, on either side or as a
+              // counterparty, so they are absent from the diagram. Not the same as a broker that
+              // traded nothing — that one is drawn, at zero width.
+              brokersWithoutAmount,
               savedTo,
               stockbitUrl: stockbit.url,
               stockbitBrowser: stockbit.action,
@@ -563,7 +573,13 @@ export function registerTools(
       "Fetches only the symbols with rules, and only as much history as the slowest indicator needs. " +
       "A rule that fires is recorded so it does not fire again for the same bar.\n" +
       "`reason` on a rule that did not fire distinguishes 'condition-false' from 'warming-up' — the " +
-      "second means there is not yet enough history to judge, which is NOT the same as a no.",
+      "second means the comparison could not be made, which is NOT the same as a no. It covers two " +
+      "situations, and `leftValue: null` with `barsNeeded` already satisfied tells them apart: not " +
+      "enough history yet, which more bars fix; or an operand the SERIES DOES NOT CARRY — not every " +
+      "response includes volume, value or foreign flow, and where a bar is missing the field it is " +
+      "absent rather than zero. The second never resolves by waiting, however much history arrives, " +
+      "because the field is not in the payload. Check the field is present before widening the " +
+      "window.",
       {
       symbol: z.string().optional().describe("Only check rules for this ticker"),
       dry_run: z.boolean().optional().describe("Evaluate without recording fires, so a check can be repeated. Default false."),
@@ -1428,9 +1444,11 @@ export function registerTools(
       "~50s. Defaults are set at that honest ceiling; raising max_symbols much past 30 will time out " +
       "before it finishes. A SECOND scan over an overlapping universe is far cheaper — bar pages are " +
       "cached for six hours once settled — so sweep broadly once, then iterate on the condition.\n" +
-      "Misses distinguish `condition-false` from `warming-up` (not enough history to say yet) and " +
-      "`no-data`. Truncation is always reported with its reason, so a capped sweep never reads as a " +
-      "complete one.",
+      "Misses distinguish `condition-false` from `warming-up` and `no-data`. `warming-up` means the " +
+      "comparison could not be made: either not enough history yet, or an operand the series does " +
+      "not carry — a response that omits volume, value or foreign flow leaves that field absent " +
+      "rather than zero, and no amount of extra history will settle it. Truncation is always " +
+      "reported with its reason, so a capped sweep never reads as a complete one.",
     {
       symbols: z.array(z.string()).optional().describe("Explicit tickers. Omit to use movers or trending."),
       universe: z

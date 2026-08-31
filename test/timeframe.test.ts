@@ -142,9 +142,13 @@ test("changePercent is recomputed against the previous bucket, not summed", () =
   const daily = sessions("2026-08-03", 10, (i) => 1000 * 1.1 ** i);
   const weekly = resample(daily, "W", { includePartial: true });
 
-  assert.equal(weekly.bars[0].changePercent, 0, "the first bucket has nothing to change from");
+  // null, not 0. The comment this assertion has always carried — "nothing to change from" — is the
+  // argument for it: there is no prior bucket in this window, which is not the same as a week that
+  // moved nowhere, and a reader cannot tell those apart from a zero.
+  assert.equal(weekly.bars[0].changePercent, null, "the first bucket has nothing to change from");
+  assert.equal(weekly.bars[0].change, null);
   const expected = ((weekly.bars[1].close - weekly.bars[0].close) / weekly.bars[0].close) * 100;
-  assert.ok(Math.abs(weekly.bars[1].changePercent - expected) < 1e-3);
+  assert.ok(Math.abs((weekly.bars[1].changePercent as number) - expected) < 1e-3);
 });
 
 test("the trailing bucket is dropped as partial unless asked for", () => {

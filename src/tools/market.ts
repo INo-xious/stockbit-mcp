@@ -32,7 +32,8 @@ export function registerMarketTools(define: Definer): void {
       "Check `unmapped` and `warnings` on the result before using the numbers. On the daily route " +
       "the close arrives as `value` and open/high/low/volume arrive EMPTY, so every candle is flat " +
       "and `warnings` says so: candlestick patterns and high/low indicators are meaningless on this " +
-      "series, and the 0 volume is not a real zero. `mapped`, `extraKeys` and `sample` show " +
+      "series. Volume on that route comes back NULL, not 0 — a field that arrived empty on every " +
+      "bar is absent, and `warnings` names every such field. `mapped`, `extraKeys` and `sample` show " +
       "which wire keys were used and what else the point carried.\n" +
       "raw=true returns the sibling chart endpoint's payload untouched instead of bars. Use it only " +
       "to discover real field spellings when `unmapped` or `extraKeys` is non-empty; it is not a " +

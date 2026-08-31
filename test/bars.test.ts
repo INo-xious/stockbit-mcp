@@ -47,6 +47,8 @@ const ALL_ROWS = Array.from({ length: TOTAL_SESSIONS }, (_, i) => ({
 }));
 
 const realFetch = globalThis.fetch;
+/** A per-test row set, for tests asserting on how a wire VALUE is read rather than on the walk. */
+let rowsOverride: unknown[] | undefined;
 
 /** Every request URL that went out, so a test asserts what production actually asked for. */
 let urls: string[] = [];
@@ -71,6 +73,11 @@ before(() => {
     }
 
     if (u.includes("/company-price-feed/historical/summary/")) {
+      // A per-test row set, for the tests that assert on how a wire VALUE is read rather than on
+      // the walk. One page, no next_page.
+      if (rowsOverride !== undefined) {
+        return json({ data: { result: rowsOverride, paginate: {} } });
+      }
       const page = Number(new URL(u).searchParams.get("page") ?? "1");
       const slice = ALL_ROWS.slice((page - 1) * ROWS_PER_PAGE, page * ROWS_PER_PAGE);
       const more = page * ROWS_PER_PAGE < ALL_ROWS.length;
@@ -83,6 +90,7 @@ before(() => {
 
 beforeEach(() => {
   urls = [];
+  rowsOverride = undefined;
   clearCache();
 });
 
@@ -117,6 +125,42 @@ test("a field the response did not carry is null on the bar, never zero", () => 
   assert.equal(bar.frequency, null);
   assert.equal(bar.change, null);
   assert.equal(bar.changePercent, null);
+});
+
+test("an EMPTY field on the wire is absent, which is where the zero used to be manufactured", async () => {
+  // The one that matters, and the one `toBar`-only tests cannot reach. `z.coerce.number()` is
+  // `Number()`, and `Number("")`/`Number(null)`/`Number("  ")`/`Number(false)`/`Number([])` are all
+  // 0 — so with coercion in the schema the absence was destroyed BEFORE `toBar` ran, and every
+  // consumer downstream saw a confident zero. This goes through the real wire path.
+  rowsOverride = [
+    {
+      date: day(0),
+      open: 1000, high: 1010, low: 990, close: 1005,
+      volume: "", value: null, frequency: "  ", change: false,
+      change_percentage: [], foreign_buy: "", foreign_sell: null, net_foreign: "",
+    },
+  ];
+  const series = await getBars({ symbol: "BBRI", bars: 1 });
+  const bar = series.bars[0];
+
+  assert.equal(bar.volume, null, "an empty string is not the number zero");
+  assert.equal(bar.value, null);
+  assert.equal(bar.frequency, null, "and neither is whitespace");
+  assert.equal(bar.change, null);
+  assert.equal(bar.changePercent, null);
+  assert.equal(bar.foreignBuy, null);
+  assert.equal(bar.foreignSell, null);
+  assert.equal(bar.netForeign, null, "the field this whole rule exists for");
+  assert.equal(bar.close, 1005, "and the price is untouched");
+});
+
+test("a thousands-separated wire number is read, not reported as unreadable", async () => {
+  rowsOverride = [
+    { date: day(0), open: 1000, high: 1010, low: 990, close: 1005, volume: "1,234", net_foreign: "-2,500" },
+  ];
+  const series = await getBars({ symbol: "BBRI", bars: 1 });
+  assert.equal(series.bars[0].volume, 1234);
+  assert.equal(series.bars[0].netForeign, -2500);
 });
 
 test("a real zero on the wire is kept as a real zero", () => {
