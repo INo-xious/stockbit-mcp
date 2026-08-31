@@ -9,6 +9,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "../core/index.js";
+import { withBrokerNames } from "../core/brokers.js";
 import { runImageTool, runTool } from "./_format.js";
 import { renderSankey } from "../render/sankey.js";
 import { renderCandles, type Annotation, type SubPanel } from "../render/candles.js";
@@ -211,7 +212,12 @@ export function registerTools(
       "A row omits `netLots` or `netValueIdr` when that figure could not be read — missing on the " +
       "wire, empty, or in a format this server refuses to guess at. Absent is NOT zero, it means " +
       "unknown, so do not sum these rows without checking. `unreadable` on the envelope names the " +
-      "wire keys and counts, per side, how many listed brokers a total over these rows would miss.",
+      "wire keys and counts, per side, how many listed brokers a total over these rows would miss.\n" +
+      "`resolve_names: true` adds the securities house to each row as `name`, joining against the " +
+      "`brokers` directory so you do not have to. The directory is cached for five minutes, so " +
+      "this is usually free. It is best-effort: if the directory cannot be read the rows and every " +
+      "figure on them are unchanged and `names.note` says why, and a code the directory does not " +
+      "carry simply has no `name` — an unresolved code is not a nameless broker.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`."),
@@ -243,10 +249,14 @@ export function registerTools(
             "LAST_3_MONTHS, YEAR_TO_DATE. The server aggregates the whole window in ONE request, so " +
             "YEAR_TO_DATE costs the same as today. Ignored when from/to are given.",
         ),
+      resolve_names: z
+        .boolean()
+        .optional()
+        .describe("Add each broker's securities house as `name`, joined from the cached directory."),
     },
     async (a) =>
-      runTool(() =>
-        core.getBrokerSummary({
+      runTool(async () => {
+        const summary = await core.getBrokerSummary({
           symbol: a.symbol,
           limit: a.limit,
           period: a.period,
@@ -259,8 +269,20 @@ export function registerTools(
           date_to: a.date_to,
           start_date: a.start_date,
           end_date: a.end_date,
-        }),
-      ),
+        });
+        if (!a.resolve_names) return summary;
+        // New arrays, never a mutation: `summary` is the shared cache entry, and writing names into
+        // its rows would hand them to every later caller that did not ask for them.
+        const buyers = await withBrokerNames(summary.buyers);
+        const sellers = await withBrokerNames(summary.sellers);
+        const note = buyers.resolution.note ?? sellers.resolution.note;
+        return {
+          ...summary,
+          buyers: buyers.rows,
+          sellers: sellers.rows,
+          names: { resolved: buyers.resolution.resolved && sellers.resolution.resolved, ...(note ? { note } : {}) },
+        };
+      }),
   );
 
   defBandar.read(

@@ -183,6 +183,14 @@ const Response = z
 
 export interface NormalizedBroker {
   code: string;
+  /**
+   * The securities house behind `code`, attached only when `resolve_names` was asked for.
+   *
+   * Absent otherwise, and absent too when the directory has no row for this code — an unresolved
+   * code is not a nameless broker, and filling it with a placeholder would make the two
+   * indistinguishable. `withBrokerNames` in `src/core/brokers.ts` does the join.
+   */
+  name?: string;
   investorType?: string; // Asing/Lokal/Pemerintah
   /**
    * Net lots. POSITIVE on a buy row, NEGATIVE on a sell row — the wire's own sign, kept.

@@ -300,11 +300,37 @@ export interface BrokerDirectory {
   dataKeys: string[];
   brokers: BrokerDirectoryEntry[];
   unmapped: Unmapped;
+  /**
+   * The codes asked for, echoed back — present only when `codes` was passed.
+   *
+   * Stated back for the reason `listShapes` states its filter back: a short list must read as
+   * "filtered to this" and not as "the exchange has three brokers".
+   */
+  filteredTo?: string[];
+  /**
+   * Codes that were asked for and that no row in the directory carried.
+   *
+   * Present only when `codes` was passed. An empty array is the good answer and is kept rather than
+   * omitted, so "everything you asked for was found" is something the caller can READ instead of
+   * having to infer it from a length comparison. A code landing here is not necessarily wrong — the
+   * row may exist with its code under a key this projection does not recognise, which is what
+   * `unmapped` counts.
+   */
+  notFound?: string[];
 }
 
 export interface BrokerDirectoryOptions {
   page?: unknown;
   limit?: unknown;
+  /**
+   * Keep only these broker codes.
+   *
+   * Filtered HERE, after the response, because the route has never been observed accepting a code
+   * parameter and inventing one would be a guess on the wire. That costs nothing: one page at the
+   * default limit covers the whole exchange, the fetch is cached, and the filter runs on the cached
+   * copy — so asking for two codes and asking for the whole directory are the same single request.
+   */
+  codes?: unknown;
 }
 
 /**
@@ -320,8 +346,11 @@ export interface BrokerDirectoryOptions {
 export async function getBrokerDirectory(opts: BrokerDirectoryOptions = {}): Promise<BrokerDirectory> {
   const page = opts.page === undefined ? 1 : pageNumber(opts.page, "page");
   const limit = opts.limit === undefined ? 150 : pageNumber(opts.limit, "limit");
+  // Validated before the request, so a typo is refused rather than silently matching nothing and
+  // reading as "that broker does not exist".
+  const wanted = opts.codes === undefined ? null : normalizeCodeFilter(opts.codes);
 
-  return cached(`brokers:directory:${page}:${limit}`, CACHE.keystatsTtlMs, async () => {
+  const full = await cached(`brokers:directory:${page}:${limit}`, CACHE.keystatsTtlMs, async () => {
     const body = await getJson("brokerDirectory", { params: { page, limit } });
     const { rows, from, dataKeys } = readRows(body, "broker directory");
     const brokers = rows.map((row) => {
@@ -344,6 +373,106 @@ export async function getBrokerDirectory(opts: BrokerDirectoryOptions = {}): Pro
       unmapped: unmappedOf(rows, brokers, "code"),
     };
   });
+
+  if (!wanted) return full;
+
+  // A NEW object, never a mutation: `full` is the shared cache entry, and trimming its `brokers`
+  // in place would hand every later caller of that entry the filter this one asked for. The same
+  // trap `getBandarDetector` documents when it sorts.
+  const keep = new Set(wanted);
+  const brokers = full.brokers.filter((b) => b.code !== undefined && keep.has(b.code));
+  const found = new Set(brokers.map((b) => b.code));
+  return {
+    ...full,
+    count: brokers.length,
+    brokers,
+    filteredTo: wanted,
+    notFound: wanted.filter((code) => !found.has(code)),
+  };
+}
+
+/** What a name resolution did, for a caller that has to know whether a blank is a gap or a failure. */
+export interface NameResolution {
+  /** True when the directory was read. Rows may still lack a name; that is a gap, not a failure. */
+  resolved: boolean;
+  /** Why no name was attached, when none was. Absent on success. */
+  note?: string;
+}
+
+/**
+ * Attach securities-house names to rows carrying bare broker codes.
+ *
+ * `broker_summary` and `bandar_detector` answer in codes — `AK`, `XL`, `YP` — and the directory
+ * that decodes them is a different route, so every consumer was writing the same join by hand. This
+ * is that join, once, on the directory's own five-minute cache: for a caller that has already
+ * listed the directory it costs no request at all.
+ *
+ * **Best-effort, by construction.** A tool whose job is reporting flow must not fail because a
+ * lookup table could not be fetched — the numbers are the answer and the names are a convenience.
+ * When the directory cannot be read the rows come back exactly as they went in, `resolved` is
+ * false, and `note` says so. A code the directory does not carry simply gets no name: absent is
+ * absent, and a house nobody can name is not a house called "unknown".
+ */
+export async function withBrokerNames<T extends { code: string; name?: string }>(
+  rows: readonly T[],
+): Promise<{ rows: T[]; resolution: NameResolution }> {
+  let directory: BrokerDirectory;
+  try {
+    directory = await getBrokerDirectory();
+  } catch (err) {
+    // The KIND only. A fetch failure quotes its URL, and a note is not worth widening what this
+    // server is willing to write down.
+    const why = err instanceof StockbitError ? err.kind : "unreadable";
+    return {
+      rows: [...rows],
+      resolution: {
+        resolved: false,
+        note:
+          `Broker names were not resolved (${why}): the directory could not be read. ` +
+          "The codes and every figure beside them are unaffected.",
+      },
+    };
+  }
+
+  const byCode = new Map<string, string>();
+  for (const entry of directory.brokers) {
+    if (entry.code !== undefined && entry.name !== undefined) byCode.set(entry.code, entry.name);
+  }
+  return {
+    rows: rows.map((row) => {
+      const name = byCode.get(row.code);
+      return name === undefined ? { ...row } : { ...row, name };
+    }),
+    resolution: { resolved: true },
+  };
+}
+
+/**
+ * The `codes` filter, normalized and checked.
+ *
+ * Deduplicated so asking twice cannot report a code as both found and not found, and order is the
+ * caller's — the answer reads back in the order the question was asked.
+ */
+function normalizeCodeFilter(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    throw new StockbitError("invalid_param", "codes must be an array of broker codes, e.g. [\"AK\", \"XL\"]");
+  }
+  if (input.length === 0) {
+    // An empty list is refused rather than treated as "no filter": the two readings are opposite
+    // (everything, or nothing), and guessing which was meant is how a caller ends up with the whole
+    // exchange when they asked for none of it.
+    throw new StockbitError("invalid_param", "codes was an empty array — omit it to get the whole directory");
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    const code = normalizeBrokerCode(raw);
+    if (!seen.has(code)) {
+      seen.add(code);
+      out.push(code);
+    }
+  }
+  return out;
 }
 
 /* --------------------------------- activity --------------------------------- */
