@@ -566,3 +566,43 @@ test("a description that says the route was never observed contradicts any claim
     ),
   );
 });
+
+/* ------------------------------------------------------------------ *
+ * Claim honesty: what an EMPTY answer is allowed to mean.
+ *
+ * A description is the only thing a model has when it turns a `rows: []` into a sentence for a
+ * person, so one that reads an empty page as history is a defect in the same class as a wrong
+ * number. These pin the two readings a 2026-08-31 field report caught being asserted.
+ * ------------------------------------------------------------------ */
+
+test("an empty corporate-action page is not described as proof it never happened", () => {
+  // DEWA's shares outstanding grew 12.9x since its 2007 listing while rightissue, warrant, bonus,
+  // stocksplit, reversesplit, tenderoffer and stock_conversion ALL came back `rows: []`. The feed's
+  // window starts years after the listing, so empty is a fact about the window, not about history.
+  const byName = new Map(describeSurface().tools.map((t) => [t.name, t.description]));
+  for (const name of ["corporate_actions", "stock_conversion"]) {
+    const description = byName.get(name) ?? "";
+    assert.doesNotMatch(description, /issuer (that )?has never/i, `${name} still reads an empty page as "never"`);
+    assert.match(description, /PERIOD THIS FEED COVERS/, `${name} must scope empty to the covered period`);
+  }
+});
+
+test("the warrant action kind says whose warrant it means, so empty is not read as none exist", () => {
+  // `corporate_actions(action_type:"warrant")` covers warrants the ISSUER distributed. DEWA has
+  // five listed structured call warrants issued by four securities houses, and no route here links
+  // one to its underlying — so the two together answered "does DEWA have warrants" with "no".
+  const description = describeSurface().tools.find((t) => t.name === "corporate_actions")?.description ?? "";
+  assert.match(description, /structured/i, "the other instrument class must be named, not implied");
+  assert.match(description, /not evidence/i, "and what an empty list does NOT settle");
+});
+
+test("chartbit_save says the save and the check ride different credentials", () => {
+  // The save runs in the chart page on the website session; the check is a REST read on the `main`
+  // token domain (src/http/routes/exodus.ts, `chartbitDrawings`, auth: "main"). A field report hit
+  // both failure spellings — a 400 from the read and a `main` refresh 401 — on a save that had
+  // demonstrably worked, and nothing in the description said the two could fail independently.
+  const description = describeSurface().tools.find((t) => t.name === "chartbit_save")?.description ?? "";
+  assert.match(description, /website session/i, "the save side's credential must be named");
+  assert.match(description, /`main` token domain/, "and the check side's, in CONTEXT.md's words");
+  assert.match(description, /verifyError/, "and the field that carries the failure");
+});

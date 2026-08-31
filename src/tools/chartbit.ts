@@ -357,7 +357,12 @@ export function registerChartbitTools(define: Definer): void {
       "the API that it did.\n" +
       "`saved` is what the page's own save adapter reported; `verifiedDrawings` is how many drawings " +
       "a fresh read of the account found afterwards. A `null` there means the check could not be " +
-      "made — which is NOT the same as nothing being saved, and must not be reported as such.",
+      "made — which is NOT the same as nothing being saved, and must not be reported as such.\n" +
+      "The two halves run on DIFFERENT credentials: the save happens inside the chart page, on the " +
+      "browser's WEBSITE SESSION, while the check is a REST read on the `main` token domain. Either " +
+      "can be dead while the other works, so `saved: true` beside a `verifyError` is a save this " +
+      "server could not check — report it that way, never as a failed save. `status` reports the " +
+      "two credentials separately, so it says which one is dead.",
     {
       symbol: z.string().describe("IDX ticker"),
       layout_id: z.string().optional().describe("Layout id, to scope the verification read"),
