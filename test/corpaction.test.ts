@@ -294,6 +294,12 @@ test("cash and stock dividends are merged, tagged and sorted by ex-date descendi
   );
   assert.equal(calendar.undated, 1, "the undated row is counted, kept, and placed last");
   assert.equal(calendar.rows.length, 4, "nothing is dropped by the merge");
+  assert.deepEqual(calendar.exDateFields, ["ex_date"], "one spelling across both legs");
+  assert.deepEqual(
+    calendar.rows.map((r) => r.exDateFrom),
+    ["ex_date", "ex_date", "ex_date", null],
+    "every dated row names the key it was read from; the undated one names none",
+  );
   // The rest of each row survives untouched.
   assert.equal(calendar.rows[1].cash_dividend, "135");
   assert.equal(calendar.rows[0].ratio, "1:10");
@@ -307,6 +313,7 @@ test("when no candidate ex-date key is present the list says so instead of fakin
       : { data: [{ symbol: "BBBB", tanggal_ex: "2026-02-05" }] };
   const calendar = await getDividendCalendar();
   assert.equal(calendar.exDateField, null);
+  assert.deepEqual(calendar.exDateFields, [], "empty is what tells 'nothing matched' from 'mixed spellings'");
   assert.equal(calendar.undated, 2);
   assert.deepEqual(
     calendar.rows.map((r) => r.corpactionType),
@@ -329,7 +336,7 @@ test("a compact or epoch ex-date is read as a date, and an empty one stays absen
           ],
         };
   const calendar = await getDividendCalendar();
-  assert.equal(calendar.exDateField, "exdate", "the second candidate key is found when the first is absent");
+  assert.equal(calendar.exDateField, "exdate", "a later candidate is found when the earlier ones are absent");
   assert.deepEqual(
     calendar.rows.map((r) => [r.symbol, r.exDate]),
     [
@@ -339,6 +346,91 @@ test("a compact or epoch ex-date is read as a date, and an empty one stays absen
     ],
   );
   assert.equal(calendar.undated, 1);
+  assert.deepEqual(calendar.exDateFields, ["exdate"]);
+  assert.equal(
+    calendar.rows[2].exDateFrom,
+    null,
+    "an empty string is not a date, so no key is credited with having read one",
+  );
+});
+
+/*
+ * The four below are issue #32: a live cash-dividend row was reported carrying `dividend_exdate`
+ * beside `dividend_cumdate`/`dividend_recdate`/`dividend_paydate`, and the candidate list did not
+ * hold that spelling. `exDateField` came back null, every row counted as undated, and the
+ * documented newest-first sort silently became Stockbit's row order. One row hides it — the DEWA
+ * case in the report had exactly one — so these use two.
+ */
+
+test("the reported cash-dividend spelling dividend_exdate is read, and the list sorts by it", async () => {
+  reply = (pathname) =>
+    pathname.endsWith("stock_dividend")
+      ? { data: [] }
+      : {
+          data: [
+            { symbol: "AAAA", dividend_exdate: "2026-07-08", dividend_paydate: "2026-07-31" },
+            { symbol: "BBBB", dividend_exdate: "2026-09-02", dividend_paydate: "2026-09-25" },
+          ],
+        };
+  const calendar = await getDividendCalendar();
+  assert.equal(calendar.exDateField, "dividend_exdate");
+  assert.deepEqual(calendar.exDateFields, ["dividend_exdate"]);
+  assert.equal(calendar.undated, 0, "the rows are dated, so none of them is undated");
+  assert.deepEqual(
+    calendar.rows.map((r) => [r.symbol, r.exDate, r.exDateFrom]),
+    [
+      ["BBBB", "2026-09-02", "dividend_exdate"],
+      ["AAAA", "2026-07-08", "dividend_exdate"],
+    ],
+    "newest ex-date first, which is what the tool documents and what it did not do",
+  );
+});
+
+test("a qualified ex-date beats a bare `date` on the same row", async () => {
+  // `date` is the least specific candidate and stays last for this reason: it is just as likely to
+  // be an announcement or record date. A future edit that appends a key at the wrong end fails here.
+  reply = (pathname) =>
+    pathname.endsWith("stock_dividend")
+      ? { data: [] }
+      : { data: [{ symbol: "AAAA", date: "2026-01-02", dividend_exdate: "2026-07-08" }] };
+  const calendar = await getDividendCalendar();
+  assert.equal(calendar.rows[0].exDate, "2026-07-08");
+  assert.equal(calendar.rows[0].exDateFrom, "dividend_exdate");
+});
+
+test("an EMPTY higher-precedence key falls through to a populated one", async () => {
+  // The probe tests the VALUE, not `key in row`. A future "optimisation" to a key-presence check
+  // would shadow the readable date with the empty one and this is what catches it.
+  reply = (pathname) =>
+    pathname.endsWith("stock_dividend")
+      ? { data: [] }
+      : { data: [{ symbol: "AAAA", dividend_exdate: "", ex_date: "2026-07-08" }] };
+  const calendar = await getDividendCalendar();
+  assert.equal(calendar.rows[0].exDate, "2026-07-08");
+  assert.equal(calendar.rows[0].exDateFrom, "ex_date");
+  assert.equal(calendar.undated, 0);
+});
+
+test("the two kinds may spell the ex-date differently and both are still read", async () => {
+  // The hazard the per-row probe exists for. Resolved once for the merged list, the first leg to
+  // match would pick the key for both, and the other leg would come back entirely undated while
+  // `exDateField` named a key its rows do not carry.
+  reply = (pathname) =>
+    pathname.endsWith("stock_dividend")
+      ? { data: [{ symbol: "BBBB", stock_dividend_exdate: "2026-09-01" }] }
+      : { data: [{ symbol: "AAAA", dividend_exdate: "2026-07-08" }] };
+  const calendar = await getDividendCalendar();
+  assert.equal(calendar.undated, 0, "neither leg is left undated by the other leg's spelling");
+  assert.deepEqual(
+    calendar.rows.map((r) => [r.corpactionType, r.exDate, r.exDateFrom]),
+    [
+      ["stock_dividend", "2026-09-01", "stock_dividend_exdate"],
+      ["dividend", "2026-07-08", "dividend_exdate"],
+    ],
+    "and the cross-leg sort actually happened",
+  );
+  assert.deepEqual(calendar.exDateFields, ["dividend_exdate", "stock_dividend_exdate"]);
+  assert.equal(calendar.exDateField, "dividend_exdate", "the first of them in candidate order");
 });
 
 test("an unreadable leg is visible in rowsFrom rather than merged away", async () => {

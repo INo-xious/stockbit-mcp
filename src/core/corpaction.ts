@@ -156,14 +156,35 @@ export async function getCorpactions(
 /* -------------------------------- dividend calendar -------------------------------- */
 
 /**
- * Candidate spellings for the ex-date, tried in order.
+ * Candidate spellings for the ex-date, tried in order, MOST SPECIFIC FIRST.
  *
- * These are guesses, and they are treated as guesses: whichever one is present on the rows is
- * reported back as `exDateField`, and if none is present the merged list keeps Stockbit's own order
- * and says `exDateField: null`. Nothing is dropped either way. The alternative — silently sorting by
- * a key that does not exist — produces a list that looks chronological and is not.
+ * Still guesses, and still treated as guesses — but resolved per ROW rather than once for the
+ * merged list. Whichever key produced a row's date is reported on that row as `exDateFrom`, the
+ * distinct keys used across the merge are reported as `exDateFields`, and a row no candidate
+ * matched keeps `exDate: null` and is counted in `undated`. Nothing is dropped either way. The
+ * alternative — silently sorting by a key that does not exist — produces a list that looks
+ * chronological and is not, which is exactly what this list did before `dividend_exdate` was on it.
+ *
+ * The ORDER is load-bearing at both ends. `dividend_exdate` LEADS because a cash-dividend row was
+ * reported carrying it beside `dividend_cumdate` / `dividend_recdate` / `dividend_paydate` — that
+ * came from a field report, not from a live pass by this project, and nothing here claims otherwise.
+ * `stock_dividend_exdate` is the same prefixing applied to the other leg's path segment; it is an
+ * extrapolation, so it sits BELOW `ex_date` rather than beside its evidenced sibling — an
+ * unevidenced guess must never outrank a spelling something has actually read. And `date` stays
+ * LAST because it is the least specific: a row carrying both a bare `date` and a qualified ex-date
+ * must be read from the qualified one. A candidate that matches no row is never named in
+ * `exDateFrom` or `exDateFields`, so a wrong guess costs nothing and claims nothing.
  */
-const EX_DATE_KEYS = ["ex_date", "exdate", "ex_dividend_date", "date_ex", "ex", "date"] as const;
+const EX_DATE_KEYS = [
+  "dividend_exdate",
+  "ex_date",
+  "stock_dividend_exdate",
+  "exdate",
+  "ex_dividend_date",
+  "date_ex",
+  "ex",
+  "date",
+] as const;
 
 /** The two action kinds a dividend calendar covers. They are different instruments; see below. */
 const DIVIDEND_KINDS = ["dividend", "stock_dividend"] as const;
@@ -173,13 +194,38 @@ export interface DividendRow extends Record<string, unknown> {
   corpactionType: (typeof DIVIDEND_KINDS)[number];
   /** The value the sort used, normalized to YYYY-MM-DD, or null when none was found on this row. */
   exDate: string | null;
+  /**
+   * The wire key `exDate` was read from on THIS row, null when no candidate matched it.
+   *
+   * Added by this tool, not by Stockbit — like `corpactionType` and `exDate` beside it.
+   */
+  exDateFrom: string | null;
 }
 
 export interface DividendCalendar {
   symbol?: string;
   rows: DividendRow[];
-  /** The key the ex-date sort read, or null when no candidate key was present on any row. */
+  /**
+   * The FIRST candidate key any row was read from, or null when no candidate matched any row.
+   *
+   * Unchanged in meaning: it is the earliest key in `EX_DATE_KEYS` that yielded a date anywhere in
+   * the merge, and it is null exactly when `exDateFields` is empty.
+   *
+   * The two orders are NOT the same, so this is not `exDateFields[0]`. This one is the earliest in
+   * the CANDIDATE list's order; `exDateFields` is in MERGE order, the order the rows were read in.
+   * Rows `[{ex_date: …}, {dividend_exdate: …}]` give `exDateField: "dividend_exdate"` — it leads
+   * `EX_DATE_KEYS` — beside `exDateFields: ["ex_date", "dividend_exdate"]`. Read `exDateFields`, or
+   * each row's own `exDateFrom`, to see them all.
+   */
   exDateField: string | null;
+  /**
+   * Every distinct key an `exDate` was actually read from, in merge order.
+   *
+   * Empty means nothing matched and the list is in Stockbit's own order, NOT chronological. More
+   * than one means the rows do not all use one spelling — the two kinds are fetched separately and
+   * may differ, and rows within one kind may differ too — and the list IS sorted regardless.
+   */
+  exDateFields: string[];
   /** Rows carrying no usable ex-date. They are kept, at the end of the list, never dropped. */
   undated: number;
   /** `rowsFrom` for each leg, so an unreadable payload on one kind is visible rather than silent. */
@@ -240,6 +286,26 @@ function findExDateKey(rows: Array<Record<string, unknown>>): string | null {
 }
 
 /**
+ * The first candidate key that yields a real date on THIS row, and the key it came from.
+ *
+ * Per row rather than once for the whole merge, because the merge holds two kinds fetched from two
+ * path segments and they need not spell the ex-date the same way. Resolved once for the list, the
+ * first leg to match would decide the key for both, and the other leg would come back entirely
+ * `exDate: null` — counted as undated while `exDateField` named a key those rows do not carry. That
+ * is a confident wrong provenance claim, which is worse than the null it replaces.
+ *
+ * Note it tests the VALUE, not `key in row`: an empty `dividend_exdate` must fall through to a
+ * populated `ex_date` rather than shadowing it. `asDate("")` is null, which is what makes that work.
+ */
+function pickExDate(row: Record<string, unknown>): { value: string | null; key: string | null } {
+  for (const key of EX_DATE_KEYS) {
+    const value = asDate(row[key]);
+    if (value !== null) return { value, key };
+  }
+  return { value: null, key: null };
+}
+
+/**
  * Cash dividends and stock dividends in one list, newest ex-date first.
  *
  * The two are fetched as two requests, one after the other. Sequential is not an accident: a
@@ -253,10 +319,15 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
   }
 
   const merged: DividendRow[] = legs.flatMap(({ kind, page }) =>
-    page.rows.map((row) => ({ ...row, corpactionType: kind, exDate: null as string | null })),
+    page.rows.map((row) => {
+      const { value, key } = pickExDate(row as Record<string, unknown>);
+      return { ...(row as Record<string, unknown>), corpactionType: kind, exDate: value, exDateFrom: key };
+    }),
   );
+  // `findExDateKey` over the same rows is provably the earliest of these in candidate order, and
+  // null exactly when this list is empty — so `exDateField` keeps the value it has always had.
+  const exDateFields = [...new Set(merged.flatMap((row) => (row.exDateFrom === null ? [] : [row.exDateFrom])))];
   const exDateField = findExDateKey(merged);
-  for (const row of merged) row.exDate = exDateField ? asDate(row[exDateField]) : null;
 
   // Descending: the near future and the most recent past are what a caller asks a calendar for.
   // Undated rows keep their relative order and go last rather than sorting as the epoch.
@@ -271,6 +342,7 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
     ...(legs[0].page.symbol ? { symbol: legs[0].page.symbol } : {}),
     rows: sorted,
     exDateField,
+    exDateFields,
     undated: sorted.filter((row) => row.exDate === null).length,
     rowsFrom: { dividend: legs[0].page.rowsFrom, stock_dividend: legs[1].page.rowsFrom },
   };

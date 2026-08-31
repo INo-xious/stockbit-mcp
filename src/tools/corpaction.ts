@@ -56,11 +56,15 @@ export function registerCorpactionTools(define: Definer): void {
       "Never read the merged list as cash. Every row carries `corpactionType` (`dividend` or " +
       "`stock_dividend`) saying which one it is, and that field is added by this tool, not by " +
       "Stockbit.\n" +
-      "The sort key is reported as `exDateField`: the endpoint's ex-date spelling is unverified, " +
-      "so a list of candidate keys is tried and whichever one the rows actually carry is named " +
-      "here. If it is null, no candidate was present and the rows are in Stockbit's own order, NOT " +
-      "chronological. Rows with no readable ex-date keep `exDate: null`, are counted in `undated`, " +
-      "and are placed last rather than dropped.\n" +
+      "The ex-date spelling is unverified, so a list of candidate keys is tried against EACH ROW " +
+      "and the one that produced that row's date is named on it as `exDateFrom` — added by this " +
+      "tool, not by Stockbit. `exDateFields` lists every key the merge actually read: empty means " +
+      "no candidate matched anything and the rows are in Stockbit's own order, NOT chronological; " +
+      "more than one means the rows do not all use one spelling, and the list IS sorted regardless. " +
+      "`exDateField` names the earliest of them in the order the candidates are TRIED, which is not " +
+      "the same as the first entry of `exDateFields` — that list is in the order the rows were read " +
+      "— and it is null exactly when `exDateFields` is empty. Rows with no readable ex-date keep `exDate: null` " +
+      "and `exDateFrom: null`, are counted in `undated`, and are placed last rather than dropped.\n" +
       "`limit` applies to each kind separately, so the merged list can hold up to twice it. ",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the whole market"),
