@@ -288,11 +288,24 @@ function normalizeInsiderId(input: string, field = "insider"): string {
   return value;
 }
 
-/** A 1-based page number. Rejects 0, negatives and fractions rather than sending them. */
-function normalizePage(input: number | undefined, field = "page"): number | undefined {
+/**
+ * A 1-based count, optionally with a ceiling. Rejects 0, negatives and fractions rather than
+ * sending them.
+ *
+ * The ceiling is optional because only `limit` has one, and the message says whose it is: a caller
+ * told "must be between 1 and 20" with no attribution will read 20 as an upstream fact, which is
+ * the exact reading `INSIDER_TRANSACTIONS_LIMIT_CEILING` exists to avoid making.
+ */
+function normalizePage(input: number | undefined, field = "page", max?: number): number | undefined {
   if (input === undefined) return undefined;
-  if (!Number.isInteger(input) || input < 1) {
-    throw new StockbitError("invalid_param", `${field} must be a whole number of 1 or more, got ${input}`);
+  if (!Number.isInteger(input) || input < 1 || (max !== undefined && input > max)) {
+    throw new StockbitError(
+      "invalid_param",
+      max === undefined
+        ? `${field} must be a whole number of 1 or more, got ${input}`
+        : `${field} must be a whole number between 1 and ${max} — this client's ceiling, not a ` +
+          `documented upstream maximum — got ${input}`,
+    );
   }
   return input;
 }
@@ -332,6 +345,21 @@ function normalizeWindow(
 }
 
 /* --------------------------- insider transactions --------------------------- */
+
+/**
+ * The largest `limit` this client will send. THIS CLIENT'S ceiling, not a known upstream maximum.
+ *
+ * One observation is all there is: a 2026-08-31 field report called this route for one symbol over
+ * 2024-01-01..2026-12-31 and got HTTP 400 INVALID_PARAMETER at `limit: 50`, then a 200 at
+ * `limit: 20` — the value Stockbit's own insider page sends. Nothing between 21 and 49 was tried
+ * and no narrower window was tried either, so it is not known whether 50 fails on its own. The 400
+ * named no parameter, so even "it was `limit`" rests on `limit` being the only thing that changed
+ * between the two calls. Refused here rather than spent on a round trip likely to 400.
+ *
+ * Raise it when a larger value is SEEN to answer, not before. Same rule as everything else on the
+ * evidence ladder: settling it takes a live call, not an edit.
+ */
+export const INSIDER_TRANSACTIONS_LIMIT_CEILING = 20;
 
 export interface InsiderTransactionOptions {
   /** Restrict to one IDX ticker. Omit for the market-wide feed Stockbit's insider page shows. */
@@ -393,7 +421,7 @@ export function buildInsiderTransactionParams(
 
   // Both clients always send a page; 1 is their default too.
   params.page = normalizePage(opts.page) ?? 1;
-  const limit = normalizePage(opts.limit, "limit");
+  const limit = normalizePage(opts.limit, "limit", INSIDER_TRANSACTIONS_LIMIT_CEILING);
   if (limit !== undefined) params.limit = limit;
   if (opts.actionType !== undefined) {
     params.action_type = wireEnum(opts.actionType, ACTION_PREFIX, "action_type");

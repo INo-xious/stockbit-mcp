@@ -14,6 +14,7 @@ import { clearCache } from "../src/core/_util.ts";
 import {
   INSIDER_ACTION_TYPES,
   INSIDER_SOURCE_TYPES,
+  INSIDER_TRANSACTIONS_LIMIT_CEILING,
   buildInsiderTransactionParams,
   buildShareholdingNetworkParams,
   getInsiderOwnership,
@@ -195,7 +196,7 @@ test("insider_transactions puts every supplied argument on the wire in its wire 
     dateStart: "2026-07-01",
     dateEnd: "2026-07-31",
     page: 3,
-    limit: 50,
+    limit: INSIDER_TRANSACTIONS_LIMIT_CEILING,
     actionType: "buy",
     sourceType: "idx",
   });
@@ -205,7 +206,7 @@ test("insider_transactions puts every supplied argument on the wire in its wire 
   assert.equal(q.get("date_start"), "2026-07-01");
   assert.equal(q.get("date_end"), "2026-07-31");
   assert.equal(q.get("page"), "3");
-  assert.equal(q.get("limit"), "50");
+  assert.equal(q.get("limit"), String(INSIDER_TRANSACTIONS_LIMIT_CEILING));
   // Lowercase in, prefixed enum out.
   assert.equal(q.get("action_type"), "ACTION_TYPE_BUY");
   assert.equal(q.get("source_type"), "SOURCE_TYPE_IDX");
@@ -342,6 +343,7 @@ test("a bad symbol, holder id or page never reaches the wire", async () => {
     { symbol: "BBRI", page: 0 },
     { symbol: "BBRI", page: 1.5 },
     { symbol: "BBRI", limit: -5 },
+    { symbol: "BBRI", limit: INSIDER_TRANSACTIONS_LIMIT_CEILING + 1 },
     { symbol: "BBRI", actionType: "buy; drop" },
   ]) {
     await assert.rejects(
@@ -351,6 +353,31 @@ test("a bad symbol, holder id or page never reaches the wire", async () => {
     );
   }
   assert.equal(counts.transactions ?? 0, before);
+});
+
+test("a limit over the ceiling names the parameter, the ceiling, and whose ceiling it is", async () => {
+  // The upstream 400 for `limit: 50` named no parameter at all, and the call that provoked it
+  // carried four candidates (two dates, page, limit). Spending a round trip to learn nothing is
+  // the defect; so is implying the 20 is Stockbit's when only this client has ever asserted it.
+  const before = counts.transactions ?? 0;
+  await assert.rejects(
+    () => getInsiderTransactions({ symbol: "BBRI", limit: 50 }),
+    (err: unknown) =>
+      err instanceof StockbitError &&
+      err.kind === "invalid_param" &&
+      /\blimit\b/.test(err.message) &&
+      err.message.includes(String(INSIDER_TRANSACTIONS_LIMIT_CEILING)) &&
+      /this client's ceiling/.test(err.message) &&
+      /not a documented upstream maximum/.test(err.message),
+  );
+  assert.equal(counts.transactions ?? 0, before, "a refused limit must never reach the wire");
+});
+
+test("the ceiling binds `limit` alone — `page` walks as far as the caller likes", () => {
+  // They share a validator, so the ceiling has to be passed rather than baked in: a paged feed with
+  // a capped page number would silently stop at the twentieth page of history.
+  assert.equal(buildInsiderTransactionParams({ limit: INSIDER_TRANSACTIONS_LIMIT_CEILING }).limit, 20);
+  assert.equal(buildInsiderTransactionParams({ page: 500 }).page, 500);
 });
 
 /* ---------------------------------- caching ---------------------------------- */
