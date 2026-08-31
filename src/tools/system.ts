@@ -105,6 +105,10 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       runTool(async () =>
         collectStatus({
           live: a.live === true,
+          // The staleness check. `npx` pins a version RANGE in its cache, so a user can run a build
+          // that is weeks old with nothing telling them — and this is the one command they call to
+          // find out what is wrong. Cached for a day, 2s deadline, and it cannot fail this call.
+          updateCheck: true,
           toolCount: options.toolCount,
           profileLabel: options.profileLabel,
           profileIsDefault: options.profileIsDefault,

@@ -301,6 +301,9 @@ async function cmdStatus(argv: string[]): Promise<void> {
 
   const report = await collectStatus({
     live,
+    // Same reason as the `status` tool: this is where a user looks when something is wrong, and
+    // "you are three releases behind" is often the answer.
+    updateCheck: true,
     ...(profileLabel === undefined ? {} : { profileLabel, profileIsDefault }),
     ...(missingTools === undefined ? {} : { missingTools }),
     ...(profileError === undefined ? {} : { profileError }),

@@ -1,0 +1,279 @@
+/**
+ * The staleness check — and the guarantee that it never fires unless asked.
+ *
+ * `npx -y stockbit-mcp` caches a resolved tree under a version RANGE. A cache entry holding `^1.2.2`
+ * with 1.2.2 installed is satisfied by 1.2.4, so npx reuses it and never re-resolves; the server
+ * stays on the old build indefinitely and nothing anywhere says so. In the field that cost a whole
+ * session debugging a bug that had already been fixed.
+ *
+ * Two properties are asserted here and they matter in different ways. The first is that the check
+ * ANSWERS — correctly, and conservatively when it cannot. The second is that `collectStatus` makes
+ * no request unless a caller explicitly asks, which is what keeps the offline suite offline by
+ * construction rather than by every test file remembering to stub the registry.
+ *
+ * Every `fetch` below is injected. Nothing here can reach the network even if the guard were wrong.
+ */
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const STORE = mkdtempSync(join(tmpdir(), "stockbit-updatecheck-"));
+process.env.STOCKBIT_FORCE_FILE_STORE = "1";
+process.env.STOCKBIT_STORE_DIR = STORE;
+delete process.env.STOCKBIT_NO_UPDATE_CHECK;
+
+import { test, beforeEach, after } from "node:test";
+import assert from "node:assert/strict";
+import {
+  REGISTRY_URL,
+  UPDATE_CACHE_TTL_MS,
+  checkForUpdate,
+  isNewer,
+} from "../src/updatecheck.ts";
+import { collectStatus } from "../src/status.ts";
+
+after(() => rmSync(STORE, { recursive: true, force: true }));
+
+const CACHE = join(STORE, "update-check.json");
+
+beforeEach(() => {
+  rmSync(CACHE, { force: true });
+  delete process.env.STOCKBIT_NO_UPDATE_CHECK;
+});
+
+/** A fetch that answers the registry with `version`, counting how often it was called. */
+function registry(version: string): { impl: typeof fetch; calls: () => number; urls: string[] } {
+  let calls = 0;
+  const urls: string[] = [];
+  const impl = (async (url: unknown) => {
+    calls++;
+    urls.push(String(url));
+    return new Response(JSON.stringify({ name: "stockbit-mcp", version }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  return { impl, calls: () => calls, urls };
+}
+
+/* --------------------------------- version ordering --------------------------------- */
+
+test("isNewer orders releases, and refuses to guess at anything else", () => {
+  assert.equal(isNewer("1.2.5", "1.2.4"), true);
+  assert.equal(isNewer("1.3.0", "1.2.9"), true);
+  assert.equal(isNewer("2.0.0", "1.9.9"), true);
+  assert.equal(isNewer("1.2.4", "1.2.4"), false);
+  assert.equal(isNewer("1.2.3", "1.2.4"), false, "older is not newer");
+  // Numeric, not lexicographic. "10" < "9" as text, and that would hide every release after x.9.x.
+  assert.equal(isNewer("1.10.0", "1.9.0"), true);
+  assert.equal(isNewer("1.2.10", "1.2.9"), true);
+  // Unparseable compares as "not ahead": silence beats telling a user to upgrade to a version that
+  // does not exist.
+  for (const junk of ["", "latest", "1.2", "1.2.x", "not-a-version", "1.2.3.4"]) {
+    assert.equal(isNewer(junk, "1.2.4"), false, junk);
+    assert.equal(isNewer("9.9.9", junk), false, junk);
+  }
+});
+
+test("a prerelease is never announced as an upgrade over the release it precedes", () => {
+  // This package publishes no prerelease channel. Recommending one by accident is worse than
+  // missing it, so the suffix is ignored for ordering rather than treated as ahead.
+  assert.equal(isNewer("1.2.4-beta.1", "1.2.4"), false);
+  assert.equal(isNewer("1.3.0-beta.1", "1.2.4"), true, "the CORE version is still ahead");
+  assert.equal(isNewer("v1.2.5", "1.2.4"), true, "a leading v is tolerated");
+});
+
+/* --------------------------------- asking the registry --------------------------------- */
+
+test("a newer release is reported, and the note says why npx will not pick it up", async () => {
+  const r = registry("1.9.9");
+  const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl });
+  assert.equal(status.installed, "1.2.4");
+  assert.equal(status.latest, "1.9.9");
+  assert.equal(status.isOutdated, true);
+  assert.ok(status.checkedAt);
+  assert.match(status.note, /1\.9\.9/);
+  // The actionable half: npx caching a RANGE is the reason this is needed at all.
+  assert.match(status.note, /npx/i);
+  assert.deepEqual(r.urls, [REGISTRY_URL]);
+});
+
+test("being current says so, without claiming more", async () => {
+  const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: registry("1.2.4").impl });
+  assert.equal(status.latest, "1.2.4");
+  assert.equal(status.isOutdated, false);
+});
+
+test("a check that could not run is ABSENT, never 'up to date'", async () => {
+  // The rule the whole project runs on: a field that could not be read is absent, not a default.
+  // "We could not ask" and "you are current" are different answers and only one is a fact.
+  const cases: Array<[string, typeof fetch]> = [
+    ["a 500", (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch],
+    ["a 404", (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch],
+    ["a thrown request", (async () => {
+      throw new Error("getaddrinfo ENOTFOUND registry.npmjs.org");
+    }) as unknown as typeof fetch],
+    ["a body with no version", (async () =>
+      new Response(JSON.stringify({ name: "stockbit-mcp" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch],
+    ["a body that is not JSON", (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch],
+  ];
+  for (const [what, impl] of cases) {
+    const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: impl });
+    assert.equal(status.latest, undefined, what);
+    assert.equal(status.isOutdated, undefined, `${what}: absent, not false`);
+    assert.equal(status.checkedAt, undefined, what);
+    assert.equal(status.installed, "1.2.4", what);
+    assert.ok(status.note.length > 0, what);
+  }
+});
+
+test("a failure note quotes no URL and no error text", async () => {
+  // A fetch failure quotes the URL it was given, and a note is not the place to widen what this
+  // server is willing to write down.
+  const impl = (async () => {
+    throw new Error("request to https://registry.npmjs.org/stockbit-mcp/latest failed, token=abc123");
+  }) as unknown as typeof fetch;
+  const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: impl });
+  assert.doesNotMatch(status.note, /https?:\/\//);
+  assert.doesNotMatch(status.note, /abc123/);
+});
+
+test("the check never throws, whatever fetch does", async () => {
+  const hostile = [
+    (async () => {
+      throw new Error("boom");
+    }) as unknown as typeof fetch,
+    (() => {
+      throw new Error("threw synchronously");
+    }) as unknown as typeof fetch,
+    (async () => ({ ok: true, json: async () => { throw new Error("bad json"); } })) as unknown as typeof fetch,
+  ];
+  for (const impl of hostile) {
+    const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: impl });
+    assert.equal(status.installed, "1.2.4");
+    assert.equal(status.latest, undefined);
+  }
+});
+
+/* ------------------------------------- the kill switch ------------------------------------- */
+
+test("STOCKBIT_NO_UPDATE_CHECK=1 makes no request at all", async () => {
+  process.env.STOCKBIT_NO_UPDATE_CHECK = "1";
+  const r = registry("9.9.9");
+  const status = await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl });
+  assert.equal(r.calls(), 0, "the switch must prevent the request, not just the report");
+  assert.equal(status.latest, undefined);
+  assert.match(status.note, /STOCKBIT_NO_UPDATE_CHECK/);
+});
+
+/* ---------------------------------------- the cache ---------------------------------------- */
+
+test("a second check inside the TTL is served from cache", async () => {
+  const r = registry("1.9.9");
+  const at = new Date("2026-09-01T00:00:00Z");
+  const first = await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl, now: at });
+  assert.equal(r.calls(), 1);
+  const second = await checkForUpdate({
+    installed: "1.2.4",
+    fetchImpl: r.impl,
+    now: new Date(at.getTime() + UPDATE_CACHE_TTL_MS - 1000),
+  });
+  assert.equal(r.calls(), 1, "still one request");
+  assert.equal(second.latest, first.latest);
+  assert.equal(second.isOutdated, true);
+  assert.match(second.note, /cached/);
+});
+
+test("an expired cache is refetched, and `force` skips it entirely", async () => {
+  const r = registry("1.9.9");
+  const at = new Date("2026-09-01T00:00:00Z");
+  await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl, now: at });
+  await checkForUpdate({
+    installed: "1.2.4",
+    fetchImpl: r.impl,
+    now: new Date(at.getTime() + UPDATE_CACHE_TTL_MS + 1000),
+  });
+  assert.equal(r.calls(), 2, "past the TTL it must ask again");
+  await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl, force: true });
+  assert.equal(r.calls(), 3);
+});
+
+test("a corrupt or forward-dated cache is ignored rather than trusted", async () => {
+  mkdirSync(STORE, { recursive: true });
+  const r = registry("1.9.9");
+  for (const bad of ["{not json", JSON.stringify({ latest: 5 }), JSON.stringify({ latest: "1.9.9" })]) {
+    writeFileSync(CACHE, bad, "utf8");
+    const before = r.calls();
+    await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl });
+    assert.equal(r.calls(), before + 1, `must refetch past: ${bad.slice(0, 24)}`);
+  }
+  // A stamp in the future means a clock moved, not a reading that stays fresh forever.
+  writeFileSync(
+    CACHE,
+    JSON.stringify({ latest: "1.9.9", checkedAt: new Date("2030-01-01T00:00:00Z").toISOString() }),
+    "utf8",
+  );
+  const before = r.calls();
+  await checkForUpdate({ installed: "1.2.4", fetchImpl: r.impl, now: new Date("2026-09-01T00:00:00Z") });
+  assert.equal(r.calls(), before + 1);
+});
+
+/* ------------------------- the offline guarantee, on collectStatus ------------------------- */
+
+test("collectStatus makes NO update request unless the caller asks", async () => {
+  // This is what keeps the whole offline suite offline. If the check fired merely because a status
+  // report was assembled, every test that touches status would reach for the network.
+  const real = globalThis.fetch;
+  let called = 0;
+  globalThis.fetch = (async () => {
+    called++;
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const report = await collectStatus();
+    assert.equal(called, 0, "collectStatus() must not reach the registry on its own");
+    assert.equal(report.server.update, undefined, "and must not report an update field it never got");
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test("collectStatus reports the update when asked, and warns only when behind", async () => {
+  const behind = await collectStatus({
+    checkUpdate: async () => ({
+      installed: "1.2.4",
+      latest: "1.9.9",
+      isOutdated: true,
+      checkedAt: "2026-09-01T00:00:00.000Z",
+      note: "A newer release exists: 1.9.9",
+    }),
+  });
+  assert.equal(behind.server.update?.latest, "1.9.9");
+  assert.ok(
+    behind.checks.some((c) => c.name === "version" && c.status === "warn"),
+    "being behind must surface as a check, since that is what the human-readable output prints",
+  );
+
+  const current = await collectStatus({
+    checkUpdate: async () => ({ installed: "1.2.4", latest: "1.2.4", isOutdated: false, note: "Up to date" }),
+  });
+  assert.equal(current.server.update?.isOutdated, false);
+  assert.equal(
+    current.checks.some((c) => c.name === "version"),
+    false,
+    "an up-to-date install is not worth a check line on every run",
+  );
+});
+
+test("an update check that throws cannot fail the status report", async () => {
+  const report = await collectStatus({
+    checkUpdate: async () => {
+      throw new Error("registry exploded");
+    },
+  });
+  assert.equal(report.server.update?.latest, undefined);
+  assert.ok(report.server.version, "the rest of the report is unaffected");
+});

@@ -46,6 +46,7 @@ import { describeRemember } from "./trading/remember.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
 import { VERSION } from "./version.js";
+import { checkForUpdate, type UpdateStatus } from "./updatecheck.js";
 
 export interface SlotStatus {
   stored: boolean;
@@ -98,6 +99,14 @@ export interface StatusReport {
     platform: string;
     toolProfile: string;
     toolCount?: number;
+    /**
+     * Whether a newer release exists — present only when the caller asked for the check.
+     *
+     * `npx` caches a resolved tree under a version RANGE, so a user can sit on a stale build for
+     * weeks with nothing anywhere saying so. `latest` is ABSENT when the check could not run, and
+     * `isOutdated` with it: "we could not ask" and "you are current" are different answers.
+     */
+    update?: UpdateStatus;
   };
   auth: Record<StoreSlot, SlotStatus>;
   login: LoginStatus;
@@ -163,6 +172,18 @@ export interface StatusReport {
 export interface CollectStatusOptions {
   /** Also refresh the market-data token to prove it works. One request. */
   live?: boolean;
+  /**
+   * Also ask npm whether a newer release exists. One request, cached for a day.
+   *
+   * Explicit for the same reason `live` is: this function is called from tests and from library
+   * code, and network work that happens merely because a status report was assembled is network
+   * work nobody asked for. The user-facing callers — the `status` tool and `stockbit-auth status` —
+   * pass it; nothing else does, so the offline suite stays offline by construction rather than by
+   * a stub remembering to catch it.
+   */
+  updateCheck?: boolean;
+  /** Injected so the update check is testable without the network. Implies `updateCheck`. */
+  checkUpdate?: typeof checkForUpdate;
   /** Injectable so the session clock is testable. */
   now?: Date;
   /** How many tools this server registered. */
@@ -670,6 +691,26 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
+  // Whether a newer release exists. Only when asked, for the reason `live` is only when asked.
+  //
+  // `npx` caches a resolved tree under a version RANGE, so `^1.2.2` with 1.2.2 installed is
+  // satisfied by 1.2.4 and never re-resolves — a user can sit on a stale build for weeks with
+  // nothing anywhere saying so. That is what this answers.
+  //
+  // It cannot fail a status call: `checkForUpdate` has no throwing path, and the `catch` is belt to
+  // that brace. A check that could not run leaves `latest` absent rather than claiming "current".
+  let update: UpdateStatus | undefined;
+  if (options.updateCheck || options.checkUpdate) {
+    try {
+      update = await (options.checkUpdate ?? checkForUpdate)({ installed: VERSION, now: options.now });
+    } catch {
+      update = { installed: VERSION, note: "Update check did not complete." };
+    }
+    if (update.isOutdated) {
+      checks.push({ name: "version", status: "warn", detail: update.note });
+    }
+  }
+
   let dir = "(unknown)";
   try {
     dir = stockbitDir();
@@ -689,6 +730,7 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
       toolProfile: options.profileError ? "unparsable" : (options.profileLabel ?? "all"),
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
+      ...(update === undefined ? {} : { update }),
     },
     auth,
     login: loginStatus(),
@@ -854,7 +896,10 @@ export function formatStatus(report: StatusReport): string {
   };
 
   const lines = [
-    `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
+    `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})` +
+      // Only when it is actually behind. "Up to date" on the headline is noise on every run that
+      // was fine, and the whole point is the one run that is not.
+      (report.server.update?.isOutdated ? ` — ${report.server.update.latest} is available` : ""),
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${describeBrowserPin(report.store)}`,
     `Last login       ${describeLoginAge(report.store)}`,
