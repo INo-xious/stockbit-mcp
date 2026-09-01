@@ -585,8 +585,10 @@ function collectWarnings(
 
   if (firstTradeableIndex < 0) {
     out.push(
-      "No bar in this window could satisfy the strategy's conditions — there is not enough history " +
-        "for its indicators. Nothing was traded and every metric below is vacuous.",
+      "No bar in this window could satisfy the strategy's conditions, so nothing was traded and " +
+        "every metric below is vacuous. Either there is not enough history for its indicators — " +
+        "widen the window — or the strategy references a field the series does not carry, such as " +
+        "volume on a response that omitted it, which no amount of extra history will settle.",
     );
     return out;
   }

@@ -31,6 +31,15 @@ export function registerBrokerTools(define: Definer): void {
       "One page covers the whole exchange at the default limit of 150, so call it once and reuse " +
       "the mapping; it is cached for five minutes and the membership list changes only when a " +
       "house is licensed or renamed.\n" +
+      "`codes: [\"AK\",\"XL\"]` returns just those houses, for when you are resolving a handful of " +
+      "codes out of a broker_summary rather than building a table. The filter is applied HERE, to " +
+      "the cached directory, not by the exchange — so it costs no extra request, and asking for " +
+      "two codes and asking for all 112 are the same one fetch. `filteredTo` echoes what you " +
+      "asked for and `notFound` lists any code no row ON THAT PAGE carried, so a missing house " +
+      "is stated rather than left as a shorter list you have to notice. `notFound` is not proof " +
+      "the exchange has no such broker: with a narrowed `page`/`limit` it can simply be on " +
+      "another page, and a row whose key names this projection does not recognise lands there " +
+      "too — that is what `unmapped` counts.\n" +
       "Each entry carries `code` and `name` where a recognised key held them, " +
       "`readFrom` naming the wire key each was read from, and `row` with the entire raw row. If " +
       "`code` is undefined the projection did not recognise this row's key names — read `row` " +
@@ -42,9 +51,13 @@ export function registerBrokerTools(define: Definer): void {
     {
       page: z.coerce.number().optional().describe("1-based page (default 1)"),
       limit: z.coerce.number().optional().describe("Rows per page (default 150, which covers IDX in one page)"),
+      codes: z
+        .array(z.string())
+        .optional()
+        .describe('Keep only these broker codes, e.g. ["AK","XL"]. Filtered locally; omit for the whole directory.'),
     },
     async (a) =>
-      runTool(() => brokers.getBrokerDirectory({ page: a.page, limit: a.limit })),
+      runTool(() => brokers.getBrokerDirectory({ page: a.page, limit: a.limit, codes: a.codes })),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
     // field this tool names was read out of that response. Opts out of the family default.
     { evidence: "observed" },
@@ -176,7 +189,10 @@ export function registerBrokerTools(define: Definer): void {
       "the question cannot be asked — that side is empty, or none of its figures could be read.\n" +
       "`unreadable.buyers` / `.sellers` count listed brokers left out of that side's totals, so " +
       "`buyers: 1` against `buyersListed: 16` means every buy figure covers 15 brokers.\n" +
-      "Broker codes come back bare; the `brokers` tool turns them into names.\n" +
+      "Broker codes come back bare unless you pass `resolve_names: true`, which adds each house as " +
+      "`name` on the two lists by joining against the cached `brokers` directory. Best-effort: if " +
+      "the directory cannot be read every figure is unchanged and `names.note` says why, and a " +
+      "code the directory does not carry simply has no `name`.\n" +
       "DATES: omit from/to for the latest session, or supply BOTH (YYYY-MM-DD). A half-specified " +
       "range is rejected because the API would silently answer with the latest session instead.",
     {
@@ -219,10 +235,14 @@ export function registerBrokerTools(define: Definer): void {
             "negotiated blocks and can be several times larger.",
         ),
       investor_type: z.enum(INVESTOR_TYPES).optional().describe("Default ALL"),
+      resolve_names: z
+        .boolean()
+        .optional()
+        .describe("Add each broker's securities house as `name`, joined from the cached directory."),
     },
     async (a) =>
-      runTool(() =>
-        brokers.getBandarDetector({
+      runTool(async () => {
+        const reading = await brokers.getBandarDetector({
           symbol: a.symbol as string,
           top: a.top,
           limit: a.limit as number | undefined,
@@ -236,11 +256,31 @@ export function registerBrokerTools(define: Definer): void {
           date_to: a.date_to,
           start_date: a.start_date,
           end_date: a.end_date,
-        }),
-      ),
-    // Opts out of this scope's `projected` default. It issues no request of its own — it computes
-    // entirely on `getBrokerSummary`, whose route IS observed and whose response is the fixture
-    // committed at test/fixtures/broker_summary_BBRI.json.
+        });
+        if (!a.resolve_names) return reading;
+        // Only the two lists that are returned. `getBandarDetector` already slices them off a
+        // sorted copy, so these are this call's own arrays and no cache entry is touched.
+        // Both lists through ONE directory read — see `withBrokerNamesAll`.
+        const [accumulators, distributors] = await brokers.withBrokerNamesAll([
+          reading.topAccumulators,
+          reading.topDistributors,
+        ]);
+        const note = accumulators.resolution.note ?? distributors.resolution.note;
+        return {
+          ...reading,
+          topAccumulators: accumulators.rows,
+          topDistributors: distributors.rows,
+          names: {
+            resolved: accumulators.resolution.resolved && distributors.resolution.resolved,
+            ...(note ? { note } : {}),
+          },
+        };
+      }),
+    // Opts out of this scope's `projected` default. It computes entirely on `getBrokerSummary`,
+    // whose route IS observed and whose response is the fixture committed at
+    // test/fixtures/broker_summary_BBRI.json. `resolve_names` adds the only request it can make on
+    // its own, to the broker directory — also observed, and `brokers` above declares it so. The
+    // declaration therefore still covers every route this tool can touch.
     { evidence: "observed" },
   );
 }

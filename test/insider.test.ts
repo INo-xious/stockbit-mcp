@@ -14,6 +14,7 @@ import { clearCache } from "../src/core/_util.ts";
 import {
   INSIDER_ACTION_TYPES,
   INSIDER_SOURCE_TYPES,
+  INSIDER_TRANSACTIONS_LIMIT_CEILING,
   buildInsiderTransactionParams,
   buildShareholdingNetworkParams,
   getInsiderOwnership,
@@ -24,6 +25,7 @@ import {
   getShareholdingNetwork,
 } from "../src/core/insider.ts";
 import { StockbitError } from "../src/http/errors.ts";
+import { buildUrl } from "../src/http/transport.ts";
 
 function farFutureJwt(): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -64,6 +66,16 @@ const SPARSE_ROW = {
   data_source: {},
 };
 
+/**
+ * Ticker → Stockbit's internal numeric company id, as `emitten/{symbol}/info` carries it.
+ *
+ * BBRI is "59" to agree with `test/company.test.ts`, which reads the same wire field off the same
+ * route. The others are placeholders and are only ever compared against themselves — an id
+ * invented here and then asserted as real elsewhere is how a fixture starts teaching the wrong
+ * thing. (`460` on the shareholding RESPONSE below is that payload's own id, a different field.)
+ */
+const COMPANY_IDS: Record<string, string> = { BBRI: "59", BBCA: "1001", BMRI: "1002", TLKM: "1003" };
+
 const realFetch = globalThis.fetch;
 const seenUrls: string[] = [];
 /** Per-route request counts, so a test can prove a cache hit rather than infer it. */
@@ -98,6 +110,18 @@ before(() => {
     seenUrls.push(u);
     if (u.includes("/login/refresh")) {
       return json({ data: { access_token: farFutureJwt() } });
+    }
+    // The ticker → company-id lookup that `shareholding(mode=companies)` now makes first.
+    // Answered ahead of the `nextBody` override on purpose: a test that stages a register body is
+    // staging it for the REGISTER, and having the lookup eat it would make every such test a
+    // no-op that still passed.
+    if (u.includes("/emitten/") && u.includes("/info")) {
+      bump("info");
+      const symbol = new URL(u).pathname.split("/")[2] ?? "";
+      if (symbol === "NOID") return json({ data: { symbol } });
+      // A wire null. `z.coerce.string()` turns it into the STRING "null", which is truthy.
+      if (symbol === "NULLID") return json({ data: { id: null, symbol } });
+      return json({ data: { id: COMPANY_IDS[symbol] ?? "460", symbol, name: `${symbol} Tbk` } });
     }
     const routes: Array<[string, string]> = [
       ["/insider/company/majorholder", "transactions"],
@@ -195,7 +219,7 @@ test("insider_transactions puts every supplied argument on the wire in its wire 
     dateStart: "2026-07-01",
     dateEnd: "2026-07-31",
     page: 3,
-    limit: 50,
+    limit: INSIDER_TRANSACTIONS_LIMIT_CEILING,
     actionType: "buy",
     sourceType: "idx",
   });
@@ -205,7 +229,7 @@ test("insider_transactions puts every supplied argument on the wire in its wire 
   assert.equal(q.get("date_start"), "2026-07-01");
   assert.equal(q.get("date_end"), "2026-07-31");
   assert.equal(q.get("page"), "3");
-  assert.equal(q.get("limit"), "50");
+  assert.equal(q.get("limit"), String(INSIDER_TRANSACTIONS_LIMIT_CEILING));
   // Lowercase in, prefixed enum out.
   assert.equal(q.get("action_type"), "ACTION_TYPE_BUY");
   assert.equal(q.get("source_type"), "SOURCE_TYPE_IDX");
@@ -342,6 +366,7 @@ test("a bad symbol, holder id or page never reaches the wire", async () => {
     { symbol: "BBRI", page: 0 },
     { symbol: "BBRI", page: 1.5 },
     { symbol: "BBRI", limit: -5 },
+    { symbol: "BBRI", limit: INSIDER_TRANSACTIONS_LIMIT_CEILING + 1 },
     { symbol: "BBRI", actionType: "buy; drop" },
   ]) {
     await assert.rejects(
@@ -351,6 +376,31 @@ test("a bad symbol, holder id or page never reaches the wire", async () => {
     );
   }
   assert.equal(counts.transactions ?? 0, before);
+});
+
+test("a limit over the ceiling names the parameter, the ceiling, and whose ceiling it is", async () => {
+  // The upstream 400 for `limit: 50` named no parameter at all, and the call that provoked it
+  // carried four candidates (two dates, page, limit). Spending a round trip to learn nothing is
+  // the defect; so is implying the 20 is Stockbit's when only this client has ever asserted it.
+  const before = counts.transactions ?? 0;
+  await assert.rejects(
+    () => getInsiderTransactions({ symbol: "BBRI", limit: 50 }),
+    (err: unknown) =>
+      err instanceof StockbitError &&
+      err.kind === "invalid_param" &&
+      /\blimit\b/.test(err.message) &&
+      err.message.includes(String(INSIDER_TRANSACTIONS_LIMIT_CEILING)) &&
+      /this client's ceiling/.test(err.message) &&
+      /not a documented upstream maximum/.test(err.message),
+  );
+  assert.equal(counts.transactions ?? 0, before, "a refused limit must never reach the wire");
+});
+
+test("the ceiling binds `limit` alone — `page` walks as far as the caller likes", () => {
+  // They share a validator, so the ceiling has to be passed rather than baked in: a paged feed with
+  // a capped page number would silently stop at the twentieth page of history.
+  assert.equal(buildInsiderTransactionParams({ limit: INSIDER_TRANSACTIONS_LIMIT_CEILING }).limit, 20);
+  assert.equal(buildInsiderTransactionParams({ page: 500 }).page, 500);
 });
 
 /* ---------------------------------- caching ---------------------------------- */
@@ -425,18 +475,67 @@ test("insider_ownership rejects a malformed holder id before the wire", async ()
 
 /* -------------------------------- shareholding -------------------------------- */
 
-test("shareholding companies asks for the symbol as a path segment", async () => {
+test("shareholding companies asks for the COMPANY ID as a path segment, not the ticker", async () => {
   const result = await getShareholdingCompanies("bbri");
   const url = lastUrl("/insider/shareholding/companies/");
-  assert.equal(url.pathname, "/insider/shareholding/companies/BBRI");
+  // The ticker in this segment is what answered `400 Invalid company id`. It must not come back:
+  // `normalizeSymbol` accepted "460" quite happily, so only the URL proves which one was sent.
+  assert.equal(url.pathname, "/insider/shareholding/companies/59");
   assert.equal(url.search, "");
   assert.equal(result.mode, "companies");
+  // The caller asked in tickers and is answered in tickers; the id it resolved to is named beside.
   assert.equal(result.subject, "BBRI");
+  assert.equal(result.companyId, "59");
   assert.equal(result.entriesFrom, "holders");
   assert.equal(result.entryCount, 1);
   // The payload is returned whole rather than projected.
   const data = result.data as Record<string, unknown>;
   assert.equal(data.report_date, "2026-07-31");
+});
+
+test("shareholding companies refuses a ticker with no company id instead of sending one upstream", async () => {
+  await assert.rejects(
+    () => getShareholdingCompanies("NOID"),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "not_found");
+      // The message has to say WHY a ticker was not enough, or the caller retries the same call.
+      assert.match(error.message, /company id/i);
+      assert.match(error.message, /NOID/);
+      return true;
+    },
+  );
+  // Nothing was sent to the register: the refusal happens before the request is built.
+  assert.ok(!seenUrls.some((u) => u.includes("/insider/shareholding/companies/NOID")));
+});
+
+test("an id that came back null is refused too, and does not reach the URL as \"null\"", async () => {
+  // The quote row reads its id through `z.coerce.string()`, and String(null) is "null" — a
+  // four-character truthy string. A presence check alone would send /companies/null and get an
+  // error about a malformed id, hiding the real answer: Stockbit has no id for this ticker.
+  await assert.rejects(
+    () => getShareholdingCompanies("NULLID"),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "not_found");
+      assert.match(error.message, /has no company id/);
+      return true;
+    },
+  );
+  assert.ok(!seenUrls.some((u) => u.includes("/companies/null")), "\"null\" never reached the wire");
+});
+
+test("the register path refuses a ticker outright, so a regression cannot reach the wire", () => {
+  // The segment is validated as a numeric id now. This is the guard that makes the fix structural
+  // rather than a convention the next caller has to remember.
+  assert.throws(
+    () => buildUrl("shareholdingCompanies", { companyId: "BBRI" }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      return true;
+    },
+  );
 });
 
 test("shareholding reports which key the holdings arrived under", async () => {

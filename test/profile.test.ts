@@ -182,3 +182,36 @@ test("under the DEFAULT profile the same message does not blame a variable nobod
   assert.doesNotMatch(text, /disabled by STOCKBIT_TOOLS/, "nobody set STOCKBIT_TOOLS");
   assert.match(text, /STOCKBIT_TOOLS=core,pine/, "and it must give the exact value that fixes it");
 });
+
+test("withheldFamilies names the families with NOTHING registered, and only those", () => {
+  const core = describeSurface(parseToolProfile("core"), true);
+  const withheld = new Set(core.withheldFamilies);
+
+  // The property, stated directly rather than as a fixed list: a family is withheld exactly when it
+  // lost at least one tool and kept none.
+  const kept = new Set(core.tools.map((t) => t.family));
+  const lost = new Set(ALL.tools.filter((t) => !core.tools.some((c) => c.name === t.name)).map((t) => t.family));
+  assert.deepEqual([...withheld].sort(), [...lost].filter((f) => !kept.has(f)).sort());
+
+  // The case that made this necessary, and the case that would make it lie.
+  assert.ok(withheld.has("chartbit"), "core registers none of chartbit's tools");
+  assert.equal(
+    withheld.has("trading"),
+    false,
+    "core keeps five trading tools, so telling a user to add `trading` would add nothing",
+  );
+
+  assert.deepEqual(ALL.withheldFamilies, [], "the unfiltered surface withholds nothing");
+
+  // The remaining half of the property — that a family which registers NOTHING is never named — is
+  // pinned in test/tools.test.ts ("a family that registers nothing at all is never named as
+  // withheld"), not here. It cannot be tested against the real surface: every one of the seventeen
+  // families has at least one tool today, so the derivation this repo uses and the FAMILIES-minus-
+  // present one it rejects agree on every profile, and an assertion written here would iterate over
+  // an empty list and pin nothing.
+  assert.equal(
+    FAMILIES.filter((f) => !ALL.tools.some((t) => t.family === f)).length,
+    0,
+    "if this ever fails, a family has no tools and the note above needs revisiting",
+  );
+});

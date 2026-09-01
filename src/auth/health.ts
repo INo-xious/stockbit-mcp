@@ -180,14 +180,44 @@ export function slotHealthState(
   const entry = journal[slot];
   if (!entry) return "unknown";
   const fingerprint = tokenFingerprint(token);
-  const failure = entry.lastFailure;
-  const ok = entry.lastOk;
+  // BOTH sides are filtered, not just the failure. Comparing a matching failure against an
+  // unfiltered `lastOk` meant a success belonging to a DIFFERENT credential could out-date this
+  // token's own rejection and demote it to `unknown` — which is how `status` came to print
+  // `health: "unknown"` beside `lastRefresh: {ok: false, status: 401}`, two fields disagreeing
+  // about one credential. Every rung here answers "what is recorded about THIS token".
+  const failure = entry.lastFailure?.token === fingerprint ? entry.lastFailure : undefined;
+  const ok = entry.lastOk?.token === fingerprint ? entry.lastOk : undefined;
 
-  const failedAfterSuccess =
-    failure && (!ok || Date.parse(failure.at) >= Date.parse(ok.at));
-  if (failedAfterSuccess && failure!.token === fingerprint) return "failing";
-  if (ok && ok.token === fingerprint) return "ok";
+  if (failure && (!ok || Date.parse(failure.at) >= Date.parse(ok.at))) return "failing";
+  if (ok) return "ok";
   return "unknown";
+}
+
+/**
+ * The recorded event that explains a slot's state **for one particular token**, so a report can
+ * quote a time without changing the subject.
+ *
+ * `slotHealthState` is fingerprint-filtered and `lastEventFor` is not, so a caller pairing them
+ * described two different credentials in one breath: `status` reported a verdict about the token
+ * in the store beside a timestamp and an HTTP status belonging to the one it replaced. Observed as
+ * `health: "failing"` with a `lastRefresh` 32 minutes older than the credential it named.
+ *
+ * `lastEventFor` keeps its unfiltered meaning — the web session has no token to filter by, and the
+ * journal itself is the record surface — so this is an addition rather than a signature change.
+ */
+export function lastEventForToken(
+  slot: HealthKey,
+  token: string | null,
+  journal: HealthJournal = readHealthJournal(),
+): RefreshRecord | null {
+  if (!token) return null;
+  const entry = journal[slot];
+  if (!entry) return null;
+  const fingerprint = tokenFingerprint(token);
+  const ok = entry.lastOk?.token === fingerprint ? entry.lastOk : undefined;
+  const failure = entry.lastFailure?.token === fingerprint ? entry.lastFailure : undefined;
+  if (ok && failure) return Date.parse(failure.at) >= Date.parse(ok.at) ? failure : ok;
+  return failure ?? ok ?? null;
 }
 
 /** The recorded event that explains a slot's state, so `status` can quote a time. */

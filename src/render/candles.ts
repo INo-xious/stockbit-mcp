@@ -38,6 +38,25 @@ export type Annotation =
   | { kind: "trend"; fromDate: string; fromPrice: number; toDate: string; toPrice: number; label?: string; color?: string }
   | { kind: "marker"; date: string; price?: number; label: string; color?: string; above?: boolean };
 
+/**
+ * The bars that actually reach the plot: a non-finite close cannot be positioned.
+ *
+ * Exported alongside `barIndexOn` because anything that REPORTS what was drawn has to ask the same
+ * two questions the drawing asks, of the same array. A caller filtering `opts.bars` while this
+ * filters something else is how a count starts disagreeing with the picture it describes.
+ */
+export function plottedBars(bars: Bar[]): Bar[] {
+  return bars.filter((b) => Number.isFinite(b.close));
+}
+
+/**
+ * The bar a dated annotation lands on — the first on or after `date` — or -1 when the series ends
+ * before it. A date before the first bar snaps to bar 0; only a date past the last one has no home.
+ */
+export function barIndexOn(bars: Bar[], date: string): number {
+  return bars.findIndex((b) => b.date >= date);
+}
+
 export interface SubPanel {
   /** Panel heading, e.g. "RSI(14)". */
   label: string;
@@ -96,7 +115,7 @@ export function renderCandles(opts: CandleChartOptions): string {
   const PAD_R = 74; // price axis lives here
   const HEADER = 74;
   const FOOTER = 40;
-  const bars = opts.bars.filter((b) => Number.isFinite(b.close));
+  const bars = plottedBars(opts.bars);
   const title = opts.title ?? `${opts.symbol} — daily`;
 
   if (bars.length === 0) {
@@ -132,6 +151,18 @@ export function renderCandles(opts: CandleChartOptions): string {
     if (a.kind === "level") { lo = Math.min(lo, a.price); hi = Math.max(hi, a.price); }
     if (a.kind === "zone") { lo = Math.min(lo, a.from, a.to); hi = Math.max(hi, a.from, a.to); }
     if (a.kind === "trend") { lo = Math.min(lo, a.fromPrice, a.toPrice); hi = Math.max(hi, a.fromPrice, a.toPrice); }
+    // Only when it is PRESENT: a marker without a price anchors to its own bar's high or low, which
+    // the bar loop above already covers. With one, it is a coordinate like any other — left out, a
+    // marker priced above every high was positioned against a scale that did not know about it and
+    // its arrow was emitted at a negative y, off the canvas, while the summary said it was drawn.
+    // And only when it is DRAWN, which is the same `barIndexOn` test the marker loop below uses: a
+    // marker dated past the last session draws nothing, so widening the scale to reach its price
+    // would shrink every candle for a triangle that is not on the chart. `trend` above is left as
+    // it is on purpose: `src/tools/register.ts` states that tradeoff where it hands one over.
+    if (a.kind === "marker" && a.price !== undefined && barIndexOn(bars, a.date) >= 0) {
+      lo = Math.min(lo, a.price);
+      hi = Math.max(hi, a.price);
+    }
   }
   for (const o of opts.overlays ?? []) {
     for (const v of o.series) if (v !== null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
@@ -228,8 +259,8 @@ export function renderCandles(opts: CandleChartOptions): string {
       );
     }
     if (a.kind === "trend") {
-      const i1 = bars.findIndex((b) => b.date >= a.fromDate);
-      const i2 = bars.findIndex((b) => b.date >= a.toDate);
+      const i1 = barIndexOn(bars, a.fromDate);
+      const i2 = barIndexOn(bars, a.toDate);
       if (i1 >= 0 && i2 >= 0) {
         const c = a.color ?? th.asing;
         parts.push(
@@ -243,7 +274,7 @@ export function renderCandles(opts: CandleChartOptions): string {
       }
     }
     if (a.kind === "marker") {
-      const i = bars.findIndex((b) => b.date >= a.date);
+      const i = barIndexOn(bars, a.date);
       if (i >= 0) {
         const b = bars[i];
         const c = a.color ?? th.title;
@@ -265,16 +296,36 @@ export function renderCandles(opts: CandleChartOptions): string {
   let cursor = priceTop + priceH;
   if (volH) {
     cursor += GAP;
-    const maxVol = Math.max(1, ...bars.map((b) => b.volume));
+    // A session whose volume the response did not carry draws NO bar. A null here used to be a
+    // zero, which drew a full-width bar of minimum height that reads as "nothing traded" — a claim
+    // about the session rather than about the payload — and `humanAmount(null)` printed "- lots"
+    // into its tooltip. (`Math.max` over a null is NOT the problem: `Math.max(1, null)` is 1.)
+    const volumes = bars.map((b) => b.volume).filter((v): v is number => v !== null);
+    const maxVol = Math.max(1, ...volumes);
     for (let i = 0; i < n; i++) {
       const b = bars[i];
+      if (b.volume === null) continue;
       const h = (b.volume / maxVol) * volH;
       parts.push(
         `<rect x="${(xOf(i) - bodyW / 2).toFixed(1)}" y="${(cursor + volH - h).toFixed(1)}" width="${bodyW.toFixed(1)}" height="${Math.max(0.5, h).toFixed(1)}" fill="${b.close >= b.open ? up : down}" fill-opacity="0.55"><title>${esc(b.date)}: ${esc(humanAmount(b.volume))} lots</title></rect>`,
       );
     }
+    // The label states what it actually knows. With no readable session there is no peak — the
+    // `Math.max(1, …)` floor would otherwise print "peak 1 lots", a figure from nowhere — and where
+    // some sessions are unreadable the gaps in the panel are explained rather than left to read as
+    // sessions that traded nothing.
+    const unread = n - volumes.length;
+    const peak = volumes.length === 0 ? null : Math.max(...volumes);
+    const caption =
+      peak === null
+        ? "Volume  ·  not carried by this response"
+        // `peak` is the real maximum, NOT `maxVol` — that carries a `Math.max(1, …)` floor so the
+        // bar heights never divide by zero, and printing it for an all-zero window would report a
+        // peak of 1 lot that nobody sent.
+        : `Volume  ·  peak ${humanAmount(peak)} lots` +
+          (unread > 0 ? `  ·  ${unread} session${unread === 1 ? "" : "s"} not carried` : "");
     parts.push(
-      `<text x="${PAD_L}" y="${(cursor + 10).toFixed(1)}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}">Volume  ·  peak ${esc(humanAmount(maxVol))} lots</text>`,
+      `<text x="${PAD_L}" y="${(cursor + 10).toFixed(1)}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="${th.muted}">${esc(caption)}</text>`,
     );
     cursor += volH;
   }

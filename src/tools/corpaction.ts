@@ -25,10 +25,27 @@ export function registerCorpactionTools(define: Definer): void {
       "shares, splits, reverse splits, tender offers, warrants, public expose, IPOs, or the " +
       "economic-events calendar.\n" +
       "Pass `symbol` for one issuer's history of that action, or omit it for the market-wide list. " +
-      "An empty `rows` with `rowsFrom: \"data\"` is a real answer: this issuer has never had that " +
-      "action. `action_type` is a closed list and an unknown one is rejected here rather than sent, " +
+      "An empty `rows` with `rowsFrom: \"data\"` is a real answer, but it means NONE IN THE PERIOD " +
+      "THIS FEED COVERS — nothing in the response says where that period starts, so an empty page " +
+      "is 'none on record here' and is NOT evidence the issuer never did it. " +
+      "`action_type` is a closed list and an unknown one is rejected here rather than sent, " +
       "because the endpoint answers an unknown kind with an empty page that reads like a quiet " +
       "calendar.\n" +
+      "`warrant` is a corporate action on the ISSUER's own share count. A structured call warrant — " +
+      "the separately listed instrument a securities house issues against a stock under its own " +
+      "ticker — is not one, and nothing here ties such a ticker back to its underlying. An empty " +
+      "`warrant` list therefore answers for the issuer alone: it is not evidence that no warrant " +
+      "trades on the symbol.\n" +
+      "`suspectDates` appears only when a row's own dates are in an order that cannot have " +
+      "happened — a RUPS record date after the meeting it gates, a cum date after its ex-date, a " +
+      "payment before the record date. That is UPSTREAM data being wrong, not a failure here: the " +
+      "row is still returned exactly as Stockbit sent it, and each entry names both wire keys and " +
+      "both values so you can judge the pair yourself — the values NORMALIZED to YYYY-MM-DD, not " +
+      "the wire strings, so read the row itself to see what was actually sent. The key spellings " +
+      "are candidates, so a suspicion can be a misread field rather than a bad date. Absent means " +
+      "nothing was out of " +
+      "order — it does NOT mean the dates were checked and cleared, because most rows carry " +
+      "neither side of any pair.\n" +
       "For dividends prefer `dividend_calendar`, which also covers stock dividends. ",
     {
       action_type: z.enum(core.CORPACTION_TYPES).describe("Which action kind, e.g. dividend, rightissue, rups"),
@@ -56,12 +73,19 @@ export function registerCorpactionTools(define: Definer): void {
       "Never read the merged list as cash. Every row carries `corpactionType` (`dividend` or " +
       "`stock_dividend`) saying which one it is, and that field is added by this tool, not by " +
       "Stockbit.\n" +
-      "The sort key is reported as `exDateField`: the endpoint's ex-date spelling is unverified, " +
-      "so a list of candidate keys is tried and whichever one the rows actually carry is named " +
-      "here. If it is null, no candidate was present and the rows are in Stockbit's own order, NOT " +
-      "chronological. Rows with no readable ex-date keep `exDate: null`, are counted in `undated`, " +
-      "and are placed last rather than dropped.\n" +
-      "`limit` applies to each kind separately, so the merged list can hold up to twice it. ",
+      "The ex-date spelling is unverified, so a list of candidate keys is tried against EACH ROW " +
+      "and the one that produced that row's date is named on it as `exDateFrom` — added by this " +
+      "tool, not by Stockbit. `exDateFields` lists every key the merge actually read: empty means " +
+      "no candidate matched anything and the rows are in Stockbit's own order, NOT chronological; " +
+      "more than one means the rows do not all use one spelling, and the list IS sorted regardless. " +
+      "`exDateField` names the earliest of them in the order the candidates are TRIED, which is not " +
+      "the same as the first entry of `exDateFields` — that list is in the order the rows were read " +
+      "— and it is null exactly when `exDateFields` is empty. Rows with no readable ex-date keep `exDate: null` " +
+      "and `exDateFrom: null`, are counted in `undated`, and are placed last rather than dropped.\n" +
+      "`limit` applies to each kind separately, so the merged list can hold up to twice it.\n" +
+      "`suspectDates` carries the same meaning it has on `corporate_actions` — rows whose own dates " +
+      "are impossible in that order, indexing `rows` after the sort, absent when none are. Absent " +
+      "is not a clean bill: most rows carry neither side of any pair. ",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the whole market"),
       limit: z.coerce.number().optional().describe("Max rows PER KIND (cash and stock fetched separately)"),
@@ -138,7 +162,8 @@ export function registerCorpactionTools(define: Definer): void {
     "Warrant and rights conversion records for one issuer: the exercises that turned derivative " +
       "instruments into ordinary shares, which is share-count dilution that a price chart does not " +
       "show.\n" +
-      "Empty is the normal answer for an issuer that has never issued warrants or rights. " +
+      "Empty means no conversions IN THE PERIOD THIS FEED COVERS, which is not the same as none " +
+      "ever: as with `corporate_actions`, the period's start is not in the response. " +
       "Pagination is unverified — whether `page` counts from 0 or 1 is not known, so both are " +
       "accepted and neither is sent unless you pass it. " +
       UNVERIFIED,
@@ -164,7 +189,11 @@ export function registerCorpactionTools(define: Definer): void {
       "one action kind that is about companies not yet listed, so no symbol filter applies. An " +
       "empty list means Stockbit is showing no IPOs right now, which is an ordinary state between " +
       "offerings, not an error. Pair it with `underwriters` for the track record of the houses " +
-      "running a deal. ",
+      "running a deal.\n" +
+      "This is the same reader as `corporate_actions`, so the response CAN carry `suspectDates`. In " +
+      "practice it almost never will: the date pairs that check compares are RUPS and dividend " +
+      "ones, and no IPO date pair is on the list, so expect the field to be absent here even on a " +
+      "row whose own dates are wrong. Read it if it appears; do not read its absence as anything. ",
     {
       limit: z.coerce.number().optional().describe("Max rows. Omitted entirely when not given"),
     },

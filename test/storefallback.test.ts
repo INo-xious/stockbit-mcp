@@ -31,6 +31,7 @@ import {
   recordBackendFallback,
   resetStoreCache,
 } from "../src/auth/store.ts";
+import { describeFileBackend } from "../src/auth/doctor.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
 beforeEach(() => {
@@ -162,4 +163,79 @@ test("a store that fell back says so every time status is read", () => {
   const status = SRC("src/status.ts");
   assert.match(status, /name: "credential store"/);
   assert.match(status, /encrypted FILE store, not the Keychain/);
+});
+
+/* --------------------------- what doctor says the reason is --------------------------- */
+//
+// `doctor` printed one hardcoded sentence for every non-Keychain backend:
+//   ! Token store  AES-256-GCM file (machine+user derived key) — no OS keychain on this platform
+// on macOS, where there IS one and the WRITE was refused. The fallback was right and the stated
+// reason was false, in the output of the command a user runs specifically to find out why their
+// Keychain is not being used. Everything needed to say the true thing was already recorded:
+// `backend.json` exists only because a write was refused.
+//
+// Argument-taking, so these run on Linux and Windows CI too — a macOS-only branch nobody else can
+// reach is a branch nobody else checks, which is how the wrong sentence survived.
+
+test("a refused Keychain write is not reported as a missing Keychain", () => {
+  const detail = describeFileBackend({ refused: true, forced: false, platform: "darwin" });
+  assert.match(detail, /Keychain refused a write/);
+  assert.doesNotMatch(detail, /no OS keychain/);
+  assert.match(detail, /backend\.json/, "and it must name what to delete to try again");
+});
+
+test("the env override is named as itself, not blamed on the platform", () => {
+  const detail = describeFileBackend({ refused: false, forced: true, platform: "darwin" });
+  assert.match(detail, /STOCKBIT_FORCE_FILE_STORE/);
+  assert.doesNotMatch(detail, /refused/);
+});
+
+test("a refusal and the env override together give the remedy that actually works", () => {
+  // The two co-occur, and telling the user to delete the marker while the variable is set sends
+  // them to fix the wrong thing: `keychainAvailable` returns false on the variable BEFORE it looks
+  // at the platform, so the backend stays `file` however clean the marker is.
+  const detail = describeFileBackend({ refused: true, forced: true, platform: "darwin" });
+  assert.match(detail, /Keychain refused a write/, "the refusal still happened and is still worth saying");
+  assert.match(detail, /STOCKBIT_FORCE_FILE_STORE/);
+  assert.doesNotMatch(detail, /Delete the slot's entry/, "that remedy would not work while it is set");
+});
+
+test("off macOS it says what is actually true — this build integrates one keychain", () => {
+  // Not "no OS keychain on this platform". Windows has Credential Manager and Linux has libsecret;
+  // what is missing is the integration, not the keychain.
+  for (const platform of ["win32", "linux"]) {
+    const detail = describeFileBackend({ refused: false, forced: false, platform });
+    assert.match(detail, /integrates the macOS Keychain only/);
+    assert.doesNotMatch(detail, /no OS keychain/);
+  }
+});
+
+test("the last case states what was observed rather than diagnosing", () => {
+  // darwin, nothing recorded, no override: `backendFor` can only have chosen the file store because
+  // `keychainAvailable` returned false, and on darwin that means `security -h` could not be run.
+  // True by elimination, so it is phrased as the observation and nothing more.
+  const detail = describeFileBackend({ refused: false, forced: false, platform: "darwin" });
+  assert.match(detail, /`security` command could not be run/);
+  assert.doesNotMatch(detail, /no OS keychain/);
+});
+
+test("every branch still names the store it is describing", () => {
+  const cases = [
+    { refused: true, forced: false, platform: "darwin" },
+    { refused: false, forced: true, platform: "darwin" },
+    { refused: false, forced: false, platform: "win32" },
+    { refused: false, forced: false, platform: "darwin" },
+  ];
+  for (const c of cases) {
+    const detail = describeFileBackend(c);
+    assert.match(detail, /AES-256-GCM file \(machine\+user derived key\)/, JSON.stringify(c));
+  }
+});
+
+test("doctor asks the store why, instead of assuming", () => {
+  // The structural half: the row must be built from the recorded facts, not from a constant.
+  const doctor = SRC("src/auth/doctor.ts");
+  assert.match(doctor, /describeFileBackend\(\{/);
+  assert.match(doctor, /refused: fallenBackSlots\(\)\.includes\("main"\)/);
+  assert.match(doctor, /forced: process\.env\.STOCKBIT_FORCE_FILE_STORE === "1"/);
 });

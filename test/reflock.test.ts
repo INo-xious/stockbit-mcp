@@ -24,6 +24,7 @@ import {
 } from "../src/auth/websession.ts";
 import { getStore } from "../src/auth/store.ts";
 import {
+  adoptAccessToken,
   ensureFresh,
   forceRefresh,
   forgetRotated,
@@ -939,6 +940,150 @@ test("the warm path stays bounded when the store cannot be read at all", async (
     Date.now = realNow;
     (store as unknown as { get: unknown }).get = realGet;
     (store as unknown as { readState: unknown }).readState = realReadState;
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+/* --------------------- which token was actually rejected --------------------- */
+//
+// `forceRefresh` used to infer that from `state[domain].current` — the slot's token, not the one
+// the failing request presented. The slot is shared and moves while requests are in flight, so a
+// LATE 401 named a peer's fresh token as rejected, dropped it, cleared the cache every process on
+// the machine reads, and spent a rotation replacing a credential that was working.
+
+/** A stored web session whose credentialStorage cookie carries an ACCESS token as well. */
+function browserSessionHoldingAccess(refresh: string, access: string): WebSession {
+  return {
+    capturedAt: new Date().toISOString(),
+    cookies: [
+      {
+        name: CREDENTIAL_COOKIE,
+        value: encodeURIComponent(JSON.stringify({ state: { refresh, access }, version: 0 })),
+        domain: ".stockbit.com",
+        path: "/",
+      },
+    ],
+    origins: [],
+  };
+}
+
+test("a 401 from a token the slot has already moved past costs nothing", async () => {
+  const refresh = jwt(2000000000, "late-401-refresh");
+  const stale = jwt(2000000000, "the-token-that-401d");
+  const healed = jwt(2000000000, "what-a-peer-already-minted");
+  const store = getStore();
+  store.set(refresh);
+  serverToken = refresh;
+  resetSession();
+  clearAccessCache();
+  clearWebSession();
+  presented.length = 0;
+
+  try {
+    // A peer refreshed while this request was in flight: the slot and the shared cache both hold
+    // `healed`, minted from the credential that is in the store now.
+    adoptAccessToken("main", healed, 2000000000, refresh);
+    writeAccessCache("main", healed, 2000000000, refresh);
+
+    const got = await forceRefresh("main", stale);
+
+    assert.equal(got, healed, "the caller must be handed the token the slot already holds");
+    assert.equal(presented.length, 0, "stale news about a retired token must not reach the wire");
+    assert.ok(
+      readAccessCache("main", refresh),
+      "and must not clear the cache every other process is reading",
+    );
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a 401 from the token the slot is actually holding still forces a refresh", async () => {
+  // The other half, and the one that keeps the guard honest: the shortcut must fire ONLY when the
+  // presented token is stale. When it is the token in hand, this is a real rejection.
+  const refresh = jwt(2000000000, "genuine-401-refresh");
+  const held = jwt(2000000000, "the-token-in-hand");
+  const store = getStore();
+  store.set(refresh);
+  serverToken = refresh;
+  resetSession();
+  clearAccessCache();
+  clearWebSession();
+  presented.length = 0;
+
+  try {
+    adoptAccessToken("main", held, 2000000000, refresh);
+    writeAccessCache("main", held, 2000000000, refresh);
+
+    await forceRefresh("main", held);
+
+    assert.equal(presented.length, 1, "a genuine rejection must still spend a refresh");
+    assert.equal(presented[0], refresh, "and must present the stored credential");
+  } finally {
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a refresh that cannot name the rejected token reaches the wire, browser cookie or not", async () => {
+  // The proof path. `status { live: true }`, `bootstrap --verify` and `stockbit-auth login --verify`
+  // all call `forceRefresh()` with no presented token, and every one of them promises the user that
+  // a request was made. The browser shortcut below used to fire for them anyway: with no presented
+  // token there is nothing to compare the cookie against, so `fromBrowser.token !== rejected` was
+  // vacuously true and the cookie's access token was adopted having sent NOTHING. `login --verify`
+  // calls `resetSession()` immediately before, which is exactly what made the comparison vacuous —
+  // so the one command whose entire job is proving a harvested credential proved nothing.
+  const refresh = jwt(2000000000, "proof-refresh");
+  const inCookie = jwt(2000000000, "what-the-browser-holds");
+  const store = getStore();
+  store.set(refresh);
+  serverToken = refresh;
+  resetSession();
+  clearAccessCache();
+  presented.length = 0;
+  saveWebSession(browserSessionHoldingAccess(refresh, inCookie));
+
+  try {
+    const got = await forceRefresh();
+
+    assert.equal(presented.length, 1, "a proof that sends no request proves nothing");
+    assert.equal(presented[0], refresh, "and it must present the STORED credential, not the cookie's");
+    assert.notEqual(got, inCookie, "the cookie's access token is not evidence about the stored one");
+  } finally {
+    clearWebSession();
+    clearAccessCache();
+    store.clear();
+    resetSession();
+  }
+});
+
+test("a 401 that CAN name the rejected token still follows the browser instead of rotating", async () => {
+  // The shortcut is not removed, only given its precondition back. Its case is real: the SPA
+  // rotates on boot, the chart driver captures the new pair, and this process is simply behind.
+  // Refreshing there would retire the generation the chart is drawing under.
+  const refresh = jwt(2000000000, "behind-refresh");
+  const spent = jwt(2000000000, "what-this-process-presented");
+  const inCookie = jwt(2000000000, "what-the-browser-rotated-to");
+  const store = getStore();
+  store.set(refresh);
+  serverToken = refresh;
+  resetSession();
+  clearAccessCache();
+  presented.length = 0;
+  saveWebSession(browserSessionHoldingAccess(refresh, inCookie));
+
+  try {
+    const got = await forceRefresh("main", spent);
+
+    assert.equal(got, inCookie, "the browser's newer access token must be adopted");
+    assert.equal(presented.length, 0, "and no rotation spent to rediscover it");
+  } finally {
+    clearWebSession();
     clearAccessCache();
     store.clear();
     resetSession();

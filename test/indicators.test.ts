@@ -9,6 +9,7 @@ import {
   macd,
   rsi,
   sma,
+  smaNullable,
   type Series,
 } from "../src/core/indicators.ts";
 import type { Bar } from "../src/core/bars.ts";
@@ -265,4 +266,27 @@ test("Bollinger centres its variance on the exact mean, not sma's rounded output
   const sd = Math.sqrt(window.reduce((a, v) => a + (v - mean) ** 2, 0) / 3);
   assert.equal(b.upper[2], Number((mean + 2 * sd).toFixed(4)));
   assert.equal(b.lower[2], Number((mean - 2 * sd).toFixed(4)));
+});
+
+/* ------------------------------ a series with holes ------------------------------ */
+
+test("smaNullable makes a window containing a hole null, rather than averaging what is left", () => {
+  // Not the mean of the readable values: the mean of "three sessions, one of which we could not
+  // read" is not the mean of the two we could, and reporting it as one answers a question nobody
+  // asked. Not a zero substituted either — that pulls the average down and says nothing.
+  // Windows of 3: index 4 is [null, 40, 50] and still holds the hole, so it is null too. Only
+  // index 5 — [40, 50, 60], the first window clear of it — has a value.
+  const out = smaNullable([10, 20, null, 40, 50, 60], 3);
+  assert.deepEqual(out, [null, null, null, null, null, 50]);
+});
+
+test("smaNullable recovers once the hole leaves the window", () => {
+  // The property `sma`'s rolling sum cannot have: one hole must not poison every later window.
+  const out = smaNullable([null, 10, 20, 30], 2);
+  assert.deepEqual(out, [null, null, 15, 25]);
+});
+
+test("smaNullable agrees with sma on a series with no holes", () => {
+  const values = [10, 20, 30, 40, 50];
+  assert.deepEqual(smaNullable(values, 3), sma(values, 3));
 });

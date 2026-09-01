@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { getStore, type StoreSlot, type StoreState, fallenBackSlots } from "./auth/store.js";
 import { DEFAULT_TOOL_PROFILE } from "./tools/_profile.js";
 import {
-  lastEventFor,
+  lastEventForToken,
   readHealthJournal,
   slotHealthState,
   type SlotHealthState,
@@ -46,6 +46,14 @@ import { describeRemember } from "./trading/remember.js";
 import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
 import { VERSION } from "./version.js";
+import { checkForUpdate, type UpdateStatus } from "./updatecheck.js";
+import {
+  autoReloginArmed,
+  autoReloginAvailable,
+  autoReloginOptedIn,
+  autoReloginRunning,
+  autoReloginSpent,
+} from "./auth/relogin.js";
 
 export interface SlotStatus {
   stored: boolean;
@@ -80,8 +88,51 @@ export interface SlotStatus {
 export interface LoginStatus {
   inProgress: boolean;
   startedAt?: string;
-  /** `captured`, `timeout`, or `error: <redacted>` from the last attempt this process started. */
+  /**
+   * What the last attempt this process started came to. One of:
+   *
+   *   - `captured` — a credential Stockbit accepts. Either intercepted from a live login response,
+   *     or harvested from the browser and then PROVEN against the refresh route.
+   *   - `captured-but-rejected: <redacted>` — stored, and Stockbit refused it (401 or 403). This
+   *     is a failed login however it looks; the bytes landing is not the claim.
+   *   - `captured-unproven: <redacted>` — stored, and the proof could not be made (the network,
+   *     not the credential). Nothing is known about whether it works.
+   *   - `no-token` — the capture finished without one.
+   *   - `error: <redacted>` — the capture itself threw.
+   *   - `auto-recovery: <outcome>` — an automatic recovery ran instead of a person. `harvested`
+   *     there means a credential was written and NOT yet proven, which is why it does not say
+   *     `captured`: that word is reserved for one Stockbit has accepted.
+   */
   lastResult?: string;
+  /**
+   * Whether this server may re-open the browser by itself when the session dies mid-task.
+   *
+   * Reported because it is the difference between "the next 401 fixes itself" and "the next 401
+   * stops the user", and nothing else says which. `available` is the whole conjunction — armed by
+   * this entry point, switched on by `STOCKBIT_AUTO_RELOGIN`, and not blocked by
+   * `STOCKBIT_NO_BROWSER` — so a reader never has to reassemble it from three fields and get it
+   * wrong. `spent` is the per-process latch: recovery gets exactly one attempt, because the proof
+   * rotates the token and rotation stales the browser session a second attempt would read.
+   *
+   * `spent` goes true when the attempt STARTS, not when it finishes, so `spent` alone does not mean
+   * "and it is over". `running` is what separates the two, and anything rendering this must read it
+   * first — telling a user their one attempt is used up while it is still running is the same class
+   * of wrong answer as telling them a recovery failed before it has finished.
+   */
+  autoRecovery: {
+    available: boolean;
+    armed: boolean;
+    optedIn: boolean;
+    spent: boolean;
+    /**
+     * A recovery has a window open right now.
+     *
+     * Distinct from `inProgress`, which cannot say WHO started the login. `login` needs the
+     * difference: telling someone to go and type into a window that closes itself in half a minute
+     * is worse advice than none at all.
+     */
+    running: boolean;
+  };
 }
 
 export interface StatusCheck {
@@ -98,6 +149,22 @@ export interface StatusReport {
     platform: string;
     toolProfile: string;
     toolCount?: number;
+    /**
+     * Families this profile withheld ENTIRELY. Absent when nothing is.
+     *
+     * FAMILY names, not tool names, and the difference matters in both directions: `trading` keeps
+     * five tools under `core` so it is not here, while `screener` is here as a family AND is a
+     * registered tool in its own right. Anything rendering this must say which it is naming.
+     */
+    withheldFamilies?: string[];
+    /**
+     * Whether a newer release exists — present only when the caller asked for the check.
+     *
+     * `npx` caches a resolved tree under a version RANGE, so a user can sit on a stale build for
+     * weeks with nothing anywhere saying so. `latest` is ABSENT when the check could not run, and
+     * `isOutdated` with it: "we could not ask" and "you are current" are different answers.
+     */
+    update?: UpdateStatus;
   };
   auth: Record<StoreSlot, SlotStatus>;
   login: LoginStatus;
@@ -163,6 +230,21 @@ export interface StatusReport {
 export interface CollectStatusOptions {
   /** Also refresh the market-data token to prove it works. One request. */
   live?: boolean;
+  /**
+   * Also ask npm whether a newer release exists. One request, cached for a day.
+   *
+   * Explicit for the same reason `live` is: this function is called from tests and from library
+   * code, and network work that happens merely because a status report was assembled is network
+   * work nobody asked for. The user-facing callers — the `status` tool and `stockbit-auth status` —
+   * pass it; nothing else does.
+   *
+   * That is NOT what keeps the test suite offline, and an earlier version of this comment claimed
+   * it was. The suite calls the `status` tool, and the tool passes this flag — so the default being
+   * inert protects nothing. `test/_offline.mjs`, preloaded by `npm test`, is the actual guarantee.
+   */
+  updateCheck?: boolean;
+  /** Injected so the update check is testable without the network. Implies `updateCheck`. */
+  checkUpdate?: typeof checkForUpdate;
   /** Injectable so the session clock is testable. */
   now?: Date;
   /** How many tools this server registered. */
@@ -189,6 +271,18 @@ export interface CollectStatusOptions {
    * all" and hijacked `nextStep` away from the advice the user actually needed.
    */
   missingTools?: string[];
+  /**
+   * Families this profile withheld ENTIRELY, so `status` can name the value that adds one back.
+   *
+   * Separate from `missingTools` because the remedies differ. `STOCKBIT_TOOLS=<label>,<family>` is
+   * only true for a family with nothing registered; a family that merely lost some tools is not a
+   * family that is gone, and telling someone to add `trading` when they already have five of its
+   * tools is the same class of wrong answer `missingTools` was written to avoid.
+   *
+   * Passed in rather than derived here: importing the surface would close a cycle through
+   * `register.ts` -> `system.ts` -> this file.
+   */
+  missingFamilies?: string[];
 }
 
 /* ------------------------------- login progress ------------------------------- */
@@ -200,7 +294,10 @@ export interface CollectStatusOptions {
  * abandoned the capture, and reporting "in progress" from a file another process wrote would be a
  * lie the user could not act on.
  */
-const loginState: LoginStatus = { inProgress: false };
+// Deliberately NOT `LoginStatus`: `autoRecovery` is computed on every read, not stored. Typing this
+// as the full report would invite someone to cache the recovery verdict here, where it would go
+// stale the moment the latch is spent.
+const loginState: Omit<LoginStatus, "autoRecovery"> = { inProgress: false };
 
 export function loginStarted(at: Date = new Date()): void {
   loginState.inProgress = true;
@@ -214,7 +311,20 @@ export function loginFinished(result: string): void {
 }
 
 export function loginStatus(): LoginStatus {
-  return { ...loginState };
+  return {
+    ...loginState,
+    // Read at call time, never cached. `STOCKBIT_AUTO_RELOGIN` is read fresh on every check by the
+    // same reasoning `settings.ts` gives for its own switches, and the latch changes during the
+    // process's life — a snapshot taken at import would report "available" for a server that has
+    // already spent its one attempt.
+    autoRecovery: {
+      available: autoReloginAvailable(),
+      armed: autoReloginArmed(),
+      optedIn: autoReloginOptedIn(),
+      spent: autoReloginSpent("main"),
+      running: autoReloginRunning(),
+    },
+  };
 }
 
 /** Test seam: forget any login this process recorded. */
@@ -299,7 +409,7 @@ function slotStatus(slot: StoreSlot, checks: StatusCheck[]): SlotStatus {
   try {
     const journal = readHealthJournal();
     result.health = slotHealthState(slot, token, result.expired === true, journal);
-    const event = lastEventFor(slot, journal);
+    const event = lastEventForToken(slot, token, journal);
     if (event) {
       result.lastRefresh = {
         at: event.at,
@@ -566,6 +676,27 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       status: "fail",
       detail: `${lastLogin} — the browser step may have looked fine; the credential did not land.`,
     });
+  } else if (lastLogin && lastLogin.startsWith("captured-but-rejected")) {
+    // The credential DID land, which is the whole reason this needs saying separately: every
+    // storage-shaped signal reads healthy, and the only thing wrong with it is the one thing that
+    // matters. It was proven, once, and Stockbit refused it.
+    checks.push({
+      name: "last login",
+      status: "fail",
+      detail:
+        `${lastLogin} — the credential was stored and Stockbit REJECTED it on the first use. ` +
+        "Nothing was logged in: the browser profile was already signed in, so the token was read " +
+        "out of its cookie rather than issued by a login. Log out and log in again so a real form " +
+        "appears.",
+    });
+  } else if (lastLogin && lastLogin.startsWith("captured-unproven")) {
+    checks.push({
+      name: "last login",
+      status: "warn",
+      detail:
+        `${lastLogin} — the credential was stored but could not be proven, and the reason was not ` +
+        "a rejection. Nothing is known about whether it works; try a call and see.",
+    });
   }
 
   // A recorded fallback is a security downgrade the user did not choose, so it is restated every
@@ -670,6 +801,26 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
+  // Whether a newer release exists. Only when asked, for the reason `live` is only when asked.
+  //
+  // `npx` caches a resolved tree under a version RANGE, so `^1.2.2` with 1.2.2 installed is
+  // satisfied by 1.2.4 and never re-resolves — a user can sit on a stale build for weeks with
+  // nothing anywhere saying so. That is what this answers.
+  //
+  // It cannot fail a status call: `checkForUpdate` has no throwing path, and the `catch` is belt to
+  // that brace. A check that could not run leaves `latest` absent rather than claiming "current".
+  let update: UpdateStatus | undefined;
+  if (options.updateCheck || options.checkUpdate) {
+    try {
+      update = await (options.checkUpdate ?? checkForUpdate)({ installed: VERSION, now: options.now });
+    } catch {
+      update = { installed: VERSION, note: "Update check did not complete." };
+    }
+    if (update.isOutdated) {
+      checks.push({ name: "version", status: "warn", detail: update.note });
+    }
+  }
+
   let dir = "(unknown)";
   try {
     dir = stockbitDir();
@@ -689,6 +840,8 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
       // options report `toolProfile: "core"` beside `toolCount: 138`, which is self-refuting.
       toolProfile: options.profileError ? "unparsable" : (options.profileLabel ?? "all"),
       ...(options.toolCount === undefined ? {} : { toolCount: options.toolCount }),
+      ...(options.missingFamilies?.length ? { withheldFamilies: options.missingFamilies } : {}),
+      ...(update === undefined ? {} : { update }),
     },
     auth,
     login: loginStatus(),
@@ -854,7 +1007,21 @@ export function formatStatus(report: StatusReport): string {
   };
 
   const lines = [
-    `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})`,
+    `stockbit-mcp ${report.server.version} on Node ${report.server.node} (${report.server.platform})` +
+      // Only when it is actually behind. "Up to date" on the headline is noise on every run that
+      // was fine, and the whole point is the one run that is not.
+      (report.server.update?.isOutdated ? ` — ${report.server.update.latest} is available` : ""),
+    // Named here rather than as a check, because a withheld family is a configuration FACT and not
+    // a fault: `checks` is a fault level, and a permanent warn on every default install is how you
+    // teach someone to ignore the warn that matters. The profile itself was never printed at all
+    // before this, so the line earns its place either way.
+    `Tool profile     ${report.server.toolProfile}${
+      report.server.withheldFamilies?.length
+        ? ` — these tool FAMILIES have nothing registered: ${report.server.withheldFamilies.join(", ")}` +
+          ` (family names, not tool names). Add one and restart the client: ` +
+          `STOCKBIT_TOOLS=${report.server.toolProfile},<family>, or STOCKBIT_TOOLS=all for every tool.`
+        : ""
+    }`,
     `Store            ${report.store.dir} (${report.store.backend})`,
     `Browser profile  ${describeBrowserPin(report.store)}`,
     `Last login       ${describeLoginAge(report.store)}`,
@@ -863,11 +1030,37 @@ export function formatStatus(report: StatusReport): string {
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),
     `Order placing    ${report.trading.mode.toUpperCase()} — ${report.trading.reason}`,
-    `Market           ${report.market.nowWib} WIB (${report.market.weekday}), ${report.market.phase}` +
-      (report.market.nextOpenWib ? `; next open ${report.market.nextOpenWib}` : ""),
+    // Both clocks on the line, because this is where the three-timezone confusion was read. WIB
+    // leads — it is the clock that decides whether a price can move — and the UTC stamp beside it
+    // is what every other timestamp in this server is in.
+    `Market           ${report.market.nowWib} WIB (${report.market.weekday}) = ${report.market.nowUtc}, ` +
+      `${report.market.phase}` +
+      (report.market.nextOpenWib ? `; next open ${report.market.nextOpenWib} WIB = ${report.market.nextOpenUtc}` : ""),
   ];
   if (report.login.inProgress) lines.push(`Login            in progress since ${report.login.startedAt}`);
   else if (report.login.lastResult) lines.push(`Login            last result: ${report.login.lastResult}`);
+
+  // Only where it can actually happen. Recovery is armed by the MCP server and by nothing else, so
+  // printing "auto-recovery: off" into `stockbit-auth status` would name a switch that does nothing
+  // in that process — a setting the reader can then spend time trying to turn on.
+  if (report.login.autoRecovery.armed) {
+    const auto = report.login.autoRecovery;
+    lines.push(
+      // Each branch names the ONE thing standing in the way. "Set A and unset B" when B is the only
+      // problem sends the reader to change something that is already right.
+      `Auto-recovery    ${
+        auto.running
+          ? "running right now — a window is open, and it closes itself once it has read the credential"
+          : auto.spent
+            ? "already used its one attempt this session — the next failure needs a person"
+            : auto.available
+            ? "on — a dead session is re-harvested from the browser once, without asking"
+            : !auto.optedIn
+              ? "off — set STOCKBIT_AUTO_RELOGIN=1 to let a dead session fix itself once"
+              : "off — STOCKBIT_NO_BROWSER is set, and no window may be opened for any reason"
+      }`,
+    );
+  }
 
   for (const check of report.checks) {
     if (check.status === "ok") continue;

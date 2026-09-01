@@ -40,22 +40,87 @@ import { z } from "zod";
 import { jsonResult, runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 import { collectStatus, loginFinished, loginStarted, loginStatus } from "../status.js";
-import { captureViaBrowserLogin, findBrowser, findBrowsers } from "../auth/login.js";
+import {
+  captureNeedsProof,
+  captureViaBrowserLogin,
+  findBrowser,
+  findBrowsers,
+  type LoginResult,
+} from "../auth/login.js";
 import { clearBrowserProfile, readBrowserProfile } from "../auth/browserprofile.js";
 import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
 import { getStore, type StoreSlot } from "../auth/store.js";
 import { withCredentialLock } from "../auth/reflock.js";
-import { clearWebSession } from "../auth/websession.js";
+import { clearWebSession, webSessionHealth } from "../auth/websession.js";
 import { clearAccessCache } from "../auth/accesscache.js";
 import { clearSessionHealth } from "../auth/health.js";
 import { forgetRotated } from "../auth/session.js";
-import { hasStoredSession, resetSession } from "../auth/session.js";
+import { forceRefresh, hasStoredSession, resetSession } from "../auth/session.js";
+import { StockbitError } from "../http/errors.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
 import { acquireDirLock } from "../util/dirlock.js";
 import { stockbitPath } from "../paths.js";
 import { redactValue } from "../redact.js";
 import { browserSuppressed } from "../desktop/browser.js";
+
+/**
+ * Decide what a finished capture is allowed to be called, and prove it when it has to be.
+ *
+ * Exported for the reason `captureNeedsProof` was extracted from `bin/stockbit-auth.ts`: this is
+ * the decision the whole tool exists to get right, and inlined in a `.then()` it is a decision no
+ * test can reach. That is how it shipped saying "captured" for a credential Stockbit refused.
+ *
+ * `captured` used to mean only "bytes were written to the store". Measured on 2026-08-30, the same
+ * call twice nine minutes apart against a healthy browser session: both reported `captured`, one
+ * token worked and the other was dead on arrival. A success value that can mean failure carries no
+ * information, so no automated caller can use `login` as a recovery step.
+ *
+ * The asymmetry is `captureNeedsProof`'s and is argued there: an INTERCEPTED token came out of a
+ * live login response seconds ago and proving it would rotate away the session that login just
+ * established; a HARVESTED one was read out of a cookie, nothing logged in, and four in a row were
+ * rejected on first use while every diagnostic reported healthy.
+ *
+ * Three outcomes rather than two, because `refreshOnce` writes a status-less journal entry for a
+ * transport error. Reporting a dropped network as a rejection would make `status` say "Stockbit
+ * REJECTED this token" about a token nothing ever rejected, and send the user to log in again for
+ * a Wi-Fi blip.
+ */
+export async function settleLogin(result: LoginResult): Promise<void> {
+  if (!result.captured) {
+    loginFinished("no-token");
+    return;
+  }
+
+  // Before anything reads it: the in-memory access token was minted from the credential this login
+  // has just replaced.
+  resetSession("main");
+
+  if (!captureNeedsProof(result.method, false)) {
+    loginFinished("captured");
+    return;
+  }
+
+  try {
+    // `forceRefresh` with no presented token, which is what makes it reach the wire — see the note
+    // on its `presented` parameter. This ROTATES, and rotation stales the browser session the
+    // chartbit driver runs on. That is the price of not reporting a credential that does not work,
+    // and it is only paid for a harvested capture, which is probably worthless anyway.
+    await forceRefresh("main");
+    loginFinished("captured");
+  } catch (err) {
+    // By STATUS, not by `kind`. `refreshOnce` labels every non-2xx `kind: "auth"`, including a 500,
+    // so `kind` cannot separate "Stockbit refused this credential" from "Stockbit was down" — and
+    // that is the whole distinction between the two outcomes below. 401 and 403 are the refusals,
+    // which is `kindForStatus`'s own definition of an auth failure.
+    const rejected =
+      err instanceof StockbitError && (err.status === 401 || err.status === 403);
+    const message = err instanceof Error ? err.message : String(err);
+    // Redacted for the reason the sibling catch is: ask what the message COULD carry, not what it
+    // does today. A fetch failure quotes a URL and a URL here can carry a token.
+    loginFinished(`${rejected ? "captured-but-rejected" : "captured-unproven"}: ${String(redactValue(message))}`);
+  }
+}
 
 /** How long the login lock is held before it is assumed to belong to a dead process. */
 const LOGIN_LOCK_STALE_MS = 20 * 60_000;
@@ -90,7 +155,14 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "which ROTATES the refresh-token family and therefore ENDS the user\u2019s Stockbit website " +
       "session — the one the chart tools run on. Use `health` instead; only pass `live: true` if the " +
       "user explicitly asks to prove the token with a real request.\n" +
-      "The `market` block does not model public holidays; call `market_session` for that.",
+      "The `market` block reports the IDX clock in WIB with a UTC sibling on each field, and does " +
+      "not model public holidays; call `market_session` for that.\n" +
+      "`server.update` says whether a newer release of this server exists. It costs ONE request to " +
+      "the npm registry — not to Stockbit, carrying only the package name — cached for a day and " +
+      "made by this tool alone. `isOutdated: true` matters: npx caches a resolved tree under a " +
+      "version RANGE, so a user can run a build that is weeks old and nothing else will say so. " +
+      "`latest` and `isOutdated` are ABSENT when the check could not run, which means unknown, NOT " +
+      "up to date — read `update.note`. `STOCKBIT_NO_UPDATE_CHECK=1` turns the request off.",
     {
       live: z
         .boolean()
@@ -105,6 +177,10 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       runTool(async () =>
         collectStatus({
           live: a.live === true,
+          // The staleness check. `npx` pins a version RANGE in its cache, so a user can run a build
+          // that is weeks old with nothing telling them — and this is the one command they call to
+          // find out what is wrong. Cached for a day, 2s deadline, and it cannot fail this call.
+          updateCheck: true,
           toolCount: options.toolCount,
           profileLabel: options.profileLabel,
           profileIsDefault: options.profileIsDefault,
@@ -114,6 +190,11 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
           // place an order with and no explanation anywhere. Names rather than families, because a
           // family with one tool missing is not a family that is gone.
           missingTools: define.skippedNames(),
+          // And which whole FAMILIES it kept out, read at call time for the same reason. `core`
+          // withholds all seventeen `chartbit` tools; asking for one got the SDK's bare "not
+          // found", and the only place this report had ever named `STOCKBIT_TOOLS` outside an
+          // error was the trading branch, so finding the fix meant reading `FAMILIES` in `dist/`.
+          missingFamilies: define.withheldFamilies(),
         }),
       ),
   );
@@ -133,7 +214,10 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
       "If the browser is ALREADY signed in to Stockbit, it no longer waits fifteen minutes for a " +
       "form that will never appear: it reads the credential out of the browser's own session and " +
       "finishes in seconds, and if there is nothing usable there it signs that profile out and " +
-      "re-opens the login page.\n" +
+      "re-opens the login page. A credential read out of the browser that way is PROVEN against " +
+      "Stockbit before `status` calls it captured — nothing logged in, so its expiry says nothing " +
+      "about whether it works. That proof rotates the token, which stales the browser session the " +
+      "chartbit tools drive; a login that showed a real form is trusted without it.\n" +
       "`switch_account: true` is for signing in as a DIFFERENT account — it clears the browser's " +
       "Stockbit session first and never reuses what was there. Ask the user before using it; it " +
       "signs them out of Stockbit in that browser profile.\n" +
@@ -151,7 +235,23 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
         .describe(
           "Use a throwaway browser profile instead of the saved one — nothing carried over, so the " +
             "user re-enters password and OTP. For a profile that is corrupt or held open by another " +
-            "process. To sign in as a different account, use switch_account instead.",
+            "process. To sign in as a different account, use switch_account instead. " +
+            "IT DOES NOT FIX THE CHART TOOLS: the throwaway profile is discarded, so the API session " +
+            "starts working while the saved profile the chartbit tools actually drive stays signed " +
+            "out — every chartbit tool keeps failing until a login runs WITHOUT this. Prefer " +
+            "reap_orphans for a profile merely held open.",
+        ),
+      reap_orphans: z
+        .boolean()
+        .optional()
+        .describe(
+          "If the browser exits immediately because something already holds the saved profile, end " +
+            "those processes and retry once. For the case where a previous login left browser " +
+            "processes behind and every login since has failed to open a window.\n" +
+            "ASK THE USER FIRST. It cannot tell an abandoned process from a working one — a browser " +
+            "that is fine answers the debugging port it was started with, not the new one this " +
+            "checks — so it ends EVERY process holding that profile, including a chart window the " +
+            "chartbit tools left open and are still using.",
         ),
       switch_account: z
         .boolean()
@@ -169,6 +269,7 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
         force: a.force === true || a.switch_account === true,
         fresh: a.fresh_profile === true,
         switchAccount: a.switch_account === true,
+        reapOrphans: a.reap_orphans === true,
       }),
     { destructiveHint: false, idempotentHint: true, evidence: "observed" },
   );
@@ -216,6 +317,8 @@ interface LoginRequest {
   fresh: boolean;
   /** Clear the browser's Stockbit session first, and never reuse what was there. */
   switchAccount: boolean;
+  /** End processes still holding the saved profile if the browser cannot open against it. */
+  reapOrphans: boolean;
 }
 
 /** A refusal is a normal answer here, not an exception: it always says what to do instead. */
@@ -262,10 +365,47 @@ async function startLogin(define: Definer, request: LoginRequest) {
     );
   }
 
+  // The website session is provably dead, and a plain login is the one thing that cannot fix it.
+  //
+  // This file had never read the web session at all — the signal is computed in `status.ts` and only
+  // ever displayed. So the tool went on offering the flow that was measured failing four times out
+  // of four: with a stale session Stockbit shows an expiry modal over the form and closes the window
+  // before anything can be typed ("there is a popup of 'go back to login page?' before i managed to
+  // input the log in details, it closed on me"). `switch_account` clears the session first and
+  // worked every attempt.
+  //
+  // Only on the PROVABLE verdicts. `rejected` and `expired` each rest on evidence — a refusal
+  // recorded in the health journal, or an expiry that was read and has passed. "Unknown" is not
+  // failure, and refusing on it would block a login whose session simply could not be read.
+  //
+  // Not a hard refusal for the two requests that already avoid the modal: `switch_account` clears
+  // the session, and `fresh_profile` never loads it.
+  if (!request.switchAccount && !request.fresh) {
+    const web = webSessionHealth();
+    if (web.rejected || web.expired) {
+      return refusal(
+        `The browser's Stockbit session is ${web.rejected ? "refused by Stockbit" : "expired"}, so the ` +
+          "login page will open with an expiry dialog over it and close before anyone can type.",
+        "Call login again with `switch_account: true`, which signs that browser profile out of " +
+          "Stockbit first and then shows a real form. Tell the user it signs them out in that " +
+          "browser. (`stockbit-auth login --switch-account` does the same from a terminal.)",
+      );
+    }
+  }
+
   if (loginStatus().inProgress) {
+    // Two very different things can hold this flag now, and telling a user to go and type in a
+    // window that is about to close itself is worse than saying nothing. An automatic recovery
+    // harvests a cookie and finishes within about half a minute, with nobody waiting on it.
+    const auto = loginStatus().autoRecovery.running;
     return refusal(
-      "A login started by this server is already waiting for the user to sign in.",
-      "Finish signing in in the window that is already open, then call status. Nothing new was opened.",
+      auto
+        ? "This server is recovering the session by itself right now — a window is open, and it " +
+            "closes on its own once it has read the credential."
+        : "A login started by this server is already waiting for the user to sign in.",
+      auto
+        ? "Wait a few seconds and call status. Nothing new was opened, and nobody needs to type anything."
+        : "Finish signing in in the window that is already open, then call status. Nothing new was opened.",
     );
   }
 
@@ -304,12 +444,10 @@ async function startLogin(define: Definer, request: LoginRequest) {
     slot: "main",
     timeoutMs,
     switchAccount: request.switchAccount,
+    reapOrphans: request.reapOrphans,
     ...(request.fresh ? { profileDir: "fresh" as const } : {}),
   })
-    .then((result) => {
-      if (result.captured) resetSession("main");
-      loginFinished(result.captured ? "captured" : "no-token");
-    })
+    .then(settleLogin)
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       // Redacted: a capture failure can quote a URL, and a URL here can carry a token.

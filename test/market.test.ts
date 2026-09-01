@@ -14,6 +14,7 @@ import { StockbitError } from "../src/http/errors.ts";
 import {
   CHART_TIMEFRAMES,
   PRICES_BATCH_MAX,
+  RUNNING_TRADE_MAX_LIMIT,
   getChartRaw,
   getMarketMovers,
   getMarketPrices,
@@ -173,20 +174,28 @@ test("points project onto Bar, oldest first, whatever the encoding", async () =>
     close: 4250,
     average: 4250,
     volume: 1200,
-    value: 0,
-    frequency: 0,
-    change: 0,
-    changePercent: 0,
-    foreignBuy: 0,
-    foreignSell: 0,
-    netForeign: 0,
+    // null, not 0. The fixture carries no value/frequency/change/foreign fields, and a zero here
+    // would be this projection asserting that nothing traded and no foreigner moved — a claim
+    // about the session rather than about the payload, and one no caller could see through.
+    value: null,
+    frequency: null,
+    change: null,
+    changePercent: null,
+    foreignBuy: null,
+    foreignSell: null,
+    netForeign: null,
   });
   assert.equal(series.mapped.date, "time");
   assert.equal(series.mapped.close, "close");
   assert.deepEqual(series.extraKeys, ["foo"]);
   assert.ok(series.unmapped.includes("value"), "value was not in the payload and must be reported");
   assert.ok(!series.unmapped.includes("volume"));
-  assert.deepEqual(series.warnings, [], "everything needed was mapped");
+  // OHLC and volume were all mapped, so there is no "flat candles" warning. The seven fields this
+  // fixture does not carry are named in the other one — they used to be zero-filled in silence,
+  // which is what made `warnings: []` look right here.
+  assert.equal(series.warnings.length, 1);
+  assert.doesNotMatch(series.warnings[0] ?? "", /flat/, "the candles are real, not synthesised from close");
+  assert.match(series.warnings[0] ?? "", /No usable value\/frequency/);
   assert.equal(series.sample.foo, 1, "the raw first point is returned for shape discovery");
 });
 
@@ -226,7 +235,29 @@ test("a close-only payload is usable but says every candle is synthetic", async 
   assert.ok(series.unmapped.includes("volume"));
   assert.equal(series.warnings.length, 2);
   assert.match(series.warnings[0] ?? "", /flat/);
-  assert.match(series.warnings[1] ?? "", /not a real zero/);
+  // The second warning now names EVERY field that arrived unusable, not volume alone — the other
+  // seven zero-filled in complete silence before.
+  assert.match(series.warnings[1] ?? "", /not 'the figure was zero'/);
+  assert.match(series.warnings[1] ?? "", /volume/);
+  assert.match(series.warnings[1] ?? "", /netForeign/);
+  assert.equal(series.bars[0]?.volume, null, "and the bar says absent rather than zero");
+  assert.equal(series.bars[0]?.netForeign, null);
+});
+
+test("a field present but EMPTY on every bar warns too, which is the observed daily payload", async () => {
+  // The reason the old check was wrong. `keyIn` accepts an empty string as present, so `unmapped`
+  // stayed clean and the volume warning never fired at all — while every bar reported volume 0.
+  // /charts/:symbol/daily is documented as sending open/high/low/volume exactly this way.
+  responder = () => ({
+    data: { result: [{ date: "2026-08-24", close: 105, volume: "", value: "", net_foreign: "" }] },
+  });
+  const series = await getSeriesBars("BBRI", "1m");
+  assert.ok(!series.unmapped.includes("volume"), "the KEY is present — that was never the question");
+  assert.equal(series.bars[0]?.volume, null, "but no usable value arrived, so it is absent");
+  assert.ok(
+    series.warnings.some((w) => /volume/.test(w) && /not 'the figure was zero'/.test(w)),
+    "and the caller is told, which is what did not happen before",
+  );
 });
 
 test("an empty series is raised, not returned, so the caller falls back deliberately", async () => {
@@ -318,6 +349,50 @@ test("running trade filters are prefixed with the wire vocabulary", async () => 
   ]);
 });
 
+test("a limit past the endpoint's own cap is refused, and the message says why it is pointless", async () => {
+  // 200 and 3000 came back byte-identical in the field, and the 2026-08-28 probe measured the
+  // response capped at 100. Sending 3000 costs a round trip to be handed the same first 100 rows
+  // with nothing marking the truncation — which is how a caller asking about the close gets the
+  // opening auction and never learns it.
+  await assert.rejects(
+    () => getRunningTrade({ symbol: "BBRI", limit: RUNNING_TRADE_MAX_LIMIT + 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /between 1 and 100/);
+      // Naming the cap is not enough on its own: the caller's real question is "then how do I see
+      // the close", and the answer is that this route cannot, at any limit.
+      assert.match(error.message, /session open/);
+      assert.match(error.message, /broker_flow_intraday/);
+      return true;
+    },
+  );
+  assert.equal(requests, 0, "the refusal happens before the request is built");
+});
+
+test("the cap is a boundary, not a ban — the largest reachable limit still goes out", async () => {
+  await getRunningTrade({ symbol: "BBRI", limit: RUNNING_TRADE_MAX_LIMIT });
+  assert.deepEqual(query(lastUrl("/running-trade")), ["limit=100", "order_by=1", "symbols=BBRI"]);
+});
+
+test("order_by is sent as asked, and a value measured to be refused never reaches the wire", async () => {
+  await getRunningTrade({ symbol: "BBRI", orderBy: 2 });
+  assert.deepEqual(query(lastUrl("/running-trade")), ["order_by=2", "symbols=BBRI"]);
+
+  // The tool layer casts an incoming number to 1|2|3, so the type does not stop a 4 at runtime.
+  // 0 and 4 were both measured refused upstream; spending a round trip to be told so is waste.
+  await assert.rejects(
+    () => getRunningTrade({ symbol: "BBRI", orderBy: 4 as 1 | 2 | 3 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /order_by must be one of 1, 2, 3/);
+      return true;
+    },
+  );
+  assert.equal(requests, 1, "only the valid call went out");
+});
+
 test("grouped is a different route, not a query parameter", async () => {
   await getRunningTrade({ grouped: true, symbol: "BBRI" });
   const url = lastUrl("/running-trade/group");
@@ -341,7 +416,7 @@ test("the running-trade cache key includes every argument", async () => {
 test("a null data block is an empty answer, not a throw", async () => {
   responder = () => ({ data: null });
   assert.equal(await getRunningTrade(), null);
-  assert.deepEqual(await getTradeBook(), null);
+  assert.deepEqual(await getTradeBook({ groupBy: "PRICE" }), null);
   clearCache();
   responder = () => ({});
   assert.equal(await getMarketSession(), null);
@@ -386,7 +461,12 @@ test("an invalid symbol never reaches the wire", async () => {
 /* ================================== trade book ================================== */
 
 test("trade book prefixes mode and repeats data_mode", async () => {
-  await getTradeBook({ symbol: "BBRI", mode: "BIG_MONEY", dataModes: ["EXCLUDE_PRE", "EXCLUDE_POST"] });
+  await getTradeBook({
+    symbol: "BBRI",
+    mode: "BIG_MONEY",
+    dataModes: ["EXCLUDE_PRE", "EXCLUDE_POST"],
+    groupBy: "PRICE",
+  });
   const url = lastUrl("/trade-book");
   assert.equal(url.pathname, "/order-trade/trade-book");
   // Repeated keys, not a comma-joined value: this API reads only the first item of a joined list
@@ -399,13 +479,56 @@ test("trade book prefixes mode and repeats data_mode", async () => {
 });
 
 test("an empty data_modes list sends no parameter at all", async () => {
-  await getTradeBook({ symbol: "BBRI", dataModes: [] });
-  assert.deepEqual(query(lastUrl("/trade-book")), ["symbol=BBRI"]);
+  await getTradeBook({ symbol: "BBRI", dataModes: [], groupBy: "PRICE" });
+  assert.deepEqual(query(lastUrl("/trade-book")), ["group_by=PRICE", "symbol=BBRI"]);
 });
 
-test("trade book chart is a different route", async () => {
+test("trade book refuses the call the endpoint would refuse, and says the value is not guessed", async () => {
+  // Every call this project could make before `group_by` existed came back
+  // 400 {"error":"Group by is required"} — with `mode` set and with `mode` omitted alike. There
+  // was no argument combination that worked, which is what made this a dead tool rather than an
+  // awkward one.
+  await assert.rejects(
+    () => getTradeBook({ symbol: "BBRI", mode: "OVERALL", limit: 100 }),
+    (error: unknown) => {
+      assert.ok(error instanceof StockbitError);
+      assert.equal(error.kind, "invalid_param");
+      assert.match(error.message, /group_by/);
+      // "Required" on its own leaves the caller guessing at a vocabulary. This client has since
+      // measured one, so the refusal has to hand over the value that works — otherwise it is a
+      // wall rather than an answer.
+      assert.match(error.message, /group_by=1/);
+      // And it must not overstate what that afternoon settled: 2 was accepted but answered empty.
+      assert.match(error.message, /not established/);
+      return true;
+    },
+  );
+  assert.equal(requests, 0, "nothing was spent finding out what is already known");
+});
+
+test("group_by goes out verbatim — no prefix is invented for a vocabulary nobody has seen", async () => {
+  // `mode` and `data_mode` are prefixed because their enums were read off the wire. This one was
+  // not, so sending TRADE_BOOK_GROUP_BY_price would be inventing a filter and reading the narrower
+  // answer it produced as the whole one.
+  await getTradeBook({ symbol: "BBRI", groupBy: "  price  " });
+  assert.equal(lastUrl("/trade-book").searchParams.get("group_by"), "price");
+});
+
+test("a blank group_by is refused, not sent as an empty parameter", async () => {
+  await assert.rejects(
+    () => getTradeBook({ symbol: "BBRI", groupBy: "   " }),
+    (error: unknown) => error instanceof StockbitError && error.kind === "invalid_param",
+  );
+  assert.equal(requests, 0);
+});
+
+test("trade book chart is a different route, and is not held to the table's rule", async () => {
+  // The 400 was only ever seen from the table endpoint. Requiring group_by here as well would be
+  // this client inventing a rule for a route it has never called.
   await getTradeBook({ symbol: "BBRI", chart: true });
-  assert.equal(lastUrl("/trade-book/chart").pathname, "/order-trade/trade-book/chart");
+  const url = lastUrl("/trade-book/chart");
+  assert.equal(url.pathname, "/order-trade/trade-book/chart");
+  assert.equal(url.searchParams.get("group_by"), null);
 });
 
 /* ============================ movers, top stocks, queue ============================ */

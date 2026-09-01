@@ -213,6 +213,32 @@ test("a symbol with no series leaves its orders alone rather than guessing", () 
   assert.equal(settled.ledger.orders[0].status, "open");
 });
 
+test("an unreadable point in the series is not a price of zero, so it fills nothing", () => {
+  // Issue #40's real cost. `intraday_prices` used to run `.map(Number)` over the wire strings, so
+  // an empty one arrived here as the number 0 — and `0 <= 4000` fills the order. `null` must not
+  // repeat that: `null <= 4000` is ALSO true under JS coercion, which is why the comparison tests
+  // the type first. Nothing in this series reaches 4000, so nothing may fill.
+  const placed = placePaperOrder(ledgerWith(100_000_000), { symbol: "BBRI", action: "buy", price: 4000, lots: 10 }, AWAY, NOW);
+  const settled = settlePaper(placed.ledger, { intradayBySymbol: { BBRI: [4090, null, 4050] } }, NOW);
+  assert.deepEqual(settled.filled, []);
+  assert.equal(settled.ledger.orders[0].status, "open");
+  assert.equal(settled.ledger.cashIdr, 100_000_000, "and no cash moved");
+});
+
+test("a series of nothing but unreadable points fills nothing either", () => {
+  const placed = placePaperOrder(ledgerWith(100_000_000), { symbol: "BBRI", action: "buy", price: 4000, lots: 10 }, AWAY, NOW);
+  const settled = settlePaper(placed.ledger, { intradayBySymbol: { BBRI: [null, null] } }, NOW);
+  assert.deepEqual(settled.filled, []);
+  assert.equal(settled.ledger.orders[0].status, "open");
+});
+
+test("an unreadable point does not block a fill the readable points earned", () => {
+  const placed = placePaperOrder(ledgerWith(100_000_000), { symbol: "BBRI", action: "buy", price: 4000, lots: 10 }, AWAY, NOW);
+  const settled = settlePaper(placed.ledger, { intradayBySymbol: { BBRI: [null, 3995, null] } }, NOW);
+  assert.equal(settled.filled.length, 1);
+  assert.equal(settled.ledger.orders[0].fillPrice, 4000);
+});
+
 /* --------------------------------- cancel and amend --------------------------------- */
 
 test("an open order can be cancelled; a filled one cannot", () => {

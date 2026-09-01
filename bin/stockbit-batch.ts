@@ -41,7 +41,8 @@ import { getBars, MAX_PAGES, ROWS_PER_PAGE } from "../src/core/bars.js";
 import { getBrokerSummary } from "../src/core/marketdetectors.js";
 import { sessionClock } from "../src/core/sessionclock.js";
 import { RATE } from "../src/config.js";
-import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken, isVersionToken } from "../src/cliargs.js";
+import { VERSION } from "../src/version.js";
 import { BATCH_BIN, BATCH_COMMANDS, BATCH_EPILOGUE } from "../src/batch/cli.js";
 import { plan, planSummary, sessionDates, type BatchKind, type PlanOrder, type WorkItem } from "../src/batch/planner.js";
 import { run, type ProgressEvent } from "../src/batch/runner.js";
@@ -335,6 +336,12 @@ function statusCommand(): void {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "";
   const rest = process.argv.slice(3);
+
+  // `--version` as the command word: the package's own answer about itself, on stdout, exit 0.
+  if (isVersionToken(command)) {
+    process.stdout.write(`${VERSION}\n`);
+    return;
+  }
 
   if (!command || command === "help" || isHelpToken(command)) {
     const topic = rest[0];

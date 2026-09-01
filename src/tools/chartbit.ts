@@ -75,12 +75,22 @@ export function registerChartbitTools(define: Definer): void {
       "This is analysis context. Levels the user drew by hand are a statement about what they think " +
       "matters, and reading them before offering an opinion is the difference between advice and " +
       "noise.\n" +
-      "All three filters are optional; passing none returns what the account has for the default " +
-      "chart. Times are UNIX seconds. An empty list means nothing is saved for that chart.",
+      "PASS `layout_id`, from chartbit_layouts. Stockbit stores each chart's drawings against the " +
+      "CHART's id rather than the layout's, and this endpoint answers 400 to every call that does " +
+      "not carry one — with no arguments, with `{symbol}`, and with a valid layout_id and symbol " +
+      "together. You do not have to find that id: given layout_id it is decoded out of the layout " +
+      "itself, at the cost of one extra request, and comes back as `chartId` alongside " +
+      "`chartIdDerived: true`. Verified against a real account on 2026-09-01, which is also when " +
+      "the 400 stopped.\n" +
+      "A layout holding several charts is resolved by `symbol`, using the layout's own chart-to-" +
+      "symbol map. If that map names no chart for your symbol, or names more than one, you are " +
+      "asked for `chart_id` rather than given a guess — each chart has its own drawing store, so " +
+      "the wrong id returns another chart's lines and looks like it worked.\n" +
+      "Times are UNIX seconds. An empty list means nothing is saved for that chart.",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI"),
-      layout_id: z.string().optional().describe("Layout id from chartbit_layouts"),
-      chart_id: z.string().optional().describe("Chart id within the layout"),
+      layout_id: z.string().optional().describe("Layout id from chartbit_layouts. Needed unless you pass chart_id."),
+      chart_id: z.string().optional().describe("Chart id within the layout. Derived from the layout when omitted."),
     },
     async (a) =>
       runTool(async () => {
@@ -96,6 +106,7 @@ export function registerChartbitTools(define: Definer): void {
           symbol: result.symbol,
           layoutId: result.layoutId,
           chartId: result.chartId,
+          chartIdDerived: result.chartIdDerived,
           count: result.drawings.length,
           drawings: result.drawings.map(({ raw: _raw, ...drawing }) => drawing),
         };
@@ -241,20 +252,36 @@ export function registerChartbitTools(define: Definer): void {
       "never touches anything the user drew.\n" +
       "Drawings persist when Stockbit's page autosaves, or immediately if you call `chartbit_save`.\n" +
       "`failed` lists requests the widget accepted but created nothing for — those are NOT on the " +
-      "chart, so do not report them to the user as drawn.",
+      "chart, so do not report them to the user as drawn.\n" +
+      "`ours` is everything this server has recorded drawing on this symbol, and each entry carries " +
+      "`presence`: \"on-chart\" if the live chart still holds it, \"gone\" if it does not, and " +
+      "\"unconfirmed\" if the chart could not be read.\n" +
+      "CHECK `reconciled` FIRST. When it is true the chart was read: `onChart` counts what it still " +
+      "holds and `gone` lists what it does not — a drawing can vanish because the page reloaded " +
+      "before a save, or because the user deleted it, and neither is an error. When `reconciled` is " +
+      "false NOTHING was read: `onChart` is absent and `gone` is empty, and that means unknown, NOT " +
+      "zero and NOT nothing-lost. Say the chart could not be checked; do not report a count.\n" +
+      "Entries are never removed by this check: the record is the only thing distinguishing this " +
+      "server's drawings from the user's own, so a single bad reading must not be able to destroy it.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       annotations: z
         .array(z.record(z.unknown()))
         .describe(
           'Annotations: {kind:"level",price,label?} | {kind:"zone",from,to,label?} | ' +
-            '{kind:"trend",fromDate,fromPrice,toDate,toPrice,label?} | ' +
+            '{kind:"trend",from_date,from_price,to_date,to_price,label?} | ' +
             '{kind:"marker",date,price?,label,above?} | ' +
-            '{kind:"channel",fromDate,fromPrice,toDate,toPrice,offset,label?} | ' +
+            '{kind:"channel",from_date,from_price,to_date,to_price,offset,label?} | ' +
             '{kind:"vline",date,label?} | ' +
-            '{kind:"fib",fromDate,fromPrice,toDate,toPrice,label?} — from/to are the START and END ' +
-            'of the move being retraced (swing low then swing high for an up-move); the tool derives ' +
-            'its own levels',
+            '{kind:"fib",from_date,from_price,to_date,to_price,label?} — from/to are the START and ' +
+            'END of the move being retraced (swing low then swing high for an up-move); the tool ' +
+            'derives its own levels. ' +
+            'The coordinate keys are the SAME ones price_chart takes, so an array written for it can ' +
+            'be drawn locally to check the geometry and then passed here unchanged. Note the ' +
+            'reverse is only true for level/zone/trend/marker: price_chart renders those four and ' +
+            'rejects channel, vline and fib. The camelCase spelling (fromDate, ' +
+            'fromPrice, toDate, toPrice) is also accepted; passing both spellings of one coordinate ' +
+            'with different values is an error rather than a silent choice between them.',
         ),
       anchor_date: z.string().describe("YYYY-MM-DD to anchor time-less tools to, normally the latest bar"),
       replace: z.boolean().optional().describe("Remove this server's previous drawings on this symbol first"),
@@ -357,7 +384,12 @@ export function registerChartbitTools(define: Definer): void {
       "the API that it did.\n" +
       "`saved` is what the page's own save adapter reported; `verifiedDrawings` is how many drawings " +
       "a fresh read of the account found afterwards. A `null` there means the check could not be " +
-      "made — which is NOT the same as nothing being saved, and must not be reported as such.",
+      "made — which is NOT the same as nothing being saved, and must not be reported as such.\n" +
+      "The two halves run on DIFFERENT credentials: the save happens inside the chart page, on the " +
+      "browser's WEBSITE SESSION, while the check is a REST read on the `main` token domain. Either " +
+      "can be dead while the other works, so `saved: true` beside a `verifyError` is a save this " +
+      "server could not check — report it that way, never as a failed save. `status` reports the " +
+      "two credentials separately, so it says which one is dead.",
     {
       symbol: z.string().describe("IDX ticker"),
       layout_id: z.string().optional().describe("Layout id, to scope the verification read"),

@@ -29,7 +29,8 @@
  * **It never places, cancels or modifies an order.** It reads one public market endpoint.
  */
 import { sessionClock, isWithinPollingWindow } from "../src/core/sessionclock.js";
-import { CliParseError, formatUsage, gateCommandLine, isHelpToken } from "../src/cliargs.js";
+import { CliParseError, formatUsage, gateCommandLine, isHelpToken, isVersionToken } from "../src/cliargs.js";
+import { VERSION } from "../src/version.js";
 import { LIVE_BIN, LIVE_COMMANDS, LIVE_EPILOGUE } from "../src/live/cli.js";
 import { StockbitError } from "../src/http/errors.js";
 import { parseInterval, describeInterval, IntervalParseError } from "../src/live/interval.js";
@@ -368,6 +369,13 @@ async function main(): Promise<void> {
   // human output: plain text on stdout, exit 0 — the one deliberate exception to the JSON contract.
   if (explicit === undefined ? args.some(isHelpToken) : isHelpToken(explicit)) {
     process.stdout.write(formatUsage(LIVE_BIN, LIVE_COMMANDS, undefined, LIVE_EPILOGUE));
+    return;
+  }
+  // Version on the same rule, and read the same way: flags may precede the command word, so when
+  // there is no explicit command the whole argv is searched. `stockbit-live scan --version` stays
+  // an unknown flag on `scan`.
+  if (explicit === undefined ? args.some(isVersionToken) : isVersionToken(explicit)) {
+    process.stdout.write(`${VERSION}\n`);
     return;
   }
   if (explicit === "help") {

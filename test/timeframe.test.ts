@@ -95,6 +95,31 @@ test("OHLC folds correctly and the sums are sums", () => {
   assert.equal(weekly.sessionsPerBar[0], 5);
 });
 
+test("one unreadable session makes the whole bucket unreadable, not a partial week reported as whole", () => {
+  // All-or-nothing on purpose. Summing only the legible sessions would present four days as five,
+  // and a weekly volume carries nothing that says how many days went into it — so the invention
+  // would be undetectable downstream. `sessionsPerBar` counts sessions, not legible ones.
+  const daily = sessions("2026-08-03", 5, (i) => 1000 + i);
+  daily[2] = { ...daily[2], netForeign: null, volume: null };
+  const weekly = resample(daily, "W", { includePartial: true });
+  const w = weekly.bars[0];
+
+  assert.equal(w.netForeign, null, "four days of foreign flow is not this week's foreign flow");
+  assert.equal(w.volume, null);
+  assert.equal(w.value, daily.reduce((a, d) => a + (d.value as number), 0), "a field that WAS complete still sums");
+  assert.equal(w.close, daily[4].close, "and the price bar is unaffected — close is never absent");
+  assert.equal(weekly.sessionsPerBar[0], 5);
+});
+
+test("a bucket with no readable volume falls back to the last session's average rather than a NaN VWAP", () => {
+  const daily = sessions("2026-08-03", 5, (i) => 1000 + i);
+  const holed = daily.map((d) => ({ ...d, volume: null }));
+  const w = resample(holed, "W", { includePartial: true }).bars[0];
+  assert.equal(w.volume, null);
+  assert.equal(w.average, holed[4].average, "the documented fallback, not a division by an absent total");
+  assert.ok(Number.isFinite(w.average));
+});
+
 test("the weekly average is volume-WEIGHTED, not a mean of daily averages", () => {
   // Unweighted makes a 100-lot session count as much as a 10,000-lot one.
   const daily = sessions("2026-08-03", 2, (i) => (i === 0 ? 1000 : 2000));
@@ -117,9 +142,13 @@ test("changePercent is recomputed against the previous bucket, not summed", () =
   const daily = sessions("2026-08-03", 10, (i) => 1000 * 1.1 ** i);
   const weekly = resample(daily, "W", { includePartial: true });
 
-  assert.equal(weekly.bars[0].changePercent, 0, "the first bucket has nothing to change from");
+  // null, not 0. The comment this assertion has always carried — "nothing to change from" — is the
+  // argument for it: there is no prior bucket in this window, which is not the same as a week that
+  // moved nowhere, and a reader cannot tell those apart from a zero.
+  assert.equal(weekly.bars[0].changePercent, null, "the first bucket has nothing to change from");
+  assert.equal(weekly.bars[0].change, null);
   const expected = ((weekly.bars[1].close - weekly.bars[0].close) / weekly.bars[0].close) * 100;
-  assert.ok(Math.abs(weekly.bars[1].changePercent - expected) < 1e-3);
+  assert.ok(Math.abs((weekly.bars[1].changePercent as number) - expected) < 1e-3);
 });
 
 test("the trailing bucket is dropped as partial unless asked for", () => {

@@ -23,6 +23,8 @@ export interface Surface {
   writes: string[];
   /** The names a profile kept out, in registration order. */
   skipped: string[];
+  /** Families the profile withheld ENTIRELY — not one of their tools registered. */
+  withheldFamilies: Family[];
   /** What to call the profile in a message. `"all"` when there is none. */
   profileLabel: string;
   /**
@@ -54,6 +56,7 @@ export function describeSurface(profile?: ToolProfile, isDefault = false): Surfa
     tools: define.records(),
     writes: define.writeNames(),
     skipped: define.skippedNames(),
+    withheldFamilies: define.withheldFamilies(),
     profileLabel: profile?.label ?? "all",
     profileIsDefault: isDefault,
   };

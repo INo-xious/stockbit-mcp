@@ -344,8 +344,13 @@ function applyFill(
 }
 
 export interface PaperSettlementInput {
-  /** Minutely close series for the current session, per symbol, oldest first. */
-  intradayBySymbol: Record<string, number[]>;
+  /**
+   * Minutely close series for the current session, per symbol, oldest first.
+   *
+   * A `null` is a point the wire did not spell as a number — see `src/core/pricefeed.ts`. It is not
+   * a price and must never be compared as one.
+   */
+  intradayBySymbol: Record<string, Array<number | null>>;
 }
 
 /**
@@ -372,10 +377,13 @@ export function settlePaper(
     const series = input.intradayBySymbol[order.symbol];
     if (!series?.length) continue;
 
+    // `typeof close === "number"` is load-bearing, not defensive noise: `null <= price` coerces to
+    // `0 <= price` and is TRUE for every buy at any limit, so one unreadable point would fill the
+    // whole book. It is a type guard as well — `Number.isFinite` does not narrow.
     const touched =
       order.action === "buy"
-        ? series.some((close) => close <= order.price)
-        : series.some((close) => close >= order.price);
+        ? series.some((close) => typeof close === "number" && close <= order.price)
+        : series.some((close) => typeof close === "number" && close >= order.price);
     if (!touched) continue;
 
     const applied = applyFill(current, order, order.price, now);

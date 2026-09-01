@@ -5,7 +5,7 @@ import { join } from "node:path";
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
 process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-dist-"));
 
-import { test, before, after } from "node:test";
+import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
@@ -56,6 +56,8 @@ let distRequests = 0;
 const seenUrls: string[] = [];
 /** What the API should answer next; lets a test drive the 403 path. */
 let nextStatus = 200;
+/** A per-test response body, for tests asserting on a row shape rather than on the request. */
+let bodyOverride: unknown | undefined;
 
 function lastDistUrl(): URL {
   const found = [...seenUrls].reverse().find((u) => u.includes("/order-trade/broker/distribution"));
@@ -83,6 +85,13 @@ before(() => {
           headers: { "content-type": "application/json" },
         });
       }
+      // A per-test body, for the few tests that assert on a ROW SHAPE rather than on the request.
+      if (bodyOverride !== undefined) {
+        return new Response(JSON.stringify(bodyOverride), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       // Echo the requested data_type into the amounts so two different queries are distinguishable.
       const wantsVolume = u.includes("DATA_TYPE_VOLUME");
       const body = JSON.parse(JSON.stringify(FIXTURE));
@@ -99,6 +108,12 @@ before(() => {
     }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
+});
+
+// Reset only the per-test body. NOT the cache: several tests below count requests to prove a hit
+// or a miss, and clearing it here would make those pass for the wrong reason.
+beforeEach(() => {
+  bodyOverride = undefined;
 });
 
 after(() => {
@@ -218,6 +233,71 @@ test("the response is normalized into brokers and their counterparties", async (
 
   assert.equal(d.topSellers.length, 1);
   assert.deepEqual(d.topSellers[0].distributedWith, []);
+});
+
+test("a party the response gave no amount for is absent, not a party that traded nothing", async () => {
+  // `?? 0` put that broker in the diagram with a flow of zero — indistinguishable from one that
+  // genuinely traded nothing with the other side, and it mis-scaled every ribbon beside it.
+  bodyOverride = {
+    data: {
+      date_info: "2026-08-01",
+      by_value: {
+        top_broker_buy: [
+          {
+            detail: { code: "AK", type: "Asing" },
+            distribute_to: [{ code: "BK", type: "Asing", amount: 100 }, { code: "DX", type: "Asing" }],
+          },
+        ],
+        top_broker_sell: [],
+      },
+      by_volume: { top_broker_buy: [], top_broker_sell: [] },
+    },
+  };
+  const d = await getBrokerDistribution({ symbol: "GOTO", date: "2026-08-01" });
+
+  assert.equal(d.topBuyers[0].amount, null, "the broker is still reported — its amount is what is absent");
+  assert.equal(d.topBuyers[0].distributedWith[0].amount, 100, "a readable counterparty is unaffected");
+  assert.equal(d.topBuyers[0].distributedWith[1].amount, null);
+});
+
+test("an EMPTY amount is absent too, which is where the zero used to be manufactured", async () => {
+  // The omitted-key case above is the ONE empty shape that reached `?? null`. Every other one —
+  // "", null, "  ", false, [] — was turned into the figure 0 by `z.coerce.number()` first, so a
+  // broker with no amount was drawn as a hairline reading "traded almost nothing" and
+  // `brokersWithoutAmount` reported 0. Same defect as `src/core/bars.ts`, one module over.
+  for (const empty of ["", null, "  ", false, []] as unknown[]) {
+    bodyOverride = {
+      data: {
+        date_info: "2026-08-01",
+        by_value: {
+          top_broker_buy: [{ detail: { code: "AK", type: "Asing", amount: empty }, distribute_to: [] }],
+          top_broker_sell: [],
+        },
+        by_volume: { top_broker_buy: [], top_broker_sell: [] },
+      },
+    };
+    clearCache();
+    const d = await getBrokerDistribution({ symbol: "GOTO", date: "2026-08-01" });
+    assert.equal(d.topBuyers[0].amount, null, `an amount of ${JSON.stringify(empty)} is absent, not zero`);
+  }
+});
+
+test("a thousands-separated amount is read rather than refusing the whole call", async () => {
+  // `Number("1,234")` is NaN, which under the old coerced schema failed the parse and threw
+  // schema_drift for the entire response. Stockbit is on record sending `{"value":"3,910"}`.
+  bodyOverride = {
+    data: {
+      date_info: "2026-08-01",
+      by_value: {
+        top_broker_buy: [{ detail: { code: "AK", type: "Asing", amount: "1,234" }, distribute_to: [] }],
+        top_broker_sell: [],
+      },
+      by_volume: { top_broker_buy: [], top_broker_sell: [] },
+    },
+  };
+  clearCache();
+  const d = await getBrokerDistribution({ symbol: "GOTO", date: "2026-08-01" });
+  assert.equal(d.topBuyers[0].amount, 1234);
 });
 
 test("VOLUME selects the other block and reports the unit as LOTS, not shares", async () => {

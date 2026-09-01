@@ -26,7 +26,7 @@
 import { z } from "zod";
 import { getJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { normalizeTradeDate, todayIso } from "./dates.js";
@@ -52,30 +52,6 @@ async function readData(
 }
 
 /* ------------------------------ shared small parsers ------------------------------ */
-
-/**
- * Read a number that may arrive as a number, a numeric string, or a `{value}` / `{raw}` wrapper.
- *
- * All of those shapes are live in this API — `src/core/pricefeed.ts` found the auto-rejection bands
- * arriving as `{"value":"3,910"}` with bare numbers beside them — so a chart point's OHLCV is read
- * the same defensive way. `Number("")` being `0` is the specific trap: an empty string must come
- * back as absent, never as a free zero.
- */
-function numberish(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return null;
-    const parsed = Number(trimmed.replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (value && typeof value === "object") {
-    const wrapper = value as Record<string, unknown>;
-    if ("value" in wrapper) return numberish(wrapper.value);
-    if ("raw" in wrapper) return numberish(wrapper.raw);
-  }
-  return null;
-}
 
 /**
  * Jakarta's offset from UTC. IDX does not observe daylight saving, so this is a constant and not a
@@ -342,7 +318,7 @@ function projectSeries(
 
   const read = (row: Record<string, unknown>, field: PointField): number | null => {
     const key = mapped[field];
-    return key === undefined ? null : numberish(row[key]);
+    return key === undefined ? null : wireNumber(row[key]);
   };
 
   const bars: Bar[] = located.rows.map((row, index) => {
@@ -363,14 +339,18 @@ function projectSeries(
       low: read(row, "low") ?? close,
       close,
       average: read(row, "average") ?? close,
-      volume: read(row, "volume") ?? 0,
-      value: read(row, "value") ?? 0,
-      frequency: read(row, "frequency") ?? 0,
-      change: read(row, "change") ?? 0,
-      changePercent: read(row, "changePercent") ?? 0,
-      foreignBuy: read(row, "foreignBuy") ?? 0,
-      foreignSell: read(row, "foreignSell") ?? 0,
-      netForeign: read(row, "netForeign") ?? 0,
+      // No `?? 0` below. open/high/low fall back to the close because a flat candle is a
+      // documented approximation of the same quantity and the warning list says when it happened;
+      // there is no such stand-in for a volume or a foreign flow, so absence is reported as
+      // absence. This route is the one that proves it matters: it sends empty strings.
+      volume: read(row, "volume"),
+      value: read(row, "value"),
+      frequency: read(row, "frequency"),
+      change: read(row, "change"),
+      changePercent: read(row, "changePercent"),
+      foreignBuy: read(row, "foreignBuy"),
+      foreignSell: read(row, "foreignSell"),
+      netForeign: read(row, "netForeign"),
     };
   });
 
@@ -381,12 +361,12 @@ function projectSeries(
 
   const warnings: string[] = [];
   // Absent is not the only way to be flat. /charts/:symbol/daily sends open/high/low/volume as
-  // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `numberish("")` returns null
+  // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `wireNumber("")` returns null
   // — every bar silently took its close for all three and nothing said so. A field that reads null
   // on every row is as unusable as one that was never there, and the caller has to be told.
-  const flat = (["open", "high", "low"] as const).filter(
-    (f) => unmapped.includes(f) || located.rows.every((row) => read(row, f) === null),
-  );
+  const unreadable = (field: PointField): boolean =>
+    unmapped.includes(field) || located.rows.every((row) => read(row, field) === null);
+  const flat = (["open", "high", "low"] as const).filter(unreadable);
   if (flat.length > 0) {
     warnings.push(
       `No usable ${flat.join("/")} arrived — absent, or present and empty on every bar — so those ` +
@@ -394,8 +374,17 @@ function projectSeries(
         "flat. Do not run candlestick pattern detection or a high/low-based indicator on this series.",
     );
   }
-  if (unmapped.includes("volume")) {
-    warnings.push("No volume field was found; volume is 0 on every bar and is not a real zero.");
+  // The same empty-string trap, one field over. This asked only whether the KEY was missing, and
+  // `keyIn` accepts an empty string as present — so on the observed daily payload, where volume
+  // arrives as "", `unmapped` stayed clean and NO warning fired at all while every bar reported a
+  // volume of 0. Ask whether a usable value arrived, not whether the key did.
+  const absent = (["volume", "value", "frequency", "change", "changePercent", "foreignBuy", "foreignSell", "netForeign"] as const).filter(unreadable);
+  if (absent.length > 0) {
+    warnings.push(
+      `No usable ${absent.join("/")} arrived — absent, or present and empty on every bar — so ` +
+        "those are null rather than zero on every bar. A null is 'the response did not carry it', " +
+        "not 'the figure was zero'.",
+    );
   }
 
   const consumed = new Set(Object.values(mapped));
@@ -463,7 +452,27 @@ export async function getChartRaw(symbol: string, timeframe: string): Promise<un
 /* ================================ enum vocabularies ================================ */
 
 /** Sides of the running-trade tape. Wire form is `RUNNING_TRADE_ACTION_TYPE_<value>`. */
+/**
+ * The most rows the running-trade tape will ever return, whatever `limit` says.
+ *
+ * OBSERVED BEHAVIOUR, not a documented maximum — the same distinction
+ * `INSIDER_TRANSACTIONS_LIMIT_CEILING` draws next door. Measured directly on 2026-09-01 against
+ * BBRI: `limit=100` returned 100 rows, `limit=101` returned 100, `limit=250` returned 100. Never
+ * an error, always a silent truncation. That agrees with the 2026-08-28 probe recorded on
+ * `getRunningTrade` below and with a 2026-08-31 field report that got byte-identical responses for
+ * 200 and 3000, so the boundary is pinned at 100 rather than merely bracketed.
+ *
+ *
+ * Refused rather than clamped. Nothing in the response marks the truncation, so a caller who asked
+ * for 250 would be handed 100 and no way to notice — and because `order_by` starts every window at
+ * the session open and `offset`/`page` were measured to move nothing, the rows they wanted are not
+ * reachable through this route at any limit. Being told that is the useful answer.
+ */
+export const RUNNING_TRADE_MAX_LIMIT = 100;
+
 export const RUNNING_TRADE_ACTIONS = ["ALL", "BUY", "SELL"] as const;
+/** The three orderings the endpoint accepts. `0` and `4` were measured to be rejected. */
+export const RUNNING_TRADE_ORDER_BY = [1, 2, 3] as const;
 export type RunningTradeAction = (typeof RUNNING_TRADE_ACTIONS)[number];
 
 /** Trade-book views. `BIG_MONEY` restricts to large prints. Wire form is `TRADE_BOOK_MODE_<value>`. */
@@ -516,9 +525,14 @@ export function normalizeSortKey(input: string): string {
  * truncate a caller who asked for more. Non-integers and zero are refused because they reach the
  * wire as literal garbage (`limit=NaN`) and this API answers those with a confident 200.
  */
-function positiveInt(name: string, value: number): number {
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new StockbitError("invalid_param", `${name} must be a positive whole number, got ${String(value)}`);
+function positiveInt(name: string, value: number, max?: number, note?: string): number {
+  if (!Number.isInteger(value) || value <= 0 || (max !== undefined && value > max)) {
+    throw new StockbitError(
+      "invalid_param",
+      max === undefined
+        ? `${name} must be a positive whole number, got ${String(value)}`
+        : `${name} must be a whole number between 1 and ${max}, got ${String(value)}${note ?? ""}`,
+    );
   }
   return value;
 }
@@ -600,8 +614,28 @@ export async function getRunningTrade(opts: RunningTradeOptions = {}): Promise<u
   // Plural. See the note above — the singular form is accepted and ignored.
   if (opts.symbol !== undefined) params.symbols = normalizeSymbol(opts.symbol);
   if (opts.action !== undefined) params.action_type = `RUNNING_TRADE_ACTION_TYPE_${opts.action}`;
-  if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+  if (opts.limit !== undefined) {
+    params.limit = positiveInt(
+      "limit",
+      opts.limit,
+      RUNNING_TRADE_MAX_LIMIT,
+      ` — ${RUNNING_TRADE_MAX_LIMIT} is the largest value this endpoint has been seen to answer, and ` +
+        `200 and 3000 came back identical to each other. Its window always starts at the session ` +
+        `open and offset/page were measured to move nothing, so a bigger limit would not have ` +
+        `reached later prints either. Use broker_flow_intraday for the rest of the session: whole ` +
+        `day, one-minute resolution, per-broker value and volume`,
+    );
+  }
   // Always sent: omitting it is a hard 400, so there is no "unset" worth preserving here.
+  // Refused here when it is outside the measured set, because 0 and 4 were both seen rejected and
+  // a round trip that comes back 400 teaches the caller nothing this file does not already know.
+  if (opts.orderBy !== undefined && !RUNNING_TRADE_ORDER_BY.includes(opts.orderBy)) {
+    throw new StockbitError(
+      "invalid_param",
+      `order_by must be one of ${RUNNING_TRADE_ORDER_BY.join(", ")} — 0 and 4 were both refused ` +
+        `upstream when measured — got ${String(opts.orderBy)}`,
+    );
+  }
   params.order_by = String(opts.orderBy ?? 1);
   const route: RouteName = opts.grouped ? "runningTradeGroup" : "runningTrade";
   return cached(keyFor(route, params), CACHE.defaultTtlMs, () =>
@@ -610,12 +644,22 @@ export async function getRunningTrade(opts: RunningTradeOptions = {}): Promise<u
 }
 
 /**
- * The intraday running-trade chart for one symbol.
+ * The intraday running-trade chart for one symbol: per-broker flow on a one-minute grid.
  *
- * Returned unprojected. The name this is registered under reflects how the project expects to use
- * it, not a claim about the payload: whether it breaks the session down by broker, by price level or
- * by side is unobserved, and reading it as broker flow before that is confirmed would be reading a
- * shape that may not be there.
+ * Returned unprojected. The name this is registered under used to be a hope rather than a claim —
+ * "whether it breaks the session down by broker, by price level or by side is unobserved". Read
+ * live on 2026-09-01 against BBRI, it is by broker and by minute:
+ *
+ *   `data.price_chart_data`  — 335 points, 09:00 → 16:14, each `{date, time, datetime_label,
+ *                              value{raw,formatted}, open, high, low}`
+ *   `data.broker_chart_data` — TWO series, `TYPE_CHART_VALUE` and `TYPE_CHART_VOLUME`, each with a
+ *                              `brokers` code list and `charts: [{broker_code, chart[]}]` on the
+ *                              same grid. Five brokers on that reading, not the whole market.
+ *   also `from`, `to`, `data_last_updated`, `date_session_info`
+ *
+ * Worth knowing beside `getRunningTrade` above: that tape shows only the first 100 prints of the
+ * day and runs eight to ten minutes behind. This covers the whole session at minute resolution, so
+ * it answers the questions the tape cannot.
  */
 export async function getRunningTradeChart(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
@@ -631,6 +675,28 @@ export interface TradeBookOptions {
   mode?: TradeBookMode;
   /** Auction phases to exclude. Sent as repeated parameters, one per value. */
   dataModes?: readonly TradeBookDataMode[];
+  /**
+   * REQUIRED by the endpoint, and left to the caller rather than defaulted.
+   *
+   * A 2026-08-31 field report called this route with `mode` set and with `mode` omitted and got
+   * `400 {"error":"Group by is required","kind":"invalid_param"}` both times. The parameter was
+   * absent from this interface entirely, so every call this project could make was a call that
+   * could not succeed.
+   *
+   * Settled on the wire 2026-09-01, on the first candidate. The key really is `group_by` — the
+   * same transformation `/order-trade/running-trade` shows, where `"OrderBy is a required field"`
+   * means `order_by`. Values, measured against BBRI:
+   *
+   *   `1` — 200, a book of price levels. This is the view the tool is named for.
+   *   `2` — 200, but `book: []` on a closed market, so what it groups by is NOT established.
+   *   `0` — 400 `Group by is required`; the server reads it as absent rather than as a value.
+   *   `3` — 400 `Your request is invalid`.
+   *
+   * Still passed through VERBATIM rather than mapped to an enum. Only four values have been tried,
+   * and refusing a fifth that this file has never heard of would be the tool telling the caller
+   * what the server accepts on the strength of one afternoon.
+   */
+  groupBy?: string;
   limit?: number;
   /** Read the chart form (`tradeBookChart`) instead of the table. */
   chart?: boolean;
@@ -652,6 +718,24 @@ export async function getTradeBook(opts: TradeBookOptions = {}): Promise<unknown
     params.data_mode = opts.dataModes.map((m) => `TRADE_BOOK_DATA_MODE_${m}`);
   }
   if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+  const groupBy = opts.groupBy?.trim();
+  // Only the table route is known to demand it. The chart route is a different endpoint and the
+  // 400 was never seen from it, so requiring it there too would be this file inventing a rule.
+  if (!groupBy && opts.chart !== true) {
+    throw new StockbitError(
+      "invalid_param",
+      "trade book needs group_by: without it the endpoint answers " +
+        '400 {"error":"Group by is required"} whatever else is sent, so there is no argument ' +
+        "combination that works without one. Pass group_by=1 for the by-price book, which is the " +
+        "view this tool is named for. Measured 2026-09-01: 1 and 2 are accepted, 0 answers the " +
+        "same 400 as omitting it, and 3 answers `Your request is invalid`. What 2 groups by is not " +
+        "established — it answered with an empty book outside session hours.",
+    );
+  }
+  // Sent exactly as given. Prefixing it the way `mode` is prefixed would be a guess about a
+  // vocabulary nothing here has seen, and a wrong guess reads as a working call that filters to
+  // something the caller did not ask for.
+  if (groupBy) params.group_by = groupBy;
   const route: RouteName = opts.chart ? "tradeBookChart" : "tradeBook";
   return cached(keyFor(route, params), CACHE.defaultTtlMs, () =>
     readData(route, opts.chart ? "trade book chart" : "trade book", { params }),

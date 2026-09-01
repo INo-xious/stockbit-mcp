@@ -39,6 +39,7 @@ import { StockbitError } from "../http/errors.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
+import { resolveCompanyId } from "./emitten.js";
 import { normalizeTradeDate } from "./dates.js";
 
 /* -------------------------------- vocabularies -------------------------------- */
@@ -288,11 +289,24 @@ function normalizeInsiderId(input: string, field = "insider"): string {
   return value;
 }
 
-/** A 1-based page number. Rejects 0, negatives and fractions rather than sending them. */
-function normalizePage(input: number | undefined, field = "page"): number | undefined {
+/**
+ * A 1-based count, optionally with a ceiling. Rejects 0, negatives and fractions rather than
+ * sending them.
+ *
+ * The ceiling is optional because only `limit` has one, and the message says whose it is: a caller
+ * told "must be between 1 and 20" with no attribution will read 20 as an upstream fact, which is
+ * the exact reading `INSIDER_TRANSACTIONS_LIMIT_CEILING` exists to avoid making.
+ */
+function normalizePage(input: number | undefined, field = "page", max?: number): number | undefined {
   if (input === undefined) return undefined;
-  if (!Number.isInteger(input) || input < 1) {
-    throw new StockbitError("invalid_param", `${field} must be a whole number of 1 or more, got ${input}`);
+  if (!Number.isInteger(input) || input < 1 || (max !== undefined && input > max)) {
+    throw new StockbitError(
+      "invalid_param",
+      max === undefined
+        ? `${field} must be a whole number of 1 or more, got ${input}`
+        : `${field} must be a whole number between 1 and ${max} — this client's ceiling, not a ` +
+          `documented upstream maximum — got ${input}`,
+    );
   }
   return input;
 }
@@ -332,6 +346,21 @@ function normalizeWindow(
 }
 
 /* --------------------------- insider transactions --------------------------- */
+
+/**
+ * The largest `limit` this client will send. THIS CLIENT'S ceiling, not a known upstream maximum.
+ *
+ * One observation is all there is: a 2026-08-31 field report called this route for one symbol over
+ * 2024-01-01..2026-12-31 and got HTTP 400 INVALID_PARAMETER at `limit: 50`, then a 200 at
+ * `limit: 20` — the value Stockbit's own insider page sends. Nothing between 21 and 49 was tried
+ * and no narrower window was tried either, so it is not known whether 50 fails on its own. The 400
+ * named no parameter, so even "it was `limit`" rests on `limit` being the only thing that changed
+ * between the two calls. Refused here rather than spent on a round trip likely to 400.
+ *
+ * Raise it when a larger value is SEEN to answer, not before. Same rule as everything else on the
+ * evidence ladder: settling it takes a live call, not an edit.
+ */
+export const INSIDER_TRANSACTIONS_LIMIT_CEILING = 20;
 
 export interface InsiderTransactionOptions {
   /** Restrict to one IDX ticker. Omit for the market-wide feed Stockbit's insider page shows. */
@@ -393,7 +422,7 @@ export function buildInsiderTransactionParams(
 
   // Both clients always send a page; 1 is their default too.
   params.page = normalizePage(opts.page) ?? 1;
-  const limit = normalizePage(opts.limit, "limit");
+  const limit = normalizePage(opts.limit, "limit", INSIDER_TRANSACTIONS_LIMIT_CEILING);
   if (limit !== undefined) params.limit = limit;
   if (opts.actionType !== undefined) {
     params.action_type = wireEnum(opts.actionType, ACTION_PREFIX, "action_type");
@@ -546,6 +575,11 @@ export interface Shareholding {
   entriesFrom: string | null;
   /** How many entries it held, or null when there was no such key. Zero is a real, empty answer. */
   entryCount: number | null;
+  /**
+   * Companies mode only: the numeric company id the ticker resolved to, which is what the request
+   * was actually addressed with. It is also the `root_id` for `mode="network"`.
+   */
+  companyId?: string;
   /** Network mode only: how many nodes the graph carried, or null when there was no `nodes` key. */
   nodeCount?: number | null;
   /** The payload, unprojected. */
@@ -566,16 +600,54 @@ function firstArray(
   return { from: null, count: null };
 }
 
-/** Who holds a company. */
+/**
+ * Who holds a company.
+ *
+ * ## The path segment is a company id, and it was being sent a ticker
+ *
+ * `shareholding(mode="companies", symbol="DEWA")` answered `400 {"error":"Invalid company id"}`,
+ * because the ticker went straight into the `{symbol}` segment of
+ * `/insider/shareholding/companies/{…}` and the endpoint wants Stockbit's internal numeric id
+ * (`"134"` for DEWA). There was no argument that made this mode work.
+ *
+ * The id is resolved here rather than exposed as a parameter, so the documented interface stays a
+ * ticker — which is what a caller has. `resolveCompanyId` is the same reader `watchlist_add`
+ * already uses, and it reads the id off the `emitten/{symbol}/info` row that `quote` is written
+ * against, so the id itself is observed rather than guessed. It costs one extra request, cached.
+ *
+ * `subject` stays the ticker that was asked for; `companyId` says what was actually sent, because
+ * a caller comparing this against `mode="network"` needs the id and would otherwise have to go and
+ * find it a second time.
+ */
 export async function getShareholdingCompanies(symbol: string): Promise<Shareholding> {
   const sym = normalizeSymbol(symbol);
   return cached(`shareholding:companies:${sym}`, CACHE.keystatsTtlMs, async () => {
+    const companyId = await resolveCompanyId(sym);
+    // Tested for being a NUMBER, not merely for being present. The quote row reads its id through
+    // `z.coerce.string()`, and `String(null)` is the four-character string "null" — truthy, and
+    // exactly the kind of value that reaches a URL looking like an id. The transport's numeric
+    // validator would refuse it a moment later, but with a message about a malformed id rather
+    // than the true one: Stockbit has no id for this ticker.
+    if (companyId === undefined || !/^[0-9]+$/.test(companyId)) {
+      throw new StockbitError(
+        "not_found",
+        `${sym} has no company id on Stockbit, and this endpoint is addressed by company id rather ` +
+          `than by ticker, so the register cannot be read for it. Check the ticker.`,
+      );
+    }
     const data = unwrap(
-      await getJson("shareholdingCompanies", { segments: { symbol: sym } }),
+      await getJson("shareholdingCompanies", { segments: { companyId } }),
       "shareholding companies",
     );
     const { from, count } = firstArray(data, ["holders", "holdings"]);
-    return { mode: "companies" as const, subject: sym, entriesFrom: from, entryCount: count, data };
+    return {
+      mode: "companies" as const,
+      subject: sym,
+      companyId,
+      entriesFrom: from,
+      entryCount: count,
+      data,
+    };
   });
 }
 

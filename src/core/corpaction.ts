@@ -12,10 +12,15 @@
  * So the row shapes below are not projected into named fields. Every accessor returns the rows
  * Stockbit sent, untouched, plus a `rowsFrom` tag saying where in the payload they were found.
  * Naming survivors would turn "we have not looked at this field yet" into "this field does not
- * exist" (see `getSectors` in emitten.ts for the same argument made at length). The two places this
- * module does reach into a row — the ex-date sort in `getDividendCalendar` and the symbol matching
- * in `getCorpactionStatus` — both report what they found and what they did not, so a wrong guess
- * surfaces as "not located" rather than as a confident answer.
+ * exist" (see `getSectors` in emitten.ts for the same argument made at length). The three places
+ * this module does reach into a row — the ex-date sort in `getDividendCalendar`, the symbol
+ * matching in `getCorpactionStatus`, and the date-order check behind `suspectDates` — all report
+ * what they found and what they did not, so a wrong guess surfaces as "not located" rather than as
+ * a confident answer.
+ *
+ * `suspectDates` reads nothing OUT of a row: it compares two of the row's own dates against an
+ * order fixed by definition and reports the two keys it compared, so a wrong guess about a
+ * spelling costs a false suspicion a reader can dismiss, never a rewritten value.
  */
 import { z } from "zod";
 import { getJson, type GetOptions } from "../http/client.js";
@@ -125,6 +130,19 @@ export interface ActionPage extends RowSet {
   actionType: CorpactionType;
   /** The issuer filter that was applied, absent when the request was market-wide. */
   symbol?: string;
+  /**
+   * Rows whose own dates are in an order that cannot have happened. ABSENT when none are, which is
+   * the normal case — the same shape as `unreadable` on a broker summary.
+   *
+   * Nothing here is repaired: the rows are handed over exactly as Stockbit sent them, and this says
+   * only that two of a row's dates disagree with an ordering fixed by definition. A RUPS record
+   * date ten months AFTER the meeting it gates (2026-08-31 field report) is wrong at the source;
+   * what this server must not do is pass it on looking clean.
+   *
+   * Absent does NOT mean the dates were checked and cleared — most rows carry neither side of any
+   * pair. See `suspectDates` for what is and is not compared.
+   */
+  suspectDates?: SuspectDate[];
 }
 
 /**
@@ -143,27 +161,53 @@ export async function getCorpactions(
   // Every argument that changes the answer is in the key. A key of `corpaction:${actionType}` would
   // serve a 5-row answer to the caller who asked for 50.
   const key = `corpaction:${actionType}:${sym ?? "-"}:${rows ?? "-"}`;
-  return cached(key, CACHE.keystatsTtlMs, async () => ({
-    actionType,
-    ...(sym ? { symbol: sym } : {}),
-    ...(await fetchRows("corpaction", `corporate actions (${actionType})`, {
+  return cached(key, CACHE.keystatsTtlMs, async () => {
+    const page = await fetchRows("corpaction", `corporate actions (${actionType})`, {
       segments: { actionType },
       params: { symbol: sym, limit: rows },
-    })),
-  }));
+    });
+    const suspect = suspectDates(page.rows);
+    return {
+      actionType,
+      ...(sym ? { symbol: sym } : {}),
+      ...page,
+      ...(suspect.length > 0 ? { suspectDates: suspect } : {}),
+    };
+  });
 }
 
 /* -------------------------------- dividend calendar -------------------------------- */
 
 /**
- * Candidate spellings for the ex-date, tried in order.
+ * Candidate spellings for the ex-date, tried in order, MOST SPECIFIC FIRST.
  *
- * These are guesses, and they are treated as guesses: whichever one is present on the rows is
- * reported back as `exDateField`, and if none is present the merged list keeps Stockbit's own order
- * and says `exDateField: null`. Nothing is dropped either way. The alternative — silently sorting by
- * a key that does not exist — produces a list that looks chronological and is not.
+ * Still guesses, and still treated as guesses — but resolved per ROW rather than once for the
+ * merged list. Whichever key produced a row's date is reported on that row as `exDateFrom`, the
+ * distinct keys used across the merge are reported as `exDateFields`, and a row no candidate
+ * matched keeps `exDate: null` and is counted in `undated`. Nothing is dropped either way. The
+ * alternative — silently sorting by a key that does not exist — produces a list that looks
+ * chronological and is not, which is exactly what this list did before `dividend_exdate` was on it.
+ *
+ * The ORDER is load-bearing at both ends. `dividend_exdate` LEADS because a cash-dividend row was
+ * reported carrying it beside `dividend_cumdate` / `dividend_recdate` / `dividend_paydate` — that
+ * came from a field report, not from a live pass by this project, and nothing here claims otherwise.
+ * `stock_dividend_exdate` is the same prefixing applied to the other leg's path segment; it is an
+ * extrapolation, so it sits BELOW `ex_date` rather than beside its evidenced sibling — an
+ * unevidenced guess must never outrank a spelling something has actually read. And `date` stays
+ * LAST because it is the least specific: a row carrying both a bare `date` and a qualified ex-date
+ * must be read from the qualified one. A candidate that matches no row is never named in
+ * `exDateFrom` or `exDateFields`, so a wrong guess costs nothing and claims nothing.
  */
-const EX_DATE_KEYS = ["ex_date", "exdate", "ex_dividend_date", "date_ex", "ex", "date"] as const;
+const EX_DATE_KEYS = [
+  "dividend_exdate",
+  "ex_date",
+  "stock_dividend_exdate",
+  "exdate",
+  "ex_dividend_date",
+  "date_ex",
+  "ex",
+  "date",
+] as const;
 
 /** The two action kinds a dividend calendar covers. They are different instruments; see below. */
 const DIVIDEND_KINDS = ["dividend", "stock_dividend"] as const;
@@ -173,17 +217,51 @@ export interface DividendRow extends Record<string, unknown> {
   corpactionType: (typeof DIVIDEND_KINDS)[number];
   /** The value the sort used, normalized to YYYY-MM-DD, or null when none was found on this row. */
   exDate: string | null;
+  /**
+   * The wire key `exDate` was read from on THIS row, null when no candidate matched it.
+   *
+   * Added by this tool, not by Stockbit — like `corpactionType` and `exDate` beside it.
+   */
+  exDateFrom: string | null;
 }
 
 export interface DividendCalendar {
   symbol?: string;
   rows: DividendRow[];
-  /** The key the ex-date sort read, or null when no candidate key was present on any row. */
+  /**
+   * The FIRST candidate key any row was read from, or null when no candidate matched any row.
+   *
+   * Unchanged in meaning: it is the earliest key in `EX_DATE_KEYS` that yielded a date anywhere in
+   * the merge, and it is null exactly when `exDateFields` is empty.
+   *
+   * The two orders are NOT the same, so this is not `exDateFields[0]`. This one is the earliest in
+   * the CANDIDATE list's order; `exDateFields` is in MERGE order, the order the rows were read in.
+   * Rows `[{ex_date: …}, {dividend_exdate: …}]` give `exDateField: "dividend_exdate"` — it leads
+   * `EX_DATE_KEYS` — beside `exDateFields: ["ex_date", "dividend_exdate"]`. Read `exDateFields`, or
+   * each row's own `exDateFrom`, to see them all.
+   */
   exDateField: string | null;
+  /**
+   * Every distinct key an `exDate` was actually read from, in merge order.
+   *
+   * Empty means nothing matched and the list is in Stockbit's own order, NOT chronological. More
+   * than one means the rows do not all use one spelling — the two kinds are fetched separately and
+   * may differ, and rows within one kind may differ too — and the list IS sorted regardless.
+   */
+  exDateFields: string[];
   /** Rows carrying no usable ex-date. They are kept, at the end of the list, never dropped. */
   undated: number;
   /** `rowsFrom` for each leg, so an unreadable payload on one kind is visible rather than silent. */
   rowsFrom: Record<(typeof DIVIDEND_KINDS)[number], string>;
+  /**
+   * Rows whose own dates cannot have happened in that order, indexing `rows` AFTER the sort.
+   *
+   * Carried here as well as on `ActionPage` because this tool's own description tells callers to
+   * prefer it for dividends: a check that fired only on the path they were steered away from would
+   * be a claim of coverage that does not exist. Same meaning as `ActionPage.suspectDates`, absence
+   * included — absent is "nothing was out of order", never "the dates were checked and cleared".
+   */
+  suspectDates?: SuspectDate[];
 }
 
 /**
@@ -240,6 +318,110 @@ function findExDateKey(rows: Array<Record<string, unknown>>): string | null {
 }
 
 /**
+ * The first of `keys` that yields a real date on THIS row, and the key it came from.
+ *
+ * Per row rather than once for the whole merge, because the merge holds two kinds fetched from two
+ * path segments and they need not spell the ex-date the same way. Resolved once for the list, the
+ * first leg to match would decide the key for both, and the other leg would come back entirely
+ * `exDate: null` — counted as undated while `exDateField` named a key those rows do not carry. That
+ * is a confident wrong provenance claim, which is worse than the null it replaces.
+ *
+ * Note it tests the VALUE, not `key in row`: an empty `dividend_exdate` must fall through to a
+ * populated `ex_date` rather than shadowing it. `asDate("")` is null, which is what makes that work.
+ *
+ * One reader, taking its candidate list as an argument — the ex-date probe and the date-order check
+ * below want exactly the same loop over a different list, and a second copy is how the two would
+ * come to disagree about what counts as a date.
+ */
+function pickDate(
+  row: Record<string, unknown>,
+  keys: readonly string[] = EX_DATE_KEYS,
+): { value: string | null; key: string | null } {
+  for (const key of keys) {
+    const value = asDate(row[key]);
+    if (value !== null) return { value, key };
+  }
+  return { value: null, key: null };
+}
+
+/* ------------------------------ date-order sanity ------------------------------ */
+
+/**
+ * Date pairs whose order is fixed by DEFINITION, not by custom. `earlier` must not fall after
+ * `later`; a row that says otherwise is reporting something that cannot have happened.
+ *
+ * Deliberately short. A pair goes on this list only when the inequality is a definitional certainty
+ * AND at least one of its spellings has actually been reported — a rule that can never fire is dead
+ * code claiming coverage. Rejected for that reason: announcement-to-meeting gaps (regulated, but
+ * "announcement" is ambiguous on a feed row), and every period start/end on rightissue, warrant,
+ * ipo and tenderoffer (definitionally ordered, no key ever seen).
+ *
+ * Each side is a candidate LIST because the spellings are unverified, exactly as `EX_DATE_KEYS` is,
+ * and whichever key matched is named in the output. Note what is NOT here: a bare `date` as the
+ * EARLIER side of anything. `date` is the least specific key this module knows and is as likely to
+ * be an announcement date as anything else; it appears only as a rups meeting-date candidate, where
+ * the row's whole subject is a meeting.
+ */
+const DATE_ORDER: ReadonlyArray<{ earlier: readonly string[]; later: readonly string[] }> = [
+  // The register deciding who may attend closes BEFORE the meeting convenes. This is the pair the
+  // 2026-08-31 field report found inverted by ten months.
+  //
+  // `date` LEADS the later list, against this module's usual most-specific-first ordering, for the
+  // reason `EX_DATE_KEYS` states above: an unevidenced guess must never outrank a spelling
+  // something has actually read. `rups_eligible_date` and `date` are what that report read; the
+  // three qualified meeting-date spellings behind them have never been seen at all, and putting one
+  // first would let `laterKey` name a key this project invented.
+  { earlier: ["rups_eligible_date"], later: ["date", "rups_date", "rups_meeting_date", "meeting_date"] },
+  // Cum is the last day the share trades WITH the entitlement, ex the first day without it.
+  { earlier: ["dividend_cumdate", "cum_date", "cumdate"], later: ["dividend_exdate", "ex_date", "exdate"] },
+  // The register closes on or after the ex-date under every settlement regime; never before.
+  { earlier: ["dividend_exdate", "ex_date", "exdate"], later: ["dividend_recdate", "recording_date", "record_date"] },
+  // A dividend is paid to holders of record, so payment cannot precede the register closing.
+  { earlier: ["dividend_recdate", "recording_date", "record_date"], later: ["dividend_paydate", "payment_date", "pay_date"] },
+];
+
+/** One row's two dates that are the wrong way round, with the wire keys they were read from. */
+export interface SuspectDate {
+  /** Index into `rows`, which is returned untouched, so this identifies one row exactly. */
+  row: number;
+  /** The key of the date that must come FIRST, and what it said. */
+  earlierKey: string;
+  earlier: string;
+  /** The key of the date it must come before, and what it said. */
+  laterKey: string;
+  later: string;
+}
+
+/**
+ * Every pair on `DATE_ORDER` a row got backwards.
+ *
+ * Only a STRICT inversion counts. An equal pair is left alone: two dates collapsed onto one day is
+ * far more likely a feed rounding them together than an impossible ordering, and a flag that fires
+ * on the ordinary case teaches a reader to ignore it. A pair with either side missing or unreadable
+ * is not evidence of anything and is skipped — absent is not wrong, the same rule as absent is not
+ * zero. `asDate` normalizes all four wire encodings to `YYYY-MM-DD`, where a string compare IS a
+ * date compare, so no Date arithmetic and no timezone enters this.
+ *
+ * Both keys are reported beside both values because the spellings are candidates: a reader who
+ * thinks the pair was misread can see exactly which fields were compared and dismiss it. That is
+ * the same bargain `exDateFrom` and `unmappedKeys` make.
+ */
+function suspectDates(rows: Array<Record<string, unknown>>): SuspectDate[] {
+  const out: SuspectDate[] = [];
+  rows.forEach((row, index) => {
+    for (const rule of DATE_ORDER) {
+      const a = pickDate(row, rule.earlier);
+      const b = pickDate(row, rule.later);
+      // The key guard is for a future edit that puts one spelling on both sides of a rule: a field
+      // compared against itself is never inverted, and reporting it would be nonsense.
+      if (a.value === null || b.value === null || a.key === b.key || a.value <= b.value) continue;
+      out.push({ row: index, earlierKey: a.key as string, earlier: a.value, laterKey: b.key as string, later: b.value });
+    }
+  });
+  return out;
+}
+
+/**
  * Cash dividends and stock dividends in one list, newest ex-date first.
  *
  * The two are fetched as two requests, one after the other. Sequential is not an accident: a
@@ -253,10 +435,15 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
   }
 
   const merged: DividendRow[] = legs.flatMap(({ kind, page }) =>
-    page.rows.map((row) => ({ ...row, corpactionType: kind, exDate: null as string | null })),
+    page.rows.map((row) => {
+      const { value, key } = pickDate(row as Record<string, unknown>);
+      return { ...(row as Record<string, unknown>), corpactionType: kind, exDate: value, exDateFrom: key };
+    }),
   );
+  // `findExDateKey` over the same rows is provably the earliest of these in candidate order, and
+  // null exactly when this list is empty — so `exDateField` keeps the value it has always had.
+  const exDateFields = [...new Set(merged.flatMap((row) => (row.exDateFrom === null ? [] : [row.exDateFrom])))];
   const exDateField = findExDateKey(merged);
-  for (const row of merged) row.exDate = exDateField ? asDate(row[exDateField]) : null;
 
   // Descending: the near future and the most recent past are what a caller asks a calendar for.
   // Undated rows keep their relative order and go last rather than sorting as the epoch.
@@ -267,12 +454,18 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
     return a.exDate < b.exDate ? 1 : -1;
   });
 
+  // Over `sorted`, not the legs: each leg's own indices are invalid here, and `row` has to index
+  // the list this function actually returns.
+  const suspect = suspectDates(sorted);
+
   return {
     ...(legs[0].page.symbol ? { symbol: legs[0].page.symbol } : {}),
     rows: sorted,
     exDateField,
+    exDateFields,
     undated: sorted.filter((row) => row.exDate === null).length,
     rowsFrom: { dividend: legs[0].page.rowsFrom, stock_dividend: legs[1].page.rowsFrom },
+    ...(suspect.length > 0 ? { suspectDates: suspect } : {}),
   };
 }
 

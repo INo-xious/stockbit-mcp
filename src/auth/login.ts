@@ -269,6 +269,16 @@ export interface CaptureOptions {
    * is exactly the wrong answer — it would report success and store the previous account's token.
    */
   switchAccount?: boolean;
+  /**
+   * If the browser exits immediately because something already holds the profile, kill it and retry
+   * once.
+   *
+   * Off by default. Orphaned browser processes holding `~/.stockbit/browser-profile` blocked every
+   * subsequent login until they were killed by hand, and nothing here reaped them — but the same
+   * profile is what the Chartbit driver keeps open on purpose, so this is a decision the caller
+   * makes, never a default. See `reap.ts`.
+   */
+  reapOrphans?: boolean;
 }
 
 /**
@@ -331,6 +341,7 @@ export async function captureViaBrowserLogin(
     profileDir: profile,
     extraArgs: options.extraArgs,
     startTimeoutMs: Math.min(timeoutMs, BROWSER_START_TIMEOUT_MS),
+    reapOrphans: options.reapOrphans === true,
   });
 
   if (!options.quiet) {

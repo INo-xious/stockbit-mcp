@@ -28,9 +28,10 @@
  */
 import { z } from "zod";
 import { getJson } from "../http/client.js";
-import { cached, parseOr } from "./_util.js";
+import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
+import { StockbitError } from "../http/errors.js";
 import { normalizeTradeDate, todayIso } from "./dates.js";
 
 /** Rows the endpoint returns per page. Not configurable — `limit` is rejected. */
@@ -53,18 +54,44 @@ export interface Bar {
   close: number;
   /** Volume-weighted average price for the session, as Stockbit reports it. */
   average: number;
+  /**
+   * The eight fields below are `number | null`, and `null` means THE RESPONSE DID NOT CARRY IT.
+   *
+   * Every one of them used to be `?? 0`, which made "the field was absent" and "the figure really
+   * was zero" the same bytes. On `netForeign` that is the difference between "foreigners were flat
+   * today" and "we have no idea", and `analyze` read the first from a row that meant the second.
+   * The row schema carries all eight as `z.unknown()` and hands them to `wireNumber`, which is
+   * what keeps an empty wire value from arriving here as the figure zero. No live row shape for
+   * this route is recorded anywhere, which is why none of them is assumed present.
+   *
+   * `null` rather than an absent key: it keeps the shape stable for `deepEqual` and JSON round
+   * trips, and it matches `PriceBands` and `Series` (`Array<number | null>`), which are the two
+   * places in this codebase that already had to answer the same question.
+   *
+   * `open`/`high`/`low`/`close` are always numbers, because a row that cannot yield one is REFUSED
+   * rather than projected — see `toBar`. The ground is that a series with holes in it is worse than
+   * an error: every average, pattern and backtest computed from it is quietly wrong rather than
+   * absent.
+   *
+   * This is STRICTER than `projectSeries` in `src/core/market.ts`, which refuses only `date` and
+   * `close` and falls back open/high/low to the close with a warning. That is deliberate on its
+   * side — the daily chart route is observed sending those three empty, and degrading beats
+   * failing there — and this route has no such observation. If `historical/summary` ever formats a
+   * price that way, this refuses where the chart route degrades, and that asymmetry is the thing to
+   * revisit rather than a bug to patch at the call site.
+   */
   /** Lots (1 lot = 100 shares), matching the convention used elsewhere in this API. */
-  volume: number;
+  volume: number | null;
   /** Traded value in IDR. */
-  value: number;
+  value: number | null;
   /** Number of transactions. */
-  frequency: number;
-  change: number;
-  changePercent: number;
-  /** Foreign flow for the session, in IDR. Zero on days with no foreign participation. */
-  foreignBuy: number;
-  foreignSell: number;
-  netForeign: number;
+  frequency: number | null;
+  change: number | null;
+  changePercent: number | null;
+  /** Foreign flow for the session, in IDR. `null` when the response did not carry the field. */
+  foreignBuy: number | null;
+  foreignSell: number | null;
+  netForeign: number | null;
 }
 
 export interface BarSeries {
@@ -82,19 +109,28 @@ export interface BarSeries {
 const Row = z
   .object({
     date: z.string(),
-    open: z.coerce.number(),
-    high: z.coerce.number(),
-    low: z.coerce.number(),
-    close: z.coerce.number(),
-    average: z.coerce.number().optional(),
-    volume: z.coerce.number().optional(),
-    value: z.coerce.number().optional(),
-    frequency: z.coerce.number().optional(),
-    change: z.coerce.number().optional(),
-    change_percentage: z.coerce.number().optional(),
-    foreign_buy: z.coerce.number().optional(),
-    foreign_sell: z.coerce.number().optional(),
-    net_foreign: z.coerce.number().optional(),
+    // Read the same way as everything else rather than coerced. `z.coerce.number().parse(null)` is
+    // 0, and a PRICE of 0 is far worse than a statistic of 0: an alert rule `close < 100` fires on
+    // it, `backtest` divides by an entry price of zero, and the chart collapses its axis. A row
+    // that cannot yield a price is refused in `toBar`.
+    open: z.unknown(),
+    high: z.unknown(),
+    low: z.unknown(),
+    close: z.unknown(),
+    // Deliberately NOT `z.coerce.number().optional()`. `z.coerce.number()` is `Number()`, and
+    // `Number("")`, `Number(null)`, `Number("  ")`, `Number(false)` and `Number([])` are every one
+    // of them 0 — so an empty field would reach `toBar` as the FIGURE ZERO and the absence would be
+    // destroyed one layer before anything could report it, making `number | null` on `Bar` pure
+    // decoration. The value is carried through untouched and read by `optionalNumber` below.
+    average: z.unknown(),
+    volume: z.unknown(),
+    value: z.unknown(),
+    frequency: z.unknown(),
+    change: z.unknown(),
+    change_percentage: z.unknown(),
+    foreign_buy: z.unknown(),
+    foreign_sell: z.unknown(),
+    net_foreign: z.unknown(),
   })
   .passthrough();
 
@@ -109,22 +145,46 @@ const Response = z
   })
   .passthrough();
 
-function toBar(r: z.output<typeof Row>): Bar {
+/**
+ * Project one wire row onto `Bar`. Exported so the absence rules above are testable offline.
+ *
+ * Throws rather than emitting a price of zero. A statistic this row did not carry is reported
+ * absent; a PRICE it did not carry makes the row unusable, and one bad bar quietly poisons every
+ * indicator computed over the series that contains it.
+ */
+export function toBar(r: z.output<typeof Row>): Bar {
+  const price = (field: "open" | "high" | "low" | "close"): number => {
+    const value = wireNumber(r[field]);
+    if (value === null) {
+      throw new StockbitError(
+        "schema_drift",
+        `Historical bar for ${String(r.date)} has no usable ${field} (received ` +
+          `${JSON.stringify(r[field])}). The row is refused rather than returned with a price of 0.`,
+      );
+    }
+    return value;
+  };
+
+  const close = price("close");
   return {
     date: r.date,
-    open: r.open,
-    high: r.high,
-    low: r.low,
-    close: r.close,
-    average: r.average ?? r.close,
-    volume: r.volume ?? 0,
-    value: r.value ?? 0,
-    frequency: r.frequency ?? 0,
-    change: r.change ?? 0,
-    changePercent: r.change_percentage ?? 0,
-    foreignBuy: r.foreign_buy ?? 0,
-    foreignSell: r.foreign_sell ?? 0,
-    netForeign: r.net_foreign ?? 0,
+    open: price("open"),
+    high: price("high"),
+    low: price("low"),
+    close,
+    // `average` keeps its fallback: substituting the close for a missing VWAP is a documented
+    // approximation of the same quantity, not a number invented out of nothing. The eight below
+    // have no such stand-in — there is nothing a missing foreign flow could sensibly be — so they
+    // report absence instead of a zero nobody sent.
+    average: wireNumber(r.average) ?? close,
+    volume: wireNumber(r.volume),
+    value: wireNumber(r.value),
+    frequency: wireNumber(r.frequency),
+    change: wireNumber(r.change),
+    changePercent: wireNumber(r.change_percentage),
+    foreignBuy: wireNumber(r.foreign_buy),
+    foreignSell: wireNumber(r.foreign_sell),
+    netForeign: wireNumber(r.net_foreign),
   };
 }
 

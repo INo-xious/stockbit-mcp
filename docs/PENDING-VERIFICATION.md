@@ -47,10 +47,13 @@ NOT evidence problems — the mapping cannot be settled because the request neve
 | `earnings` | 400 `Page must be 1 or greater;SortColumn is a required field;Order is a required field;`. Supplying `sort_column`/`order` changes the error to `Your request is invalid`, so the NAMES are right and the values are not: `date`, `symbol`, `company_symbol`, `earnings_date`, `period`, `name` and `id` were all refused. The vocabulary is unknown. |
 | `watchlist_search` | 400 `WatchlistID is a required field;` — the tool takes only `keyword` |
 | `order_queue` | 400 `Stock code is required` — with `symbol` supplied, so it is not being forwarded |
-| `shareholding` | 400 `Invalid company id`. Re-probed with the ticker as a PATH SEGMENT (the route is `/insider/shareholding/companies/:symbol`) and it still refuses, so the segment wants a numeric company id and a symbol→id resolution step is missing. |
+| `shareholding` | **FIXED 2026-09-01.** Was 400 `Invalid company id`: the segment wants Stockbit's numeric company id, not a ticker. `getShareholdingCompanies` now resolves the ticker through `resolveCompanyId` (the reader `watchlist_add` already used) and the route segment is `:companyId`. Verified live — `/insider/shareholding/companies/134` for DEWA answers `Successfully fetched holders by company id`, with the list under `holders`. Only `mode=companies` is settled; `investors`, `network` and `ownership_composition` are still unprobed, so the tool stays `projected`. |
 | `underwriters` | 404 `Unrecognized Command`, bare and with `{page,limit}` and `{symbol}` alike. `/order-trade/underwriters` does not exist. |
 | `price_market` | 400 `Silahkan Periksa permintaan`, and still 400 when re-probed correctly against `pricesMarket` with the `:symbol` segment and with/without `date`. Which parameter it wants is unknown. |
-| `shareholders` | PARTLY FIXED. The token endpoint answers `{"message":"Successfully retrieved Token","data":{"value":"<64 hex>"}}` — the token sits under `value`, which no `/token/i` key search can find, and `message` is the only string that mentions the word. Reading `data.value` on this one route settles the mint. The chart call behind it then fails differently: `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found`. How the minted token must be presented is still unknown, so the tool stays `projected`. |
+| `shareholders` | PARTLY FIXED. The token endpoint answers `{"message":"Successfully retrieved Token","data":{"value":"<64 hex>"}}` — the token sits under `value`, which no `/token/i` key search can find, and `message` is the only string that mentions the word. Reading `data.value` on this one route settles the mint. The chart call behind it then failed differently: `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found`. **FIXED 2026-09-01, and promoted to Observed.** First narrowed by probing — the same 401 came back with a valid minted token, with no `token` parameter, and with `token=notarealtoken`, so no VALUE could fix it — then settled by driving a real browser over CDP and recording what Stockbit's own client sends: `Authorization: <the 64-hex minted token>`, RAW with no `Bearer` prefix and in place of the session bearer, and `?symbol=…&value_year=…&shareholder_type=…` with no token parameter at all. A new auth kind (`webviewToken`, placement `rawHeaderToken`) carries it; the route is the only one that uses it. Two further defects fell out of the first working response: `value_year` is a WINDOW LENGTH IN MONTHS, not a calendar year (12 → 13 monthly points, 36 → 37), where it had been validated as a year between 1990 and 2100; and the payload is SERIES rather than rows, so it is now projected into `series`/`timeframes`/`lastUpdate` instead of reporting `rows: []`. |
+| `trade_book` | **FIXED 2026-09-01.** Was 400 `Group by is required` for every argument combination, because no `group_by` parameter existed anywhere in the tool or the core function. The key really is `group_by`: `1` and `2` are accepted, `0` reads as absent (same 400) and `3` answers `Your request is invalid`. `group_by=1` returns `data.book[]` grouped by price — each row carrying `price` and `buy`/`sell`/`pre_open`/`post_close`/`total` blocks of `lot`, `frequency`, `percentage`, `value`, `value_percentage` — beside `market_hour_steps`, `book_total`, `date`, `from`, `to`, `previous_price`. What distinguishes `2` is not established (it answered with an empty `book` outside session hours), so no meaning is documented for it. |
+| `broker_flow_intraday` | **SETTLED 2026-09-01, and promoted to Observed.** Its docstring disclaimed knowing whether the endpoint broke the session down by broker, by price level or by side. It is by BROKER and by MINUTE: `data.price_chart_data` held 335 one-minute points spanning 09:00–16:14, and `data.broker_chart_data` held two series, `TYPE_CHART_VALUE` and `TYPE_CHART_VOLUME`, each with a `brokers` code list and `charts: [{broker_code, chart[]}]` on the same grid — five brokers, so it is the session's main participants rather than the whole market. Also `from`, `to`, `data_last_updated`, `date_session_info`. |
+| `chartbit_drawings` | **FIXED 2026-09-01.** Was 400 `Silahkan Periksa permintaan` for every form tried. Two causes, both ours. (1) The `layoutId` transport segment was validated as `numericId` while real layout ids look like `53e5877c-…-3355424`, so every route taking one was refused before the request was built. (2) The endpoint is addressed by the CHART's id, not the layout's, and nothing surfaced one — it is inside the layout, three objects deep. With both fixed, `layout_id` + the derived `chart_id` returns real drawings (3 line tools on one layout, 0 on another). Note the projected `type` came back `unknown` for all three, so the drawing-type mapping does not recognise what this account has drawn; `raw` carries the original. |
 | `chart_series` | schema drift: points carry no recognisable close field. Keys present: `date`, `formatted_date`, `xlabel`, `value`, `percentage`, `change`, `open`, `high`, `low`. `raw: true` succeeds |
 
 Three more that are not errors but are not right either:
@@ -118,6 +121,32 @@ the mapping. A working request is not a settled field map.
 `iepiev` (pre-opening indicative price/volume), `has_foreign_bs`, `total_bid_offer`, `market_data`,
 `autoreject_*`. `iepiev` in particular is worth a look during the pre-opening auction (08:45 WIB) —
 a previous pass listed it as "unobserved" rather than absent.
+
+### `company_profile` percentages — and `symbol_search`'s row shape
+
+Two things a live call must settle, both surfaced by the 2026-08-31 field report.
+
+**`company_profile`.** A shareholder block was reported as
+`{name, value: "3.24 M", percentage: "<0.0001%"}`, and the arithmetic disagrees: 3,242,500 of
+40.69 B is 7.9688e-5. That single observation fits two readings, and nothing here can choose between
+them, so the body is passed through untouched and `src/core/company.ts` records why.
+
+| | What is guessed | How it fails |
+|---|---|---|
+| The unit of `"3.24 M"` | *miliar* (1e9) or *million* (1e6) | 1000× either way. `MAGNITUDES` in `src/live/promptspec.ts` already refuses a bare `"m"` for this reason. |
+| What `percentage` means | A percent, or a fraction wearing a `%` | 7.9688e-5 is `<0.0001` as a FRACTION and `0.0080%` as a PERCENT, so "wrong by 80×" and "correct, differently scaled" are the same bytes. |
+| Whether an unrounded count is there | A raw share count beside the rounded display string | Without one, any recomputation starts from 3,240,000 rather than 3,242,500 and is approximate before it begins. |
+
+Until all three are captured, nothing computes a percentage. If one is ever added it must be a NEW
+key naming both inputs, never a rewrite of the upstream field, and not inside `getCompanyProfile`,
+which is ONE request by contract.
+
+**`symbol_search`.** The row shape was never recorded, and the mapping was wrong. `/search/v2` rows
+came back as `{id, name, desc, url}` — the ticker in `id` and in `name`, and `url` as
+`symbol/<TICKER>` — with no `symbol` key at all, so the tool reported 8 of 8 rows ticker-less and
+`symbols: []` on a query that matched eight emittens. Now read from the `symbol/<TICKER>` link, with
+`readFrom` on each hit. What a live call should still confirm: whether any emitten row links by
+something other than `symbol/<TICKER>`, and whether a ticker ever arrives lowercased.
 
 ### The whole trading host — `carina.stockbit.com`
 

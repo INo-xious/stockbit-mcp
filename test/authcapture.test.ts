@@ -24,6 +24,13 @@ process.env.STOCKBIT_STORE_DIR = STORE;
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { captureNeedsProof, type CaptureMethod } from "../src/auth/login.ts";
+import { settleLogin } from "../src/tools/system.ts";
+import { collectStatus, loginStatus, resetLoginStatus } from "../src/status.ts";
+import { getStore } from "../src/auth/store.ts";
+import { resetSession } from "../src/auth/session.ts";
+import { clearAccessCache } from "../src/auth/accesscache.ts";
+import { clearWebSession } from "../src/auth/websession.ts";
+import { clearSessionHealth } from "../src/auth/health.ts";
 
 after(() => rmSync(STORE, { recursive: true, force: true }));
 
@@ -126,4 +133,209 @@ test("doctor no longer lets 'All checks passed' stand unqualified", () => {
   const after = bin.slice(summaryAt, summaryAt + 900);
   assert.match(after, /not the stored credential/);
   assert.match(after, /status --verify/);
+});
+
+/* ------------------------- the MCP tool's own decision ------------------------- */
+//
+// Everything above is the CLI. The MCP `login` tool had the same bug and none of the same
+// defences: it mapped `captured: true` straight to the string "captured" and never read
+// `result.method`, so `captureNeedsProof` — extracted precisely so the decision could be tested —
+// had exactly one caller, in a bin. Measured on 2026-08-30: the same call twice, nine minutes
+// apart, against a browser session that was healthy both times. Both reported "captured" in under
+// three seconds with no human interaction. One token worked; the other 401'd on every request.
+
+/** A syntactically real JWT with the given `exp`. Signature is nonsense; nothing here verifies it. */
+function jwt(expSeconds: number, tag = "x"): string {
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "none", typ: "JWT" })}.${b64({ exp: expSeconds, tag })}.c2ln`;
+}
+
+/** Anything that looks like a JWT. Deliberately loose — a partial leak is still a leak. */
+const JWT_SHAPED = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/;
+
+const realFetch = globalThis.fetch;
+after(() => {
+  globalThis.fetch = realFetch;
+});
+
+/** Seed a stored credential and answer the refresh route with `respond`. Returns the call count. */
+function refreshAnswers(respond: () => Response | Promise<Response>): { calls: number } {
+  const seen = { calls: 0 };
+  globalThis.fetch = (async (url: unknown) => {
+    if (!String(url).includes("/login/refresh")) return new Response("not found", { status: 404 });
+    seen.calls++;
+    return await respond();
+  }) as typeof fetch;
+  return seen;
+}
+
+function freshSession(): void {
+  resetLoginStatus();
+  resetSession();
+  clearAccessCache();
+  clearWebSession();
+  clearSessionHealth();
+  getStore("main").set(jwt(2000000000, "stored-refresh"));
+}
+
+test("a capture that produced no token is not called a login", async () => {
+  freshSession();
+  await settleLogin({ captured: false });
+  assert.equal(loginStatus().lastResult, "no-token");
+});
+
+test("an intercepted capture is called captured without spending a request", async () => {
+  // The asymmetry is the point. Proving an intercepted token costs a rotation, and rotation
+  // invalidates the browser session the login just established — which is why the unconditional
+  // proof was removed. This asserts the cheap half stays cheap.
+  freshSession();
+  const seen = refreshAnswers(() => new Response("{}", { status: 200 }));
+  try {
+    await settleLogin({ captured: true, method: "intercepted" });
+    assert.equal(loginStatus().lastResult, "captured");
+    assert.equal(seen.calls, 0, "an intercepted capture must not be proven, and must not rotate");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a harvested capture Stockbit accepts is called captured, and it cost a request", async () => {
+  freshSession();
+  const seen = refreshAnswers(
+    () =>
+      new Response(
+        JSON.stringify({
+          data: { access_token: jwt(2000000000, "access"), refresh_token: jwt(2000000000, "rotated") },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+  );
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    assert.equal(loginStatus().lastResult, "captured");
+    assert.equal(seen.calls, 1, "a claim that the credential works must be backed by a request");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a harvested capture Stockbit rejects is NOT called captured", async () => {
+  // The whole bug. "captured" used to mean bytes were written to the store, which is a different
+  // claim from "a credential Stockbit accepts" — and only the second one is worth anything to a
+  // caller deciding whether to retry.
+  freshSession();
+  const seen = refreshAnswers(
+    () => new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 }),
+  );
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    const last = loginStatus().lastResult ?? "";
+    assert.ok(last.startsWith("captured-but-rejected"), `expected a rejection, got ${last}`);
+    assert.equal(seen.calls, 1);
+    assert.doesNotMatch(last, JWT_SHAPED, "no outcome string may carry a token");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("the tool proves a capture of unknown provenance too, rather than assuming", async () => {
+  // `captureViaBrowserLogin` always sets a method. If that ever stops being true, the untrustworthy
+  // branch is the safe one to land in.
+  freshSession();
+  const seen = refreshAnswers(
+    () => new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 }),
+  );
+  try {
+    await settleLogin({ captured: true });
+    assert.ok((loginStatus().lastResult ?? "").startsWith("captured-but-rejected"));
+    assert.equal(seen.calls, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a 403 is a refusal too, not an unprovable credential", async () => {
+  // `refreshOnce` labels every non-2xx `kind: "auth"`, so the kind cannot carry this distinction
+  // and the status has to. 401 and 403 are what `kindForStatus` itself calls an auth failure;
+  // testing only 401 would tell a user with a forbidden credential that nothing is known about it.
+  freshSession();
+  const seen = refreshAnswers(
+    () => new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 }),
+  );
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    assert.ok((loginStatus().lastResult ?? "").startsWith("captured-but-rejected"));
+    assert.equal(seen.calls, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a Stockbit outage is not reported as a rejection", async () => {
+  // The other side of the same line, and the reason `kind` could not be used: a 500 also arrives as
+  // `kind: "auth"`. Saying "Stockbit REJECTED this token — log in again" over an outage destroys a
+  // credential that was fine.
+  freshSession();
+  const seen = refreshAnswers(() => new Response("upstream is down", { status: 502 }));
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    assert.ok((loginStatus().lastResult ?? "").startsWith("captured-unproven"));
+    assert.equal(seen.calls, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a proof that could not be made is not reported as a rejection", async () => {
+  // `refreshOnce` writes a STATUS-LESS journal entry for a transport error, deliberately, so that
+  // "Stockbit rejected this" stays distinguishable from "the network was down" — and only the
+  // first of those means log in again. Collapsing them here would put that back: a dropped Wi-Fi
+  // connection would tell the user their session was revoked.
+  freshSession();
+  globalThis.fetch = (async () => {
+    throw new Error("network is unreachable");
+  }) as typeof fetch;
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    const last = loginStatus().lastResult ?? "";
+    assert.ok(last.startsWith("captured-unproven"), `expected an unproven outcome, got ${last}`);
+    assert.doesNotMatch(last, /reject/i, "nothing rejected it; do not say Stockbit did");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a rejected capture is a FAILING check in status, not just a string in a field", async () => {
+  // The login tool cannot report this at its own call site — it returns before the person has
+  // finished typing — so `status`, which is where that tool's closing message sends the user, is
+  // the only place it can be unmissable. `lastResult` alone is a field a model may not read.
+  freshSession();
+  const seen = refreshAnswers(
+    () => new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 }),
+  );
+  try {
+    await settleLogin({ captured: true, method: "harvested" });
+    const report = await collectStatus();
+    const check = report.checks.find((c) => c.name === "last login");
+    assert.ok(check, "a rejected login must produce a check");
+    assert.equal(check.status, "fail");
+    assert.doesNotMatch(JSON.stringify(report), JWT_SHAPED, "and the report still carries no token");
+  } finally {
+    globalThis.fetch = realFetch;
+    freshSession();
+  }
+});
+
+test("the MCP login tool routes its outcome through the same decision", () => {
+  // The structural mirror of the bin test above. The bug was that this branch did not exist: the
+  // reassuring outcome was unconditional, so `captureNeedsProof` guarded nothing here.
+  const tool = readFileSync(fileURLToPath(new URL("../src/tools/system.ts", import.meta.url)), "utf8");
+  assert.match(tool, /captureNeedsProof\(result\.method, false\)/);
+
+  const decisionAt = tool.indexOf("captureNeedsProof(result.method");
+  const rejectedAt = tool.indexOf("captured-but-rejected");
+  assert.ok(
+    decisionAt > 0 && rejectedAt > decisionAt,
+    "the failure outcome must sit inside the branch the decision guards",
+  );
 });

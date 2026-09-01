@@ -79,6 +79,24 @@ test("the price scale covers annotations, so a level cannot land off-canvas", ()
   assert.ok(y >= 0 && y <= H, `level drawn at y=${y} on a ${H}px canvas`);
 });
 
+test("a marker's own price widens the scale, so its arrow cannot land off-canvas", () => {
+  // The scale loop covered level, zone and trend and skipped marker, so a marker priced above every
+  // bar high was positioned against a scale that did not know about it: the arrow was emitted at a
+  // large negative y, outside the viewBox, while the caller was told the marker had been drawn.
+  const above = Math.max(...bars.map((b) => b.high)) + 300;
+  const svg = renderCandles({
+    symbol: "BBRI",
+    bars,
+    annotations: [{ kind: "marker", date: bars[30].date, price: above, label: "spike" }],
+  });
+  const H = Number(/height="(\d+)"/.exec(svg)?.[1] ?? 0);
+  const tri = /<polygon points="[-\d.]+,([-\d.]+) /.exec(svg);
+  assert.ok(tri, "the marker should draw its arrow");
+  const y = Number(tri[1]);
+  assert.ok(y >= 0 && y <= H, `marker drawn at y=${y} on a ${H}px canvas`);
+  assert.ok(svg.includes("spike"), "and its label with it");
+});
+
 test("overlays also widen the scale", () => {
   const svg = renderCandles({
     symbol: "BBRI",
@@ -189,4 +207,30 @@ test("volume can be turned off and shortens the canvas", () => {
 test("dark is the default and light swaps the ground", () => {
   assert.match(renderCandles({ symbol: "BBRI", bars }), /fill="#0d1117"/);
   assert.match(renderCandles({ symbol: "BBRI", bars, theme: "light" }), /fill="#ffffff"/);
+});
+
+/* ------------------------------ absent volume ------------------------------ */
+
+test("a session whose volume the response did not carry draws no volume bar, and no NaN", () => {
+  // `null` used to arrive here as `0`, which drew a full-width bar of minimum height — a picture
+  // asserting "nothing traded" about a session the payload said nothing about. And `Math.max` over
+  // a null makes the panel's scale NaN, which puts y="NaN" on every rect in it.
+  const holed = series(20).map((b, i) => (i === 5 ? { ...b, volume: null } : b));
+  const svg = renderCandles({ symbol: "BBRI", bars: holed, showVolume: true });
+  const full = renderCandles({ symbol: "BBRI", bars: series(20), showVolume: true });
+  const countBars = (s: string): number => (s.match(/lots<\/title><\/rect>/g) ?? []).length;
+
+  assert.ok(!svg.includes("NaN"), "no NaN reaches the emitted SVG");
+  assert.equal(countBars(svg), countBars(full) - 1, "exactly the unreadable session is left undrawn");
+  assert.match(svg, /Volume/, "and the panel is still drawn for the sessions that were readable");
+});
+
+test("a series with no readable volume at all still renders the price chart", () => {
+  const svg = renderCandles({
+    symbol: "BBRI",
+    bars: series(20).map((b) => ({ ...b, volume: null })),
+    showVolume: true,
+  });
+  assert.ok(!svg.includes("NaN"));
+  assert.ok(svg.includes("<svg"), "an unreadable volume column is not a reason to fail the whole chart");
 });

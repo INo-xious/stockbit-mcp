@@ -34,6 +34,10 @@ import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscac
 import { alignStoredCredential, browserAccessToken } from "./websession.js";
 import { recordRefreshFailure, recordRefreshOk } from "./health.js";
 import { tokenFingerprint } from "./fingerprint.js";
+// Type-only, so it adds no runtime edge: the VALUE side of `relogin.ts` is reached by dynamic
+// import inside `forceRefresh`, because `relogin.ts` reaches `login.ts`, and `login.ts` imports this
+// module at module scope.
+import type { ReloginOutcome } from "./relogin.js";
 
 export type { TokenDomain } from "../http/transport.js";
 
@@ -766,9 +770,46 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
   return (await slotState.inFlight).token;
 }
 
-/** Force a refresh of one domain (used by the HTTP client on a 401). */
-export async function forceRefresh(domain: TokenDomain = "main"): Promise<string> {
-  const rejected = state[domain].current?.token ?? null;
+/**
+ * Force a refresh of one domain (used by the HTTP client on a 401).
+ *
+ * `presented` is the token the failing request actually sent. Pass it whenever you have it.
+ *
+ * Without it this function had to GUESS which token was rejected, by reading the slot's current
+ * one — and the slot is shared, mutable, and routinely moves while a request is still in flight.
+ * A late 401 from a request holding the OLD token therefore named a peer's NEW token as rejected,
+ * dropped it, cleared the shared access cache and spent a rotation replacing a credential that was
+ * working. The parameter turns a guess about shared state into a fact the caller already holds.
+ *
+ * It is optional, and absent means "refresh unconditionally". Every caller that omits it is a
+ * LIVENESS PROOF — `status { live: true }`, `bootstrap --verify`, `login --verify`,
+ * `trading-login`, `trading-check` — whose entire contract is that a request left the machine.
+ * Reading absence as "assume the slot is current" would make all five report success for nothing.
+ */
+export async function forceRefresh(domain: TokenDomain = "main", presented?: string): Promise<string> {
+  // The slot has already moved past the token that failed: a peer refreshed while this request was
+  // in flight, and the 401 is stale news about a credential nobody holds any more. There is nothing
+  // to force — and forcing anyway is destructive, not merely wasteful, because everything below
+  // this line drops a live token and clears a cache other processes are reading.
+  //
+  // Tested against the values in hand rather than by calling `ensureFresh`: `ensureFresh` falls
+  // through to the shared access cache, and on this path the cache has deliberately NOT been
+  // cleared, so it can still hold a dead token a peer wrote. Re-entering it could hand the caller
+  // a second dead token to retry with, having skipped the one line that makes this function safe.
+  if (presented !== undefined) {
+    const cur = state[domain].current;
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      cur &&
+      cur.token !== presented &&
+      cur.expiresAt - now > AUTH.expirySkewSeconds &&
+      mintedFromCurrentCredential(domain, cur)
+    ) {
+      return cur.token;
+    }
+  }
+
+  const rejected = presented ?? state[domain].current?.token ?? null;
   state[domain].current = null;
 
   // Before spending a rotation, ask the BROWSER whether it has already moved on.
@@ -781,7 +822,14 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
   //
   // Anything the cookie holds that is not the token that just failed is newer by definition — the
   // two sides only ever hold one pair — so the comparison against `rejected` is the whole guard.
-  if (domain === "main") {
+  //
+  // Which is why the guard requires a KNOWN failed token. With `rejected` null the comparison is
+  // vacuously true and the cookie is adopted whatever it holds, so this returned before reaching
+  // the wire — and `bin/stockbit-auth.ts` calls `resetSession()` immediately before its proof,
+  // which is precisely how `rejected` becomes null. Every caller that passes no `presented` token
+  // is proving liveness and must send a request; the caller that benefits from this shortcut is
+  // the 401 path, and it always knows which token failed.
+  if (domain === "main" && presented !== undefined) {
     const fromBrowser = browserAccessToken(AUTH.expirySkewSeconds);
     if (fromBrowser && fromBrowser.token !== rejected) {
       const adopted: AccessToken = {
@@ -804,10 +852,160 @@ export async function forceRefresh(domain: TokenDomain = "main"): Promise<string
   state[domain].forcedRefreshes++;
   try {
     return await ensureFresh(domain);
+  } catch (err) {
+    // The refresh itself failed, which used to be the end of it: the user got a good message and had
+    // to go and log in by hand, mid-task. This is the one place that can do something about it.
+    //
+    // ## Why here and not beside `recoverFromStoredWebSession`
+    //
+    // That is the structurally similar spot and it is the wrong one. It runs inside `doRefresh`'s
+    // cross-process directory lock, whose file-backend staleness budget is 50 s; a browser launch
+    // alone allows 30 s before the capture even starts. A peer would break the lock as stale
+    // mid-login and both processes would rotate — the exact double-rotation lockout `reflock.ts`
+    // documents as observed rather than theorised. A file read is safe under that lock. A login is
+    // not.
+    //
+    // By the time the rejection surfaces HERE, `doRefresh` has taken and released the lock and
+    // `ensureFresh` has cleared its own in-flight promise in a `.finally`, so single-flight
+    // coalescing has already ended. Nothing is held while a window is open.
+    //
+    // ## The retry below IS the proof
+    //
+    // `forcedRefreshes` is still raised inside this `try`, which switches off both cheap sources —
+    // the shared access cache and the browser-token adoption. So the second `ensureFresh` cannot be
+    // answered from anything local: it is forced to the wire, with the credential just harvested.
+    // That is exactly the proof a harvested capture demands, and it is why this does not call
+    // `forceRefresh` again (which would recurse) or simply return the harvested token (which would
+    // report success for something nothing verified).
+    const { attemptAutoRelogin, recordAutoReloginRefused } = await import("./relogin.js");
+    const attempt = await attemptAutoRelogin(domain);
+    if (attempt.outcome !== "harvested") throw escalate(domain, err, attempt.outcome, attempt.detail);
+    try {
+      return await ensureFresh(domain);
+    } catch (afterHarvest) {
+      // The freshly harvested credential was refused too. The browser session is dead in the way
+      // only Stockbit can see, so the next step is the one that clears it — not another attempt.
+      //
+      // Tell the latch, because only this frame knows. `attemptAutoRelogin` reported what the
+      // HARVEST did and nothing more; left alone it would remember this as a recovery that worked,
+      // and the next failure in the process would be told so.
+      recordAutoReloginRefused(domain);
+      throw escalate(domain, afterHarvest, "harvest-refused", HARVEST_ALSO_REFUSED);
+    }
   } finally {
     state[domain].forcedRefreshes = Math.max(0, state[domain].forcedRefreshes - 1);
   }
 }
+
+const HARVEST_ALSO_REFUSED =
+  "Automatic recovery opened the browser and harvested a credential, and Stockbit refused that one " +
+  "too. The browser session itself is stale.";
+
+/**
+ * Add what recovery learned to the error the caller is about to see, without inventing a verdict.
+ *
+ * Only for `main`, and only when there is something ACTIONABLE to add. A 401 already carries a good
+ * message; appending "recovery is disarmed" to every failure in a batch backfill would be noise on
+ * the one path whose whole contract is failing fast and quietly.
+ *
+ * The escalation itself is the point of issue #7. A stale website session is precisely the state in
+ * which a plain login CANNOT succeed: Stockbit shows its expiry modal and closes the window before
+ * the user can type. `switch_account` clears the session first and worked every time it was tried.
+ * Naming the wrong one here is what cost the reporter four attempts.
+ */
+function escalate(
+  domain: TokenDomain,
+  err: unknown,
+  outcome: ReloginOutcome | "harvest-refused",
+  detail: string,
+): unknown {
+  if (domain !== "main" || !(err instanceof StockbitError)) return err;
+
+  // Only a credential Stockbit REFUSED can be a credential problem. `refreshOnce` throws for the
+  // transport too — `Refresh request failed: …`, kind `upstream` — and a dropped Wi-Fi is not a
+  // stale browser session. Rewriting that as `auth` is not merely a wrong sentence: `analyze.ts`
+  // and `company.ts` both branch on `kind === "auth"`, so a network blip would start reporting
+  // itself as a dead session and offering to sign the user out of their browser to fix it.
+  if (err.kind !== "auth") return err;
+
+  // And the KIND is not sufficient on its own, which is the part that is easy to miss.
+  // `refreshOnce` labels every non-ok status on the refresh route `auth` — look at its throw: the
+  // ternary chooses the MESSAGE, not the kind — so a 502 from Stockbit's refresh endpoint arrives
+  // here as an auth error. Escalating that would answer a partial outage, which clears by itself,
+  // with "sign your browser out of Stockbit".
+  //
+  // 401 only, and deliberately not 403. A Cloudflare `cf-mitigated: challenge` answers 403 for a
+  // request that — as `challengeError` puts it — never reached Stockbit's handler at all, so no
+  // credential was judged. Since the advice this unlocks is destructive, an unobserved 403 is not
+  // worth admitting on the chance that it means a refusal.
+  //
+  // (That `refreshOnce` reports a 502 as `auth` at all is a pre-existing inaccuracy — its ternary
+  // picks the message, not the kind. It was harmless while nothing branched on it, and narrowing it
+  // is not this change's to make. This guard makes the escalation independent of it either way.)
+  if (err.status !== 401) return err;
+
+  // Switched on the OUTCOME, never on the wording. Sniffing `detail` for a prefix would make an
+  // edit to a sentence silently change which errors carry an escalation.
+  const extra = escalationFor(outcome, detail, err);
+  if (extra === null) return err;
+
+  // The ORIGINAL kind, not a fresh `auth`. Everything else about the error is preserved too: this
+  // adds a sentence, it does not reclassify a failure.
+  return new StockbitError(err.kind, `${err.message} ${extra}`, {
+    status: err.status,
+    errorType: err.errorType,
+    details: err.details,
+  });
+}
+
+/** What, if anything, to add to an auth failure. `null` leaves the error exactly as it was. */
+function escalationFor(
+  outcome: ReloginOutcome | "harvest-refused",
+  detail: string,
+  err: StockbitError,
+): string | null {
+  // Recovery actually LOOKED at the browser session — tried it, or read its health — and it is not
+  // usable. Only these have earned the right to say a plain login will not work, because only these
+  // rest on evidence about the website session.
+  //
+  // `already-attempted` belongs here — but ONLY because it now means "ran and failed". It used to
+  // mean merely "ran", which covered a recovery that WORKED: after a successful harvest at 10:00, a
+  // fresh 401 at 16:00 was told recovery "did not fix it" and pointed at signing the user out of
+  // Stockbit, on the strength of a website-session reading taken before the harvest that replaced
+  // it. `already-recovered` is deliberately absent from this list for that reason.
+  //
+  // Without any of it the SECOND failure in a process was silent — the first 401 explained that the
+  // session was stale and named the fix, and every one after it said nothing at all.
+  if (
+    outcome === "harvest-refused" ||
+    outcome === "harvest-failed" ||
+    outcome === "no-web-session" ||
+    outcome === "already-attempted"
+  ) {
+    return `${detail} ${SWITCH_ACCOUNT_HINT}`;
+  }
+
+  // Recovery was switched off. Worth one sentence — the user asked for exactly this behaviour and
+  // may not know the switch exists — but ONLY where recovery could actually have helped: a stored
+  // credential that Stockbit refused. Appending it to "no session stored" would tell a first-time
+  // user about an auto-recovery variable instead of telling them to log in, and appending the
+  // website-session advice there would be a claim about a session that does not exist.
+  if (outcome === "not-opted-in" && err.status === 401 && hasStoredSession("main")) return detail;
+
+  return null;
+}
+
+/**
+ * What to do when the website session is stale too.
+ *
+ * Says out loud that it signs the profile out, because it does, and because the tool that offers it
+ * is the same one a model reaches for automatically.
+ */
+const SWITCH_ACCOUNT_HINT =
+  "A plain login will not fix this on its own — with a stale website session Stockbit shows an " +
+  "expiry modal and closes the window before anything can be typed. Use `login` with " +
+  "`switch_account: true` (or `stockbit-auth login --switch-account`), which clears the browser's " +
+  "Stockbit session first. It signs that browser profile out of Stockbit.";
 
 /**
  * Seed a domain's in-memory access token directly.

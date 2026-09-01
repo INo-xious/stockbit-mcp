@@ -45,7 +45,7 @@ Is this working, and what do I run — plus logging in and out.
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
 | `status` | read | Is this server working, and what do I run if it is not? Call this FIRST whenever anything looks wrong, and call it after logging in to confirm it took. | Observed | live |
-| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile, switch_account |
+| `login` | write | Open a browser window so the user can sign in to Stockbit. | Observed | confirm*, force, fresh_profile, reap_orphans, switch_account |
 | `logout` | write, destructive | Clear stored Stockbit credentials from this machine. | Observed | confirm*, scope, remove_browser_profile |
 
 ## market
@@ -63,9 +63,9 @@ Prices, depth, movers, bars, the session clock.
 | `orderbook` | read | Full order-book depth ladder for a symbol. | Observed | symbol* |
 | `price_bands` | read | The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock. | Observed | symbol* |
 | `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, raw |
-| `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, grouped |
-| `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, limit, chart |
-| `broker_flow_intraday` | read | The intraday running-trade chart for one symbol, returned exactly as Stockbit sends it. | Projected | symbol* |
+| `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, order_by, grouped |
+| `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
+| `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
 | `market_movers` | read | Market movers from the order-trade service. | Projected | limit |
 | `top_stocks` | read | The order-trade service's top-stock list. | Projected | limit |
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
@@ -79,12 +79,12 @@ Who accumulated and who distributed. The data no other market API has.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period |
+| `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period, resolve_names |
 | `broker_distribution` | read | Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers… | Observed | symbol*, data_type, investor_type, market_board, period, from, to, date_from, date_to, start_date, end_date, theme, top_sources, top_targets, save_path, open_in_stockbit, browser |
-| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit |
+| `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit, codes |
 | `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Projected | broker_code*, period, market_types, investor_types, sort_by, page, limit |
 | `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Observed | period, sort_by, page, limit |
-| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type |
+| `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type, resolve_names |
 
 ## analysis
 
@@ -112,7 +112,7 @@ Profile, ownership, management, peers, ratings.
 | `company_profile` | read | The company description block for a ticker: what the business does, and whatever else Stockbit's profile endpoint carries. | Projected | symbol*, include_typed_info, include_fin_items, emitten_type |
 | `company_contact` | read | Registered address, phone, website and investor-relations contacts for a ticker, verbatim. | Projected | symbol* |
 | `company_subsidiaries` | read | The subsidiaries and associates Stockbit lists for a ticker. | Observed | symbol* |
-| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Projected | symbol*, value_year, shareholder_type |
+| `shareholders` | read | Share ownership composition for a ticker, as Stockbit's shareholder chart reports it. | Observed | symbol*, value_year, shareholder_type |
 | `classification` | read | Stockbit's company classification. | Observed | scope |
 | `index_members` | read | The constituents of an IDX index or special board: IDX30, LQ45, KOMPAS100, and the monitoring / syariah lists. | Observed | index_code*, limit* |
 | `sector_companies` | read | The companies in one IDX sector. | Projected | sector_id* |

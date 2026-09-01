@@ -50,7 +50,13 @@ export function registerInsiderTools(define: Definer): void {
       "When you pass `action_type`, check `actionFilterHonored` in the result: false means the " +
       "server ignored the filter and the rows are unfiltered.\n" +
       "`insiderId` on a row is the handle for insider_ownership and shareholding(mode=investors).\n" +
-      "Share counts are shares, not lots. ",
+      "Share counts are shares, not lots. " +
+      "`limit` is capped at " +
+      String(core.INSIDER_TRANSACTIONS_LIMIT_CEILING) +
+      " and a larger value is rejected before any request is made. That ceiling is this client's, " +
+      "not a documented upstream one: limit=50 came back HTTP 400 INVALID_PARAMETER on one call " +
+      "naming no parameter, and limit=20 — what Stockbit's own client sends — answered, with " +
+      "nothing in between tried. Use `page` for more rows. ",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for market-wide."),
       insider: z
@@ -60,7 +66,12 @@ export function registerInsiderTools(define: Definer): void {
       date_start: z.string().optional().describe("Window start, YYYY-MM-DD. Requires date_end."),
       date_end: z.string().optional().describe("Window end, YYYY-MM-DD. Requires date_start."),
       page: z.coerce.number().optional().describe("1-based page (default 1). `hasMore` says if another exists."),
-      limit: z.coerce.number().optional().describe("Rows per page. Stockbit's own client uses 20."),
+      limit: z.coerce
+        .number()
+        .optional()
+        .describe(
+          `Rows per page, 1..${core.INSIDER_TRANSACTIONS_LIMIT_CEILING}; more is refused here. Omit for the server's default.`,
+        ),
       action_type: z
         .string()
         .optional()
@@ -130,8 +141,12 @@ export function registerInsiderTools(define: Definer): void {
       "on the reporting cycle rather than daily. Use insider_transactions for the changes between " +
       "snapshots. " +
       LAG +
-      "\nnetwork needs BOTH `root_id` and `root_type` (COMPANY or INVESTOR). Get a company id from " +
-      "mode=companies and a holder id from an insider_transactions row's `insiderId`. `max_depth` " +
+      "\ncompanies is addressed upstream by Stockbit's internal numeric company id, NOT by ticker — " +
+      "sending the ticker answers `Invalid company id`. You still pass `symbol`: the ticker is " +
+      "resolved to its id first, which costs one extra request, and the id comes back as " +
+      "`companyId`. A ticker Stockbit has no id for is refused here rather than upstream.\n" +
+      "network needs BOTH `root_id` and `root_type` (COMPANY or INVESTOR). Get a company id from " +
+      "mode=companies' `companyId` and a holder id from an insider_transactions row's `insiderId`. `max_depth` " +
       "defaults to Stockbit's own 3 and `max_edge_per_node` to 20; raising either grows the graph " +
       "fast.\n" +
       "The payload is returned WHOLE and unprojected, because this shape has not been mapped. " +

@@ -137,9 +137,19 @@ export const CREATE_SHAPE = script(PROLOGUE + `
   });
 `);
 
-/** Every shape on the chart, with whatever properties TradingView will hand back. */
+/**
+ * Every shape on the chart, with whatever properties TradingView will hand back.
+ *
+ * A chart with no `getAllShapes` is NOT-READY, not empty. This used to answer `{ready: true,
+ * shapes: []}` in that case, which is indistinguishable from a chart holding nothing — and once
+ * `drawAnnotations` began reconciling its local record against this list, that made "the widget
+ * cannot be asked" come back as the positive claim "every drawing you made is gone". The prologue's
+ * other four states already report themselves; this one was the only guard that answered with a
+ * fabricated reading instead of a reason.
+ */
 export const LIST_SHAPES = script(PROLOGUE + `
-  var ids = chart.getAllShapes ? chart.getAllShapes() : [];
+  if (typeof chart.getAllShapes !== "function") return { ready: false, reason: "no-getAllShapes", widgetKey: key };
+  var ids = chart.getAllShapes();
   var out = [];
   for (var i = 0; i < ids.length; i++) {
     var entry = ids[i];

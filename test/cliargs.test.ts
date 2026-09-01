@@ -14,9 +14,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CliParseError,
+  formatBareUsage,
   formatUsage,
+  gateBareCommandLine,
   gateCommandLine,
   isHelpToken,
+  isVersionToken,
+  type CommandSpec,
   type CommandTable,
 } from "../src/cliargs.ts";
 
@@ -144,6 +148,10 @@ test("usage is generated from the table, top level and per command", () => {
   for (const name of Object.keys(T)) assert.ok(top.includes(name), name);
   assert.match(top, /Unknown flags are an error, never ignored/);
   assert.match(top, /Extra note\./);
+  // Every bin answers `--version`, so every bin's usage has to say so. It is asked of the BIN, not
+  // of a command, so it cannot live in a CommandTable — and a flag the validator accepts while the
+  // generated help stays silent is exactly the drift this generator exists to prevent.
+  assert.match(top, /Run `mybin --version` \(or -v\) for the installed version\./);
 
   const one = formatUsage("mybin", T, "go");
   assert.match(one, /Usage: mybin go <target> \[flags\]/);
@@ -153,4 +161,91 @@ test("usage is generated from the table, top level and per command", () => {
   // Asking for usage of a command that does not exist falls back to the full listing — the caller
   // is lost, and a blank page would keep them lost.
   assert.ok(formatUsage("mybin", T, "wat").includes("quiet"));
+});
+
+/* ------------------------- the bare form: a bin with no subcommands ------------------------- */
+
+/**
+ * `stockbit-mcp` takes flags and nothing else, so there is no command word to key a `CommandTable`
+ * on. These prove the bare gate refuses exactly what the subcommand gate refuses, and that asking
+ * ABOUT the bin — help or version — never returns "ok" and so can never reach a handler.
+ */
+const BARE: CommandSpec = {
+  summary: "runs the thing",
+  flags: { "--version": "print the version", "--help": "print this usage" },
+  details: ["Configured by environment:", "", "  SOME_ENV   what it does"],
+};
+
+/** Run the bare gate, collecting whatever it writes. */
+function bare(argv: string[], version = "9.9.9"): { result: string; out: string } {
+  let out = "";
+  const result = gateBareCommandLine("mybin", BARE, argv, (text) => (out += text), version);
+  return { result, out };
+}
+
+test("the bare gate passes a clean command line through", () => {
+  assert.equal(bare([]).result, "ok");
+});
+
+test("--version answers and stops, and never returns ok", () => {
+  const v = bare(["--version"], "9.9.9");
+  assert.equal(v.result, "version");
+  assert.equal(v.out, "9.9.9\n", "bare version string, newline-terminated, nothing else");
+  assert.equal(bare(["-v"], "9.9.9").result, "version");
+});
+
+test("isVersionToken knows both spellings and nothing else", () => {
+  assert.ok(isVersionToken("--version"));
+  assert.ok(isVersionToken("-v"));
+  for (const t of ["--versions", "-V", "version", "--ver", "-vv", ""]) {
+    assert.equal(isVersionToken(t), false, t);
+  }
+});
+
+test("--version is always ANSWERED, and can never fall through to running", () => {
+  // The behaviour, asserted directly. `version` was optional once, and the gate then returned "ok"
+  // for a bin that declared `--version` but passed none — so the bin STARTED, which is the exact
+  // "an unknown token is treated as absent" failure this module exists to close, one level up.
+  //
+  // Asserted as behaviour rather than as `gateBareCommandLine.length === 5`: that reads as a
+  // required-parameter check and is not one. TypeScript emits `version?: string` as an ordinary
+  // parameter, so `.length` stays 5 either way and the regression would slip straight through.
+  // Making the parameter required is enforced by `npm run typecheck`; what a runtime test can
+  // prove is that no input reaches "ok" while carrying a version token.
+  for (const argv of [["--version"], ["-v"], ["--version", "--nonsense"], ["-v", "extra"]]) {
+    assert.equal(bare(argv).result, "version", argv.join(" "));
+  }
+});
+
+test("help wins over version, exactly as it wins over everything else", () => {
+  const r = bare(["--version", "--help"], "9.9.9");
+  assert.equal(r.result, "help");
+  assert.match(r.out, /Usage: mybin/);
+});
+
+test("the bare gate refuses an unknown flag, naming the bin rather than a command", () => {
+  const err = refusal(() => bare(["--nope"]));
+  assert.equal(err.command, "mybin");
+  assert.equal(err.token, "--nope");
+  assert.match(err.message, /^mybin: unknown flag "--nope"\./);
+  assert.match(err.message, /mybin accepts: --version, --help/);
+  assert.match(err.message, /Run `mybin --help`/);
+});
+
+test("the bare gate refuses a positional, because it has no slots at all", () => {
+  const err = refusal(() => bare(["wat"]));
+  assert.equal(err.token, "wat");
+  assert.match(err.message, /mybin accepts no positional arguments/);
+});
+
+test("bare usage names the flags and carries no empty command list", () => {
+  const usage = formatBareUsage("mybin", BARE, ["Extra note."]);
+  assert.match(usage, /^Usage: mybin \[flags\]\n/);
+  assert.doesNotMatch(usage, /<>/, "the command-list shape must not leak into a bin with no commands");
+  assert.match(usage, /--version {2}print the version/);
+  assert.match(usage, /SOME_ENV/);
+  assert.match(usage, /Unknown flags are an error, never ignored/);
+  assert.match(usage, /Extra note\./);
+  // A blank `details` entry stays blank rather than becoming an indent nobody can see.
+  assert.doesNotMatch(usage, / +\n/, "no line may end in whitespace");
 });

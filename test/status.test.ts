@@ -214,6 +214,64 @@ test("a rejection recorded against a token that has since been replaced is not r
     const report = await collectStatus();
     assert.equal(report.auth.main.health, "unknown", "nothing is known about the NEW token");
     assert.doesNotMatch(report.nextStep, /rejected/i);
+    // `health` was fingerprint-filtered and `lastRefresh` was not, so one payload described two
+    // different credentials: a verdict about the token in the store beside a 401 belonging to the
+    // one it replaced. The verdict was the only half anybody had checked.
+    assert.equal(
+      report.auth.main.lastRefresh,
+      undefined,
+      "a 401 against the PREVIOUS token is not a fact about this one",
+    );
+    assert.doesNotMatch(formatStatus(report), /401|REJECTED|last refresh/);
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("a success belonging to another credential cannot out-date this one's rejection", async () => {
+  // The other direction, and the worse one, because it reads as good news. A matching failure
+  // compared against an UNFILTERED lastOk let a success for a different token demote this token's
+  // own 401 to `unknown` — and `status` then printed "last refresh OK at HH:MM" where HH:MM was
+  // the timestamp of the refresh that failed.
+  clearAllSlots();
+  clearSessionHealth();
+  const stored = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  const other = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400 + 1);
+  recordRefreshFailure("main", stored, 401, "HTTP 401");
+  await new Promise((r) => setTimeout(r, 15)); // distinct timestamps
+  recordRefreshOk("main", other);
+  getStore("main").set(stored);
+  try {
+    const report = await collectStatus();
+    assert.equal(report.auth.main.health, "failing", "this token WAS rejected, whatever happened to another");
+    assert.equal(report.auth.main.lastRefresh?.ok, false);
+    assert.equal(report.auth.main.lastRefresh?.status, 401);
+    assert.doesNotMatch(formatStatus(report), /last refresh OK/);
+  } finally {
+    clearSessionHealth();
+    clearAllSlots();
+  }
+});
+
+test("the verdict and the timestamp always describe the same credential", async () => {
+  // The invariant the defect violated, asserted directly rather than through one scenario:
+  // `unknown` means nothing is recorded about THIS token, so there is no event to quote.
+  clearAllSlots();
+  clearSessionHealth();
+  const stored = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400);
+  const other = fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86_400 + 1);
+  recordRefreshFailure("main", other, 401, "HTTP 401");
+  getStore("main").set(stored);
+  try {
+    const report = await collectStatus();
+    for (const [slot, state] of Object.entries(report.auth)) {
+      if (state.health === "unknown") {
+        assert.equal(state.lastRefresh, undefined, `${slot}: unknown must quote no event`);
+      }
+      if (state.health === "ok") assert.equal(state.lastRefresh?.ok, true, `${slot}: ok must quote a success`);
+      if (state.health === "failing") assert.equal(state.lastRefresh?.ok, false, `${slot}: failing must quote a failure`);
+    }
   } finally {
     clearSessionHealth();
     clearAllSlots();
@@ -335,6 +393,40 @@ test("trading off with no trading tools registered is not worth mentioning", asy
   });
   assert.equal(report.trading.mode, "off");
   assert.equal(report.checks.some((c) => c.name === "trading tools"), false);
+  clearAllSlots();
+});
+
+test("a family with nothing registered is named, with the exact env value that adds it back", async () => {
+  // The trap this closes: under `core`, all seventeen `chartbit` tools are withheld. Asking for one
+  // got the SDK's bare "not found", and `STOCKBIT_TOOLS` was named nowhere in this report except
+  // the trading branch — so finding the fix meant reading the FAMILIES array out of `dist/`.
+  clearAllSlots();
+  const report = await collectStatus({
+    profileLabel: "core",
+    profileIsDefault: true,
+    missingTools: ["chartbit_draw", "chartbit_save"],
+    missingFamilies: ["chartbit", "corpaction"],
+  });
+  assert.deepEqual(report.server.withheldFamilies, ["chartbit", "corpaction"]);
+
+  const text = formatStatus(report);
+  assert.match(text, /chartbit, corpaction/, "the withheld families must be named");
+  assert.match(text, /STOCKBIT_TOOLS=core,<family>/, "and the exact value that adds one back");
+  // FAMILIES, not tools — `screener` is both a withheld family and a registered tool, so a reader
+  // who takes these for tool names is being misled by a report whose point is not misleading them.
+  assert.match(text, /family names, not tool names/);
+
+  // A fact, not a fault. The trading warn above fires on a genuine contradiction; a default install
+  // that withheld nothing the user asked for must not carry a permanent warning.
+  assert.equal(report.checks.some((c) => c.status !== "ok" && /famil/i.test(c.name)), false);
+  clearAllSlots();
+});
+
+test("withholding nothing says nothing — the profile line stays bare", async () => {
+  clearAllSlots();
+  const report = await collectStatus({ profileLabel: "all" });
+  assert.equal(report.server.withheldFamilies, undefined, "absent, not an empty array");
+  assert.doesNotMatch(formatStatus(report), /have nothing registered/);
   clearAllSlots();
 });
 
@@ -541,4 +633,37 @@ test("the login age never leaks a token, like everything else in the report", as
   writeProfile(new Date().toISOString());
   const serialised = JSON.stringify(await collectStatus());
   assert.equal(/eyJ[A-Za-z0-9_-]{10,}/.test(serialised), false);
+});
+
+/* ------------------------------- auto-recovery ------------------------------- */
+
+test("auto-recovery reports the whole conjunction, and is off by default", async () => {
+  const report = await collectStatus();
+  // Every field, because a reader that has to reassemble "can this happen?" from three booleans is
+  // a reader who will get it wrong in the direction of assuming it will.
+  assert.deepEqual(report.login.autoRecovery, {
+    available: false,
+    armed: false,
+    optedIn: false,
+    spent: false,
+    running: false,
+  });
+});
+
+test("the rendered status stays silent about recovery where it cannot happen", async () => {
+  // Only the MCP server arms it. Printing "auto-recovery: off" into `stockbit-auth status` would
+  // name a switch that does nothing in that process, and send the reader off to turn it on.
+  assert.doesNotMatch(formatStatus(await collectStatus()), /Auto-recovery/);
+});
+
+test("the opt-in alone does not report recovery as available", async () => {
+  process.env.STOCKBIT_AUTO_RELOGIN = "1";
+  try {
+    const auto = (await collectStatus()).login.autoRecovery;
+    assert.equal(auto.optedIn, true);
+    assert.equal(auto.armed, false);
+    assert.equal(auto.available, false, "the env var grants nothing on its own");
+  } finally {
+    delete process.env.STOCKBIT_AUTO_RELOGIN;
+  }
 });

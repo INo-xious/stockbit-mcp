@@ -33,7 +33,7 @@ import { z } from "zod";
 import { getJson, postJson } from "../http/client.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
-import { normalizeSymbol } from "../symbol.js";
+import { isSymbol, normalizeSymbol } from "../symbol.js";
 import { StockbitError } from "../http/errors.js";
 
 /* --------------------------- envelope + row location --------------------------- */
@@ -108,10 +108,17 @@ function rowsOf(body: unknown, context: string): RowSet {
 /**
  * Tickers read off rows that carry a string `symbol`, with a count of the rows that did not.
  *
- * `symbol` is not a guess: every emitten-shaped row already mapped in this codebase carries it
- * (`getSectors`, the watchlist members, the screener's `company` block). It is still reported
- * defensively — a non-zero `rowsWithoutSymbol` means the ticker list is not the whole answer and
- * the caller should read `rows`.
+ * FOR THE TWO MEMBERSHIP ROUTES ONLY — index constituents and sector companies. `symbol` is not a
+ * guess on those: every emitten-shaped row already mapped in this codebase carries it (`getSectors`,
+ * the watchlist members, the screener's `company` block). It is still reported defensively — a
+ * non-zero `rowsWithoutSymbol` means the ticker list is not the whole answer and the caller should
+ * read `rows`.
+ *
+ * That justification was never checked against SEARCH, whose rows are a different shape and carry
+ * no `symbol` at all, so this reported every one of them as ticker-less — issue #41. Search has its
+ * own reader below, and the two are deliberately separate: a probe wide enough to find a ticker on
+ * a search row would invent one here, where a sector row's `id` is a numeric sector id and its
+ * `name` is a sector name.
  */
 function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: number } {
   const symbols: string[] = [];
@@ -122,6 +129,83 @@ function symbolsIn(rows: unknown[]): { symbols: string[]; rowsWithoutSymbol: num
     else rowsWithoutSymbol++;
   }
   return { symbols, rowsWithoutSymbol };
+}
+
+/**
+ * A search row's link, when that link says the row IS an emitten.
+ *
+ * The leading slash is tolerated because a bare `^symbol/` would turn one upstream formatting
+ * change into a silent, total return of issue #41 — every row ticker-less again, invisibly.
+ * Nothing wider than that: an absolute URL has not been seen and guessing at hosts is how a
+ * ticker ends up being read off somebody's profile page.
+ */
+const SYMBOL_URL_RE = /^\/?symbol\/([^/?#]+)$/;
+
+/** One ticker read off a search row, and the wire key it came from. */
+export interface SearchSymbolRow {
+  /** Index into `rows`, so the whole row is one lookup away and nothing is duplicated here. */
+  index: number;
+  symbol: string;
+  /** The wire key it was read from. `"url"` means the last segment of a `symbol/<TICKER>` link. */
+  readFrom: "symbol" | "url";
+}
+
+/**
+ * The ticker on a SEARCH row, which does not carry a `symbol` key.
+ *
+ * A reported live `/search/v2` row is
+ * `{"id":"DEWA","name":"DEWA","desc":"Darma Henwa Tbk","url":"symbol/DEWA"}` — the ticker three
+ * times over and never under the name `symbolsIn` looks for, so the one tool whose whole job is
+ * name → ticker answered `symbols: []` for every row it found (issue #41).
+ *
+ * Two rules, in this order.
+ *
+ * `symbol` FIRST — the old rule, preserved exactly, so no row that yielded a ticker before yields
+ * nothing now. It is read whatever the row's link says, and the only test on it is the one
+ * `symbolsIn` already applied: a non-blank STRING. There is no `isSymbol` test, so an unexpected
+ * spelling still comes back rather than being dropped — but a non-string does not pass:
+ * `{ symbol: 5, url: "symbol/BBRI" }` falls through to the link and yields `BBRI`, not `5`.
+ *
+ * Otherwise the row's LINK, which is a gate and not merely another candidate: `symbol/<TICKER>` is
+ * the response labelling the row an emitten, where `url: "user/<handle>"` labels a person. The
+ * ticker is the segment itself, validated with `isSymbol`.
+ *
+ * `id` and `name` are deliberately NOT mined, which departs from the issue's suggested
+ * `id → name → url` order. On every reported row those three hold the same string, so mining them
+ * can only ever produce a value the link does not — and that value is unverified. `isSymbol` admits
+ * digits (`src/symbol.ts`), so `{ id: "12345", …, url: "symbol/BBRI" }` would publish `"12345"` and
+ * discard the real ticker sitting beside it; `normalizeSymbol` would then accept the invention as a
+ * URL path segment on the next call, and the `not_found` that came back would read as "no such
+ * stock" rather than "we made it up". A row whose link is not ticker-shaped is ticker-less, and
+ * `rowsWithoutSymbol` says so.
+ *
+ * Not uppercased before the shape test: uppercasing would turn a lowercase handle on a
+ * `symbol/`-labelled row into a ticker, and no lowercase ticker has been seen. If Stockbit ever
+ * lowercases them, the honest result is a row this reports as ticker-less — not a guess.
+ */
+function tickerOn(row: Record<string, unknown>): Omit<SearchSymbolRow, "index"> | undefined {
+  const direct = row.symbol;
+  if (typeof direct === "string" && direct.trim() !== "") return { symbol: direct.trim(), readFrom: "symbol" };
+
+  const segment = SYMBOL_URL_RE.exec(typeof row.url === "string" ? row.url.trim() : "")?.[1]?.trim();
+  return segment !== undefined && isSymbol(segment) ? { symbol: segment, readFrom: "url" } : undefined;
+}
+
+/** Tickers off search rows. See `tickerOn` for why this is not `symbolsIn`. */
+function searchSymbolsIn(rows: unknown[]): {
+  symbols: string[];
+  symbolRows: SearchSymbolRow[];
+  rowsWithoutSymbol: number;
+} {
+  const symbolRows: SearchSymbolRow[] = [];
+  let rowsWithoutSymbol = 0;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const found = row && typeof row === "object" ? tickerOn(row as Record<string, unknown>) : undefined;
+    if (found) symbolRows.push({ index, ...found });
+    else rowsWithoutSymbol++;
+  }
+  return { symbols: symbolRows.map((r) => r.symbol), symbolRows, rowsWithoutSymbol };
 }
 
 /* ---------------------------------- profile ---------------------------------- */
@@ -152,7 +236,31 @@ export interface CompanyProfile {
   finItems?: unknown;
 }
 
-/** The profile block alone. */
+/**
+ * The profile block alone, verbatim.
+ *
+ * Nothing inside the body is parsed, and that is a decision rather than an omission — it includes
+ * the percentage- and magnitude-shaped strings a shareholder block carries, where a director's
+ * stake was reported as `percentage: "<0.0001%"` beside `value: "3.24 M"` when the arithmetic gives
+ * about 0.0080% (issue #37).
+ *
+ * Recomputing it would take two numbers this response does not supply. The first is an UNROUNDED
+ * share count: `"3.24 M"` has already been rounded for display, so it yields 3,240,000 whatever the
+ * unit is, and the unit cannot be read here either — `MAGNITUDES` refuses a bare `"m"` on purpose,
+ * because Indonesian *miliar* (1e9) and English *million* (1e6) are a thousandfold apart. The
+ * second is the outstanding share count, which is not in this payload at all: the nearest source is
+ * the `keystats` route, a second request against a body whose fields are likewise returned as-is.
+ * A figure computed from a rounded number under a guessed unit is an invented number, twice over.
+ *
+ * `profile` is also not a `RowSet` — it carries no `source`, so empty, null and absent are not
+ * distinguishable inside it. That too is by design: the body is handed back as it arrived.
+ *
+ * If a computed percentage is ever wanted it does not belong in here, and it does not belong in
+ * `getCompanyProfile`, which is documented and tested as ONE request. It belongs at the caller or
+ * in a tool of its own, after a live call settles the three questions in
+ * `docs/PENDING-VERIFICATION.md` — and then as a NEW key naming both of its inputs, never as a
+ * rewrite of the upstream one.
+ */
 async function getProfile(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
   return cached(`companyProfile:${sym}`, CACHE.keystatsTtlMs, async () =>
@@ -240,8 +348,24 @@ export async function getSubsidiaries(symbol: string): Promise<RowSet & { symbol
  * point of checking is that a typo (`202`, `20255`) is refused here rather than becoming a
  * confidently empty chart.
  */
-const MIN_VALUE_YEAR = 1990;
-const MAX_VALUE_YEAR = 2100;
+/**
+ * `value_year` is a WINDOW LENGTH IN MONTHS, not a calendar year.
+ *
+ * It was validated here as a year between 1990 and 2100 until 2026-09-01, which had it exactly
+ * backwards: it would have refused every value that works and accepted only values that do not.
+ * Nobody noticed because the call itself was failing on authentication, so no argument ever
+ * reached the endpoint.
+ *
+ * Stockbit's own client was captured sending `value_year=12`, and the response then names the set
+ * outright in its `timeframe` block — `{"year":"5 Bulan","value":5}`, `{"year":"1 Tahun","value":12}`,
+ * `{"year":"2 Tahun","value":24}`, `{"year":"3 Tahun","value":36}`. "Tahun" is years and "Bulan" is
+ * months, so 12 means one year.
+ *
+ * Not enforced as an enum: those four are what the UI offers, which is not the same as what the
+ * endpoint accepts, and the answer carries the list so a caller can read the real one. A whole
+ * positive number of months is the rule, and the four known-good values are named in the message.
+ */
+const VALUE_YEAR_KNOWN_MONTHS = [5, 12, 24, 36] as const;
 
 /**
  * Pull a token out of the minting response without betting on one field name.
@@ -309,11 +433,195 @@ async function mintShareholdersToken(): Promise<string> {
   return token;
 }
 
+/**
+ * The refusal the shareholder chart answers when it will not take the minted token.
+ *
+ * `WebViewToken.FromContext` is the gateway naming the token it looked for and did not find, which
+ * is what makes it a placement signal rather than a generic auth failure. Anchored on that phrase
+ * and on `Unauthenticated` so a reworded envelope around the same refusal still matches.
+ */
+const WEBVIEW_TOKEN_REFUSAL = /WebViewToken|Unauthenticated/i;
+
+/**
+ * Read the chart with the minted token, and say what a refusal here actually means.
+ *
+ * **UNVERIFIED: where the minted token belongs.** It is sent as a `token` query parameter, which is
+ * the placement the e-IPO refresh uses, but no capture of this call exists — if the chart answers
+ * 401 with a valid session, the placement is the first thing to move (a header, or the body of a
+ * POST variant).
+ *
+ * That prediction fired. A 2026-08-31 field report got
+ * `rpc error: code = Unauthenticated desc = WebViewToken.FromContext: User Not Found` (401) from
+ * this call in a session where `insider_transactions`, `broker_summary` and `chartbit_layouts` all
+ * succeeded at the same moment. Two requests were spent to be told nothing.
+ *
+ * ## Measured 2026-09-01: the query parameter makes no difference
+ *
+ * The same call was made three ways on a working credential — with a freshly minted token, with
+ * no `token` parameter at all, and with `token=notarealtoken`. All three answered the identical
+ * 401 with the identical body. A parameter the server reads would be expected to tell a garbage
+ * value apart from a valid one somehow, so this is strong evidence the `token` query parameter is
+ * not read here at all and the placement is simply wrong.
+ *
+ * It is not left as PROOF, and nothing is changed on the strength of it: a request refused at the
+ * same gate every time cannot fully distinguish "the parameter was ignored" from "the parameter
+ * was read and the token rejected for some other reason". What it does settle is that no value in
+ * that query parameter will make this call work, so the next person should not spend time on the
+ * token's VALUE. The remaining candidates are a header and a POST body, and choosing between them
+ * takes a capture of Stockbit's own request — DevTools on the ownership view of a symbol page,
+ * which is a thing a person does in a browser, not something this server can do to itself.
+ *
+ * The placement still cannot be corrected from here — moving it without a capture would be
+ * replacing one guess with another, and the honest thing is to say which guess is standing. So the
+ * 401 is re-raised carrying the diagnosis instead of the raw gateway string: this is a token
+ * PLACEMENT failure, not a session failure and not an entitlement the account lacks. Getting that
+ * reading for free is what turned a dead end into a five-second diagnosis in the field.
+ */
+async function readShareholdersChart(
+  sym: string,
+  valueYear: number | undefined,
+  type: string | undefined,
+  token: string,
+): Promise<unknown> {
+  try {
+    return await getJson("shareholdersChart", {
+      segments: { symbol: sym },
+      // `symbol` is sent as a query parameter as well as a path segment because Stockbit's own
+      // client sends both — confirmed in the capture, which carried
+      // `?symbol=DEWA&value_year=12&shareholder_type=all`.
+      params: { symbol: sym, value_year: valueYear, shareholder_type: type },
+      // The token goes in a raw `Authorization` header, and the transport puts it there. It is
+      // NOT a query parameter: the captured request had none, and sending one changed nothing.
+      mintedToken: token,
+    });
+  } catch (error) {
+    // Matched on the KIND *or* the body text, because the two things the field recorded are not
+    // the same strength. The `WebViewToken.FromContext: User Not Found` string was copied out of a
+    // response; the 401 beside it is the reporter's annotation and no status for this failure is
+    // written down anywhere in this repo. A gateway that answered the same rpc error under some
+    // other status would slip past a kind-only test and hand the caller back the raw string —
+    // which is the exact dead end this whole branch exists to remove.
+    if (error instanceof StockbitError && (error.kind === "auth" || WEBVIEW_TOKEN_REFUSAL.test(error.message))) {
+      throw new StockbitError(
+        "auth",
+        `The shareholder chart refused the one-shot token it just minted for ${sym}. This is ` +
+          `almost certainly not your session — the mint on the line above SUCCEEDED on that same ` +
+          `credential, so it was working seconds ago — and the same call answers this identically ` +
+          `with a valid token, with no token and with a junk ` +
+          `token (measured 2026-09-01), so the \`token\` query parameter this client sends is not ` +
+          `the placement the endpoint reads. No value will fix it. Where the token really belongs ` +
+          `— a header, or a POST body — takes a capture of Stockbit's own request to settle, so ` +
+          `this tool is expected to fail until someone makes one. Read the register through ` +
+          `company_profile's \`shareholder_one_percent\` instead; it carries holders, percentages ` +
+          `and the scrip/scripless split. Upstream said: ${error.message}`,
+        { status: error.status },
+      );
+    }
+    throw error;
+  }
+}
+
+/** One point on one ownership series. A figure that could not be read is absent, never zero. */
+export interface OwnershipPoint {
+  /** The label the endpoint printed, e.g. `"Mar 26"`. */
+  label?: string;
+  /** Percent of shares held, as sent. */
+  percent?: number;
+  /** Seconds since the epoch, when the row carried a parseable one. */
+  unixDate?: number;
+}
+
+/** One line on the ownership chart — `Local` and `Foreign` on the readings seen so far. */
+export interface OwnershipSeries {
+  name?: string;
+  points: OwnershipPoint[];
+}
+
 export interface Shareholders extends RowSet {
   symbol: string;
   /** Echoed back so a cached answer can be told apart from the one that was asked for. */
   valueYear?: number;
   shareholderType?: string;
+  /**
+   * The chart, projected. This endpoint answers with SERIES rather than rows, which is why
+   * `rows`/`source` above report a miss on a perfectly good payload — `source: null` is this code
+   * saying it found nothing array-shaped at the top level, and it is right.
+   */
+  series?: OwnershipSeries[];
+  /**
+   * The window lengths the endpoint itself offers, in months, with its own labels. This is the
+   * `value_year` vocabulary, read from the answer rather than assumed.
+   */
+  timeframes?: Array<{ label?: string; months?: number }>;
+  /** The endpoint's own freshness stamp, verbatim. */
+  lastUpdate?: string;
+}
+
+/** A number the wire sent as a number or a numeric string; anything else is absent. */
+function numberOrAbsent(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function stringOrAbsent(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * Project the ownership chart out of the `data` block.
+ *
+ * Additive and total: everything stays under `extra` as well, so a key this does not name is not a
+ * key this loses. Returns `{}` when the block carries no legend, rather than an empty series list
+ * that would read as "this issuer has no ownership data".
+ */
+function projectOwnershipChart(extra: unknown): Partial<Shareholders> {
+  const data = extra && typeof extra === "object" ? (extra as Record<string, unknown>) : undefined;
+  if (!data) return {};
+
+  const out: Partial<Shareholders> = {};
+
+  const legend = data.legend;
+  if (Array.isArray(legend)) {
+    out.series = legend.map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      const points = Array.isArray(row.chart_data) ? row.chart_data : [];
+      return {
+        ...(stringOrAbsent(row.item_name) !== undefined ? { name: stringOrAbsent(row.item_name) } : {}),
+        points: points.map((p) => {
+          const point = (p ?? {}) as Record<string, unknown>;
+          const label = stringOrAbsent(point.date);
+          const percent = numberOrAbsent(point.value);
+          const unixDate = numberOrAbsent(point.unix_date);
+          return {
+            ...(label !== undefined ? { label } : {}),
+            ...(percent !== undefined ? { percent } : {}),
+            ...(unixDate !== undefined ? { unixDate } : {}),
+          };
+        }),
+      };
+    });
+  }
+
+  const timeframe = data.timeframe;
+  if (Array.isArray(timeframe)) {
+    out.timeframes = timeframe.map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      // The endpoint calls the LABEL `year` ("1 Tahun") and the VALUE the month count. Renamed
+      // here, because a field called `year` holding 12 is the trap this whole fix came out of.
+      const label = stringOrAbsent(row.year);
+      const months = numberOrAbsent(row.value);
+      return { ...(label !== undefined ? { label } : {}), ...(months !== undefined ? { months } : {}) };
+    });
+  }
+
+  const lastUpdate = stringOrAbsent(data.last_update);
+  if (lastUpdate !== undefined) out.lastUpdate = lastUpdate;
+
+  return out;
 }
 
 /**
@@ -329,11 +637,12 @@ export async function getShareholders(
 ): Promise<Shareholders> {
   const sym = normalizeSymbol(symbol);
   if (valueYear !== undefined) {
-    if (!Number.isInteger(valueYear) || valueYear < MIN_VALUE_YEAR || valueYear > MAX_VALUE_YEAR) {
+    if (!Number.isInteger(valueYear) || valueYear < 1) {
       throw new StockbitError(
         "invalid_param",
-        `Invalid value_year ${JSON.stringify(valueYear)}: expected a whole year between ` +
-          `${MIN_VALUE_YEAR} and ${MAX_VALUE_YEAR}`,
+        `Invalid value_year ${JSON.stringify(valueYear)}: it is a WINDOW LENGTH IN MONTHS, not a ` +
+          `calendar year. Stockbit's own client offers ${VALUE_YEAR_KNOWN_MONTHS.join(", ")} ` +
+          `(12 = one year). The answer's \`timeframes\` names the set the endpoint actually served.`,
       );
     }
   }
@@ -345,22 +654,14 @@ export async function getShareholders(
   const key = `shareholders:${sym}:${valueYear ?? "-"}:${type ?? "-"}`;
   return cached(key, CACHE.keystatsTtlMs, async () => {
     const token = await mintShareholdersToken();
-    const body = await getJson("shareholdersChart", {
-      segments: { symbol: sym },
-      // `symbol` is sent as a query parameter as well as a path segment because Stockbit's own
-      // client sends both. Duplication is cheap; a missing filter is a wrong answer.
-      //
-      // UNVERIFIED: where the minted token belongs. It is sent as a `token` query parameter, which
-      // is the placement the e-IPO refresh uses, but no capture of this call exists — if the chart
-      // answers 401 with a valid session, this is the first thing to move (a header, or the body of
-      // a POST variant).
-      params: { symbol: sym, value_year: valueYear, shareholder_type: type, token },
-    });
+    const body = await readShareholdersChart(sym, valueYear, type, token);
+    const rowSet = rowsOf(body, "shareholders chart");
     return {
       symbol: sym,
       ...(valueYear !== undefined ? { valueYear } : {}),
       ...(type !== undefined ? { shareholderType: type } : {}),
-      ...rowsOf(body, "shareholders chart"),
+      ...rowSet,
+      ...projectOwnershipChart(rowSet.extra),
     };
   });
 }
@@ -458,8 +759,14 @@ export interface SearchResult extends RowSet {
   page?: number;
   type?: string;
   insiderCategory?: string;
-  /** Tickers off the rows that carried one. Search matches people and posts too, so this can be short. */
+  /** Tickers off the rows one could be read from, in row order. Can be shorter than `rows`. */
   symbols: string[];
+  /**
+   * One entry per ticker: its index in `rows` and the wire key it came from. `readFrom: "url"` means
+   * the ticker is the last segment of a `symbol/<TICKER>` link rather than a field of its own.
+   */
+  symbolRows: SearchSymbolRow[];
+  /** Rows no ticker could be read from. Search matches people and posts, so non-zero is normal. */
   rowsWithoutSymbol: number;
 }
 
@@ -520,7 +827,9 @@ export async function search(keyword: string, opts: SearchOptions = {}): Promise
       ...(type !== undefined ? { type } : {}),
       ...(insiderCategory !== undefined ? { insiderCategory } : {}),
       ...set,
-      ...symbolsIn(set.rows),
+      // Kept adjacent to `...set` on purpose: `symbolRows[].index` points into the array that
+      // `rows` will hold, and anything filtering between the two would silently invalidate it.
+      ...searchSymbolsIn(set.rows),
     };
   });
 }

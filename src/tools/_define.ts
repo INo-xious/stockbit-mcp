@@ -206,6 +206,19 @@ export interface Definer {
   /** The same, with the family each one would have belonged to, so a refusal can say what to enable. */
   skipped(): { name: string; family: Family }[];
 
+  /**
+   * Families with NOTHING registered — the ones `STOCKBIT_TOOLS=<label>,<family>` would add back.
+   *
+   * Wholly absent, never merely thinned. `core` keeps five of the seventeen `trading` tools, so
+   * naming `trading` here would tell a user to add a family they already have. `chartbit` is the
+   * real case: seventeen tools, none registered, and until this existed nothing said so.
+   *
+   * Derived from what was actually filtered, not from `FAMILIES` minus what is present. The day a
+   * family is declared before any of its tools exist, the second form would name it and send a
+   * user to set a variable that adds nothing.
+   */
+  withheldFamilies(): Family[];
+
   /** Everything registered, with its family, evidence and shape. Feeds `docs/TOOLS.md`. */
   records(): ToolRecord[];
 
@@ -404,6 +417,11 @@ function makeScoped(shared: Shared, familyName: Family, familyEvidence: Evidence
 
     skipped() {
       return [...shared.skipped];
+    },
+
+    withheldFamilies() {
+      const present = new Set(shared.records.map((r) => r.family));
+      return [...new Set(shared.skipped.map((s) => s.family))].filter((f) => !present.has(f));
     },
 
     records() {

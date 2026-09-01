@@ -60,7 +60,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
-    "test": "node --test --import tsx test/*.test.ts",
+    "test": "node --test --import tsx --import ./test/_offline.mjs test/*.test.ts",
     "smoke": "node scripts/smoke.mjs",
     "check:pack": "node scripts/check-pack.mjs",
     "docs:tools": "node --import tsx scripts/gen-tools-doc.ts",
