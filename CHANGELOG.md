@@ -8,7 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Where an ent
 was **Observed**, it was read off a live response with a real account rather than inferred from a
 name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
-## [Unreleased]
+## [1.3.0] — 2026-09-02
 
 ### Added
 
@@ -1504,7 +1504,13 @@ intercepts at `Fetch`'s Response stage, which *pauses* the request while the bod
 > guarded a function nothing proved production called. If you add coverage here, assert the request
 > that actually goes out, and check that your test fails when the feature is deleted.
 
-[Unreleased]: https://github.com/INo-xious/stockbit-mcp/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/INo-xious/stockbit-mcp/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/INo-xious/stockbit-mcp/compare/v1.2.4...v1.3.0
+[1.2.4]: https://github.com/INo-xious/stockbit-mcp/compare/v1.2.2...v1.2.4
+[1.2.2]: https://github.com/INo-xious/stockbit-mcp/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/INo-xious/stockbit-mcp/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/INo-xious/stockbit-mcp/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/INo-xious/stockbit-mcp/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/INo-xious/stockbit-mcp/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/INo-xious/stockbit-mcp/releases/tag/v1.0.0

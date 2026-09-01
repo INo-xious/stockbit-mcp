@@ -1,7 +1,7 @@
 {
   "name": "stockbit",
   "displayName": "Stockbit MCP",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "IDX market data, bandarmology and your Stockbit account for Claude Code, plus trading-desk skills.",
   "author": {
     "name": "Darren Wang",
