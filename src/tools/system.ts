@@ -52,7 +52,7 @@ import { defaultProfileDir } from "../auth/login.js";
 import { removeDirWithRetry } from "../auth/tempdir.js";
 import { getStore, type StoreSlot } from "../auth/store.js";
 import { withCredentialLock } from "../auth/reflock.js";
-import { clearWebSession } from "../auth/websession.js";
+import { clearWebSession, webSessionHealth } from "../auth/websession.js";
 import { clearAccessCache } from "../auth/accesscache.js";
 import { clearSessionHealth } from "../auth/health.js";
 import { forgetRotated } from "../auth/session.js";
@@ -235,7 +235,23 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
         .describe(
           "Use a throwaway browser profile instead of the saved one — nothing carried over, so the " +
             "user re-enters password and OTP. For a profile that is corrupt or held open by another " +
-            "process. To sign in as a different account, use switch_account instead.",
+            "process. To sign in as a different account, use switch_account instead. " +
+            "IT DOES NOT FIX THE CHART TOOLS: the throwaway profile is discarded, so the API session " +
+            "starts working while the saved profile the chartbit tools actually drive stays signed " +
+            "out — every chartbit tool keeps failing until a login runs WITHOUT this. Prefer " +
+            "reap_orphans for a profile merely held open.",
+        ),
+      reap_orphans: z
+        .boolean()
+        .optional()
+        .describe(
+          "If the browser exits immediately because something already holds the saved profile, end " +
+            "those processes and retry once. For the case where a previous login left browser " +
+            "processes behind and every login since has failed to open a window.\n" +
+            "ASK THE USER FIRST. It cannot tell an abandoned process from a working one — a browser " +
+            "that is fine answers the debugging port it was started with, not the new one this " +
+            "checks — so it ends EVERY process holding that profile, including a chart window the " +
+            "chartbit tools left open and are still using.",
         ),
       switch_account: z
         .boolean()
@@ -253,6 +269,7 @@ export function registerSystemTools(define: Definer, options: SystemToolOptions 
         force: a.force === true || a.switch_account === true,
         fresh: a.fresh_profile === true,
         switchAccount: a.switch_account === true,
+        reapOrphans: a.reap_orphans === true,
       }),
     { destructiveHint: false, idempotentHint: true, evidence: "observed" },
   );
@@ -300,6 +317,8 @@ interface LoginRequest {
   fresh: boolean;
   /** Clear the browser's Stockbit session first, and never reuse what was there. */
   switchAccount: boolean;
+  /** End processes still holding the saved profile if the browser cannot open against it. */
+  reapOrphans: boolean;
 }
 
 /** A refusal is a normal answer here, not an exception: it always says what to do instead. */
@@ -346,10 +365,47 @@ async function startLogin(define: Definer, request: LoginRequest) {
     );
   }
 
+  // The website session is provably dead, and a plain login is the one thing that cannot fix it.
+  //
+  // This file had never read the web session at all — the signal is computed in `status.ts` and only
+  // ever displayed. So the tool went on offering the flow that was measured failing four times out
+  // of four: with a stale session Stockbit shows an expiry modal over the form and closes the window
+  // before anything can be typed ("there is a popup of 'go back to login page?' before i managed to
+  // input the log in details, it closed on me"). `switch_account` clears the session first and
+  // worked every attempt.
+  //
+  // Only on the PROVABLE verdicts. `rejected` and `expired` each rest on evidence — a refusal
+  // recorded in the health journal, or an expiry that was read and has passed. "Unknown" is not
+  // failure, and refusing on it would block a login whose session simply could not be read.
+  //
+  // Not a hard refusal for the two requests that already avoid the modal: `switch_account` clears
+  // the session, and `fresh_profile` never loads it.
+  if (!request.switchAccount && !request.fresh) {
+    const web = webSessionHealth();
+    if (web.rejected || web.expired) {
+      return refusal(
+        `The browser's Stockbit session is ${web.rejected ? "refused by Stockbit" : "expired"}, so the ` +
+          "login page will open with an expiry dialog over it and close before anyone can type.",
+        "Call login again with `switch_account: true`, which signs that browser profile out of " +
+          "Stockbit first and then shows a real form. Tell the user it signs them out in that " +
+          "browser. (`stockbit-auth login --switch-account` does the same from a terminal.)",
+      );
+    }
+  }
+
   if (loginStatus().inProgress) {
+    // Two very different things can hold this flag now, and telling a user to go and type in a
+    // window that is about to close itself is worse than saying nothing. An automatic recovery
+    // harvests a cookie and finishes within about half a minute, with nobody waiting on it.
+    const auto = loginStatus().autoRecovery.running;
     return refusal(
-      "A login started by this server is already waiting for the user to sign in.",
-      "Finish signing in in the window that is already open, then call status. Nothing new was opened.",
+      auto
+        ? "This server is recovering the session by itself right now — a window is open, and it " +
+            "closes on its own once it has read the credential."
+        : "A login started by this server is already waiting for the user to sign in.",
+      auto
+        ? "Wait a few seconds and call status. Nothing new was opened, and nobody needs to type anything."
+        : "Finish signing in in the window that is already open, then call status. Nothing new was opened.",
     );
   }
 
@@ -388,6 +444,7 @@ async function startLogin(define: Definer, request: LoginRequest) {
     slot: "main",
     timeoutMs,
     switchAccount: request.switchAccount,
+    reapOrphans: request.reapOrphans,
     ...(request.fresh ? { profileDir: "fresh" as const } : {}),
   })
     .then(settleLogin)

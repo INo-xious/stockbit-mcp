@@ -634,3 +634,36 @@ test("the login age never leaks a token, like everything else in the report", as
   const serialised = JSON.stringify(await collectStatus());
   assert.equal(/eyJ[A-Za-z0-9_-]{10,}/.test(serialised), false);
 });
+
+/* ------------------------------- auto-recovery ------------------------------- */
+
+test("auto-recovery reports the whole conjunction, and is off by default", async () => {
+  const report = await collectStatus();
+  // Every field, because a reader that has to reassemble "can this happen?" from three booleans is
+  // a reader who will get it wrong in the direction of assuming it will.
+  assert.deepEqual(report.login.autoRecovery, {
+    available: false,
+    armed: false,
+    optedIn: false,
+    spent: false,
+    running: false,
+  });
+});
+
+test("the rendered status stays silent about recovery where it cannot happen", async () => {
+  // Only the MCP server arms it. Printing "auto-recovery: off" into `stockbit-auth status` would
+  // name a switch that does nothing in that process, and send the reader off to turn it on.
+  assert.doesNotMatch(formatStatus(await collectStatus()), /Auto-recovery/);
+});
+
+test("the opt-in alone does not report recovery as available", async () => {
+  process.env.STOCKBIT_AUTO_RELOGIN = "1";
+  try {
+    const auto = (await collectStatus()).login.autoRecovery;
+    assert.equal(auto.optedIn, true);
+    assert.equal(auto.armed, false);
+    assert.equal(auto.available, false, "the env var grants nothing on its own");
+  } finally {
+    delete process.env.STOCKBIT_AUTO_RELOGIN;
+  }
+});

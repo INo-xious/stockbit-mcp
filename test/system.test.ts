@@ -134,6 +134,71 @@ test("no confirm is refused before anything else is considered", async () => {
   }
 });
 
+/* ------------------- escalating to the login that actually works ------------------- */
+
+/** A stored website session whose refresh token expired at `exp`. */
+function webSessionExpiringAt(exp: number): Parameters<typeof saveWebSession>[0] {
+  return {
+    capturedAt: new Date().toISOString(),
+    cookies: [
+      {
+        name: "credentialStorage",
+        value: encodeURIComponent(JSON.stringify({ state: { refresh: fakeJwt(exp) }, version: 0 })),
+        domain: ".stockbit.com",
+        path: "/",
+      },
+    ],
+    origins: [],
+  };
+}
+
+test("a dead website session refuses PLAIN login and names switch_account", async () => {
+  // Issue #7. With a stale session Stockbit shows its expiry dialog over the login form and closes
+  // the window before anything can be typed — "there is a popup of 'go back to login page?' before i
+  // managed to input the log in details, it closed on me". A plain login never once produced a
+  // usable form; switch_account cleared the session and worked 4 times out of 4. This file is the
+  // only place that can steer that, and it had never read the web session at all.
+  clearAllSlots();
+  clearWebSession();
+  saveWebSession(webSessionExpiringAt(Math.floor(Date.now() / 1000) - 86400));
+  delete process.env.STOCKBIT_NO_BROWSER;
+  try {
+    const h = harness();
+    const { payload, isError } = await h.call("login", { confirm: true });
+    assert.equal(isError, true);
+    assert.equal(payload.started, false);
+    assert.match(String(payload.reason), /expired/);
+    assert.match(String(payload.nextStep), /switch_account/);
+    // It signs the user out of Stockbit in that browser profile, so the tool has to say so rather
+    // than let a model discover it on the user's behalf.
+    assert.match(String(payload.nextStep), /signs (them|that browser profile) out/i);
+  } finally {
+    process.env.STOCKBIT_NO_BROWSER = "1";
+    clearWebSession();
+  }
+});
+
+test("switch_account itself is NOT refused by that gate — it is the fix", async () => {
+  // Refusing the escalation because the thing it repairs is broken would leave no way forward at
+  // all. `switch_account` clears the session before the first navigation, so the expiry dialog it
+  // is being warned about cannot appear.
+  clearAllSlots();
+  clearWebSession();
+  saveWebSession(webSessionExpiringAt(Math.floor(Date.now() / 1000) - 86400));
+  delete process.env.STOCKBIT_NO_BROWSER;
+  try {
+    const h = harness(async () => "declined");
+    const { payload } = await h.call("login", { confirm: true, switch_account: true });
+    // Stopped at the elicitation, which is several gates PAST the web-session refusal — so that
+    // refusal did not fire. Declining is what keeps this test from opening a window.
+    assert.equal(payload.started, false);
+    assert.match(String(payload.reason), /declined/i);
+  } finally {
+    process.env.STOCKBIT_NO_BROWSER = "1";
+    clearWebSession();
+  }
+});
+
 test("an existing session is reported rather than replaced", async () => {
   clearAllSlots();
   getStore("main").set(fakeJwt(Math.floor(Date.now() / 1000) + 7 * 86400));

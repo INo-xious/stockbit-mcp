@@ -47,6 +47,13 @@ import { sessionClock, type SessionClock } from "./core/sessionclock.js";
 import { stockbitDir } from "./paths.js";
 import { VERSION } from "./version.js";
 import { checkForUpdate, type UpdateStatus } from "./updatecheck.js";
+import {
+  autoReloginArmed,
+  autoReloginAvailable,
+  autoReloginOptedIn,
+  autoReloginRunning,
+  autoReloginSpent,
+} from "./auth/relogin.js";
 
 export interface SlotStatus {
   stored: boolean;
@@ -92,8 +99,40 @@ export interface LoginStatus {
    *     not the credential). Nothing is known about whether it works.
    *   - `no-token` — the capture finished without one.
    *   - `error: <redacted>` — the capture itself threw.
+   *   - `auto-recovery: <outcome>` — an automatic recovery ran instead of a person. `harvested`
+   *     there means a credential was written and NOT yet proven, which is why it does not say
+   *     `captured`: that word is reserved for one Stockbit has accepted.
    */
   lastResult?: string;
+  /**
+   * Whether this server may re-open the browser by itself when the session dies mid-task.
+   *
+   * Reported because it is the difference between "the next 401 fixes itself" and "the next 401
+   * stops the user", and nothing else says which. `available` is the whole conjunction — armed by
+   * this entry point, switched on by `STOCKBIT_AUTO_RELOGIN`, and not blocked by
+   * `STOCKBIT_NO_BROWSER` — so a reader never has to reassemble it from three fields and get it
+   * wrong. `spent` is the per-process latch: recovery gets exactly one attempt, because the proof
+   * rotates the token and rotation stales the browser session a second attempt would read.
+   *
+   * `spent` goes true when the attempt STARTS, not when it finishes, so `spent` alone does not mean
+   * "and it is over". `running` is what separates the two, and anything rendering this must read it
+   * first — telling a user their one attempt is used up while it is still running is the same class
+   * of wrong answer as telling them a recovery failed before it has finished.
+   */
+  autoRecovery: {
+    available: boolean;
+    armed: boolean;
+    optedIn: boolean;
+    spent: boolean;
+    /**
+     * A recovery has a window open right now.
+     *
+     * Distinct from `inProgress`, which cannot say WHO started the login. `login` needs the
+     * difference: telling someone to go and type into a window that closes itself in half a minute
+     * is worse advice than none at all.
+     */
+    running: boolean;
+  };
 }
 
 export interface StatusCheck {
@@ -255,7 +294,10 @@ export interface CollectStatusOptions {
  * abandoned the capture, and reporting "in progress" from a file another process wrote would be a
  * lie the user could not act on.
  */
-const loginState: LoginStatus = { inProgress: false };
+// Deliberately NOT `LoginStatus`: `autoRecovery` is computed on every read, not stored. Typing this
+// as the full report would invite someone to cache the recovery verdict here, where it would go
+// stale the moment the latch is spent.
+const loginState: Omit<LoginStatus, "autoRecovery"> = { inProgress: false };
 
 export function loginStarted(at: Date = new Date()): void {
   loginState.inProgress = true;
@@ -269,7 +311,20 @@ export function loginFinished(result: string): void {
 }
 
 export function loginStatus(): LoginStatus {
-  return { ...loginState };
+  return {
+    ...loginState,
+    // Read at call time, never cached. `STOCKBIT_AUTO_RELOGIN` is read fresh on every check by the
+    // same reasoning `settings.ts` gives for its own switches, and the latch changes during the
+    // process's life — a snapshot taken at import would report "available" for a server that has
+    // already spent its one attempt.
+    autoRecovery: {
+      available: autoReloginAvailable(),
+      armed: autoReloginArmed(),
+      optedIn: autoReloginOptedIn(),
+      spent: autoReloginSpent("main"),
+      running: autoReloginRunning(),
+    },
+  };
 }
 
 /** Test seam: forget any login this process recorded. */
@@ -984,6 +1039,28 @@ export function formatStatus(report: StatusReport): string {
   ];
   if (report.login.inProgress) lines.push(`Login            in progress since ${report.login.startedAt}`);
   else if (report.login.lastResult) lines.push(`Login            last result: ${report.login.lastResult}`);
+
+  // Only where it can actually happen. Recovery is armed by the MCP server and by nothing else, so
+  // printing "auto-recovery: off" into `stockbit-auth status` would name a switch that does nothing
+  // in that process — a setting the reader can then spend time trying to turn on.
+  if (report.login.autoRecovery.armed) {
+    const auto = report.login.autoRecovery;
+    lines.push(
+      // Each branch names the ONE thing standing in the way. "Set A and unset B" when B is the only
+      // problem sends the reader to change something that is already right.
+      `Auto-recovery    ${
+        auto.running
+          ? "running right now — a window is open, and it closes itself once it has read the credential"
+          : auto.spent
+            ? "already used its one attempt this session — the next failure needs a person"
+            : auto.available
+            ? "on — a dead session is re-harvested from the browser once, without asking"
+            : !auto.optedIn
+              ? "off — set STOCKBIT_AUTO_RELOGIN=1 to let a dead session fix itself once"
+              : "off — STOCKBIT_NO_BROWSER is set, and no window may be opened for any reason"
+      }`,
+    );
+  }
 
   for (const check of report.checks) {
     if (check.status === "ok") continue;

@@ -44,6 +44,23 @@ export interface LaunchOptions {
   extraArgs?: string[];
   /** Ceiling on the wait for the DevTools endpoint. */
   startTimeoutMs?: number;
+  /**
+   * On the "exited immediately" failure, kill whatever still holds this profile and try once more.
+   *
+   * Off by default, and it must STAY off by default, for a reason that is easy to get backwards.
+   *
+   * The failure this keys on does NOT mean the holder is dead. Every launch picks a fresh random
+   * debugging port and polls only that one, so a perfectly healthy browser — answering happily on
+   * the port IT was started with — still makes the new child hand off and exit, which is this exact
+   * error. The Chartbit driver leaves precisely such a browser running on this profile between
+   * calls, by design.
+   *
+   * So "reap on immediate exit" is not "reap what is dead". It is "reap whatever holds this
+   * profile", and a caller turning it on is saying it would rather end somebody's browser session
+   * than fail. Only one caller does: `login { reap_orphans: true }`, where a person read what it
+   * does and asked for it. The unattended recovery path deliberately does not — see `relogin.ts`.
+   */
+  reapOrphans?: boolean;
 }
 
 export interface LaunchedBrowser {
@@ -60,7 +77,29 @@ export interface LaunchedBrowser {
  * managed here: only the caller knows whether the browser should outlive the operation (the Chartbit
  * driver keeps it open across calls; the login capture kills it).
  */
-export async function launchDebuggableBrowser({
+export async function launchDebuggableBrowser(options: LaunchOptions): Promise<LaunchedBrowser> {
+  try {
+    return await spawnAndAwaitPort(options);
+  } catch (err) {
+    // Only the one failure, and only when the caller asked. `ALREADY_OPEN_HINT` is raised for a
+    // child that handed off to a running instance and exited. A start TIMEOUT is a different
+    // failure — a browser starting slowly, or one genuinely showing a window — and is left alone.
+    if (!options.reapOrphans || !(err instanceof Error) || err.message !== ALREADY_OPEN_HINT) throw err;
+
+    const { reapProfileHolders } = await import("./reap.js");
+    const reaped = await reapProfileHolders(options.profileDir);
+    // Retry only if the way was actually cleared. `found > 0` is not enough — every kill can be
+    // refused (EPERM) and leave the profile exactly as held as it was, in which case the retry is a
+    // second thirty-second wait for the same outcome. Re-throwing keeps the diagnosis the caller
+    // already had.
+    if (reaped.killed === 0 && reaped.clearedLocks.length === 0) throw err;
+
+    // Exactly once. A reap that did not clear the way is not a reason to reap again.
+    return await spawnAndAwaitPort(options);
+  }
+}
+
+async function spawnAndAwaitPort({
   bin,
   profileDir,
   headless = false,

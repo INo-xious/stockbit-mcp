@@ -32,6 +32,7 @@ import { resolveToolProfile } from "../src/tools/_profile.js";
 import { logStderr } from "../src/redact.js";
 import { CliParseError, gateBareCommandLine, type CommandSpec } from "../src/cliargs.js";
 import { VERSION } from "../src/version.js";
+import { armAutoRelogin } from "../src/auth/relogin.js";
 
 const MCP_BIN = "stockbit-mcp";
 
@@ -87,6 +88,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const { profile, isDefault } = resolved;
+
+  // Arm automatic login recovery — HERE, and in no other entry point.
+  //
+  // This is the enforcement half of "never auto-relogin inside `stockbit-batch`". Batch reaches
+  // `forceRefresh` through the same `src/http/client.ts` as everything else and there is no run-mode
+  // marker anywhere in this repo, so a check inside the auth layer would have nothing to test. A
+  // capability the batch process simply never grants itself cannot be got wrong by a later edit to
+  // some condition, and a long unattended backfill goes on failing fast, which is what it should do.
+  //
+  // Arming grants nothing on its own: recovery also needs STOCKBIT_AUTO_RELOGIN set, no
+  // STOCKBIT_NO_BROWSER, a provably live website session, and its one unspent attempt.
+  armAutoRelogin();
 
   const server = createServer({ profile, profileIsDefault: isDefault });
   const transport = new StdioServerTransport();
