@@ -30,8 +30,10 @@ import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { normalizeTradeDate, todayIso } from "./dates.js";
+import { readRaw } from "../live/tape.js";
 import type { Bar } from "./bars.js";
-import type { QueryParams, RouteName } from "../http/transport.js";
+import { MARKET_MOVER_VIEWS, MARKET_MOVER_WIRE } from "../http/transport.js";
+import type { MarketMoverView, QueryParams, RouteName } from "../http/transport.js";
 
 /**
  * The one thing every response here has in common: a `data` block whose contents vary.
@@ -431,13 +433,33 @@ export async function getSeriesBars(symbol: string, timeframe: string): Promise<
 }
 
 /**
- * The chart route's payload, unprojected.
+ * The chart payload `getSeriesBars` reads, unprojected.
  *
- * The sibling of the route `getSeriesBars` reads, and the one to reach for when a projected series
- * comes back with a non-empty `unmapped` or `extraKeys`: it returns exactly what Stockbit sends, so
- * the real field spellings can be read off it and `POINT_KEYS` corrected. It is not a fallback for
- * `getSeriesBars` and is never called automatically — a silent second attempt against a different
- * route would make "which endpoint answered" unknowable.
+ * The escape hatch for when a projected series comes back with a non-empty `unmapped` or
+ * `extraKeys`: it returns exactly what Stockbit sends, so the real field spellings can be read off
+ * it and `POINT_KEYS` corrected.
+ *
+ * ## It used to read a DIFFERENT ROUTE from the one it exists to diagnose
+ *
+ * This called `charts` (`/charts/:symbol`) while `getSeriesBars` calls `chartsDaily`
+ * (`/charts/:symbol/daily`) — two different endpoints — and handed the first the second's timeframe
+ * vocabulary. The two do not share one, measured 2026-09-01:
+ *
+ *   - `/charts/:symbol/daily` accepts `1w`, `1m`, `1d`, `3m`, `ytd`, `1y` and answers the rich
+ *     payload the projection reads: `prices`, `cagr`, `change`, `drawdown`, `markingpoint`, …
+ *   - `/charts/:symbol` REFUSES `1w` with 400 `Kurun waktu tidak valid`, accepts the rest, and
+ *     answers `{chart_points: []}` — a different, near-empty container.
+ *
+ * So `1w` came back 400 and `1m` came back empty, and both were the route being wrong rather than
+ * the value. A diagnostic tool that cannot reproduce the payload it is meant to diagnose is the
+ * worst version of this bug, because the caller reads the empty result as "the drift is gone".
+ *
+ * It now reads the same route, with the same parameters, as the projection it explains. That is the
+ * whole point of it: `raw: true` must differ from the projected call in exactly one way — that
+ * nothing is projected.
+ *
+ * It is still not a fallback for `getSeriesBars` and is still never called automatically; a silent
+ * second attempt would make "which endpoint answered" unknowable.
  */
 export async function getChartRaw(symbol: string, timeframe: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);
@@ -445,7 +467,7 @@ export async function getChartRaw(symbol: string, timeframe: string): Promise<un
   return cached(`chartRaw:${sym}:${tf}`, CACHE.brokerSummaryTtlMs, () => {
     const params: QueryParams = { timeframe: tf };
     if (NEEDS_PREVIOUS_HISTORICAL.includes(tf)) params.is_include_previous_historical = true;
-    return readData("charts", "chart", { segments: { symbol: sym }, params });
+    return readData("chartsDaily", "chart", { segments: { symbol: sym }, params });
   });
 }
 
@@ -745,19 +767,283 @@ export async function getTradeBook(opts: TradeBookOptions = {}): Promise<unknown
 /* ============================== movers & top stocks ============================== */
 
 /**
- * The order-trade service's own market movers.
- *
- * Not the same endpoint as `top_movers` in `src/core/emitten.ts`, which reads the hotlist, and the
- * two are not guaranteed to agree — a caller comparing them is comparing two services, not
- * validating one. No filter is sent beyond `limit`: this endpoint's category vocabulary has not been
- * observed, and a guessed one would narrow the answer silently.
+ * Keys of a `mover_list` row this projection reads. Anything outside this set lands in
+ * `unmappedKeys`, which is the diagnostic that survives a schema change: if Stockbit renames a
+ * field, the new name appears there and the fix is one line rather than another live probe.
  */
-export async function getMarketMovers(limit?: number): Promise<unknown> {
+const MOVER_ROW_KEYS = new Set([
+  "stock_detail",
+  "price",
+  "change",
+  "value",
+  "volume",
+  "frequency",
+  "net_foreign_buy",
+  "net_foreign_sell",
+  "net_buy",
+  "net_sell",
+  "iepiev_detail",
+  "big_money_net_value",
+  "buy_value_percentage",
+  "sell_value_percentage",
+  "big_money_buy_value_percentage",
+  "big_money_sell_value_percentage",
+  "bid_percent",
+  "catalog_detail",
+  "market_cap",
+]);
+
+/** One row of `data.mover_list`, projected. Absent means the wire did not carry it — never zero. */
+export interface MarketMoverRow {
+  symbol?: string;
+  name?: string;
+  price?: number;
+  change?: number;
+  changePercent?: number;
+  /** Traded value in RUPIAH. Not lots, not shares. */
+  value?: number;
+  /** Traded volume. Unit as the service reports it — see `readFrom.volume` for the wire key. */
+  volume?: number;
+  /** Number of transactions. */
+  frequency?: number;
+  netForeignBuy?: number;
+  netForeignSell?: number;
+  netBuy?: number;
+  netSell?: number;
+  bigMoneyNetValue?: number;
+  /**
+   * The pre-opening indicative equilibrium price and volume, when there is one.
+   *
+   * This is the UI's eighth movers tab, and it is a FIELD rather than a view — every attempt to
+   * request it as a `mover_type` was refused. It is only meaningful during pre-opening
+   * (08:45-09:00 WIB); outside that window the service returns zeros, which is why every member
+   * here is optional and a zero is passed through as the zero it is rather than dropped.
+   */
+  iepIev?: {
+    iep?: number;
+    iev?: number;
+    ieval?: number;
+    iepChange?: number;
+    iepChangePrev?: number;
+    iepPriceDiff?: number;
+    iepPrevPriceDiff?: number;
+  };
+  readFrom: Record<string, string>;
+  /** Keys on this row that this projection does not recognise. */
+  unmappedKeys: string[];
+  /** The row exactly as it arrived. Nothing dropped, nothing renamed on a guess. */
+  row: Record<string, unknown>;
+}
+
+export interface MarketMoversResult {
+  /**
+   * The view the server says it served, read from its ECHO — never from what was requested.
+   *
+   * The distinction is the whole reason this endpoint can be trusted: it echoes `mover_type` back,
+   * and it 400s on a member it does not know, so the echo is a statement about what was served.
+   */
+  view: string | null;
+  /** The friendly name that was requested, or null when none was sent. */
+  requested: string | null;
+  rows: MarketMoverRow[];
+  count: number;
+  /** Envelope key the rows were read from; null when the response carried no array. */
+  rowsFrom: string | null;
+  /** What `data` carried when it was an object. Only interesting when `rowsFrom` is null. */
+  dataKeys: string[];
+  /**
+   * Which session the foreign-flow figures on these rows are from, as the payload states it.
+   *
+   * `isShowNetForeign` is the service's own signal for whether those figures mean anything yet: it
+   * was observed FALSE intraday and TRUE after the ~18:00 WIB broker release on the same day, which
+   * is what settled that the foreign data is not stale, merely unpublished until then.
+   */
+  foreign: {
+    isShown: boolean | null;
+    updatedAt: string | null;
+    sessionDate: string | null;
+    isLastSession: boolean | null;
+    sessionLabel: string | null;
+  };
+  /** How `limit` was actually treated, because the answer is not the obvious one. See below. */
+  limitNote: string;
+}
+
+const num = (v: unknown): number | undefined => {
+  const n = readRaw(v);
+  return n === null ? undefined : n;
+};
+
+/** Read the `iepiev_detail` block, or nothing at all if it is absent. */
+function readIepIev(v: unknown): MarketMoverRow["iepIev"] {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  const out = {
+    iep: num(o.iep),
+    iev: num(o.iev),
+    ieval: num(o.ieval),
+    iepChange: num(o.iep_change),
+    iepChangePrev: num(o.iep_change_prev),
+    iepPriceDiff: num(o.iep_price_diff),
+    iepPrevPriceDiff: num(o.iep_prev_price_diff),
+  };
+  return Object.values(out).some((x) => x !== undefined) ? out : undefined;
+}
+
+function projectMoverRow(row: Record<string, unknown>): MarketMoverRow {
+  const detail = (row.stock_detail ?? {}) as Record<string, unknown>;
+  const change = (row.change ?? {}) as Record<string, unknown>;
+
+  const symbol = typeof detail.code === "string" && detail.code.length > 0 ? detail.code : undefined;
+  const name = typeof detail.name === "string" && detail.name.length > 0 ? detail.name : undefined;
+
+  const readFrom: Record<string, string> = {};
+  const note = (field: string, key: string, value: unknown): void => {
+    if (value !== undefined) readFrom[field] = key;
+  };
+
+  const price = num(row.price);
+  const changeValue = num(change.value);
+  const changePercent = num(change.percentage);
+  const value = num(row.value);
+  const volume = num(row.volume);
+  const frequency = num(row.frequency);
+  const netForeignBuy = num(row.net_foreign_buy);
+  const netForeignSell = num(row.net_foreign_sell);
+  const netBuy = num(row.net_buy);
+  const netSell = num(row.net_sell);
+  const bigMoneyNetValue = num(row.big_money_net_value);
+  const iepIev = readIepIev(row.iepiev_detail);
+
+  note("symbol", "stock_detail.code", symbol);
+  note("name", "stock_detail.name", name);
+  note("price", "price", price);
+  note("change", "change.value", changeValue);
+  note("changePercent", "change.percentage", changePercent);
+  note("value", "value", value);
+  note("volume", "volume", volume);
+  note("frequency", "frequency", frequency);
+  note("netForeignBuy", "net_foreign_buy", netForeignBuy);
+  note("netForeignSell", "net_foreign_sell", netForeignSell);
+  note("netBuy", "net_buy", netBuy);
+  note("netSell", "net_sell", netSell);
+  note("bigMoneyNetValue", "big_money_net_value", bigMoneyNetValue);
+  note("iepIev", "iepiev_detail", iepIev);
+
+  return {
+    symbol,
+    name,
+    price,
+    change: changeValue,
+    changePercent,
+    value,
+    volume,
+    frequency,
+    netForeignBuy,
+    netForeignSell,
+    netBuy,
+    netSell,
+    bigMoneyNetValue,
+    iepIev,
+    readFrom,
+    unmappedKeys: Object.keys(row).filter((k) => !MOVER_ROW_KEYS.has(k)),
+    row,
+  };
+}
+
+/** Read a `{raw, formatted, date, is_last_session}` session block without inventing any of it. */
+function readSessionInfo(v: unknown): { date: string | null; label: string | null; isLast: boolean | null } {
+  if (!v || typeof v !== "object") return { date: null, label: null, isLast: null };
+  const o = v as Record<string, unknown>;
+  return {
+    date: typeof o.date === "string" ? o.date : null,
+    label: typeof o.formatted === "string" ? o.formatted : null,
+    isLast: typeof o.is_last_session === "boolean" ? o.is_last_session : null,
+  };
+}
+
+export interface MarketMoversOptions {
+  /** A `MARKET_MOVER_WIRE` friendly name. Omitted takes whatever the server's default view is. */
+  view?: MarketMoverView;
+  limit?: number;
+}
+
+/**
+ * The order-trade service's own market movers — the endpoint behind Stockbit's Movers dialog.
+ *
+ * Not the same endpoint as `top_movers` in `src/core/emitten.ts`, which reads the hotlist. The two
+ * are not guaranteed to agree and a caller comparing them is comparing two services rather than
+ * validating one. That is not a hedge: measured on 2026-09-01 the hotlist served **nine** symbols
+ * while this endpoint served **fifty**, including structured warrants. They have different
+ * universes, so a symbol in one and not the other is expected.
+ *
+ * ## The view vocabulary is closed, and the echo is why it can be trusted
+ *
+ * Eight members are settled (see `MARKET_MOVER_WIRE`), each echoed back verbatim, against a control
+ * that 400s. The echo is read back onto `view`, so the caller is told what was SERVED rather than
+ * what was asked for — those differ on any endpoint that silently falls back, and this one is only
+ * known not to for the members listed.
+ *
+ * ## `limit`, and the pagination block that is furniture
+ *
+ * `limit` IS honoured: 5 gives 5. But 100 gives 50, so 50 is a ceiling the service applies on top.
+ * `page` and `per_page` are IGNORED — `page=1` returns the same rows as no page at all.
+ *
+ * And `data.pagination` is dead: it came back `{page: 0, limit: 0, has_next: false, has_prev: false}`
+ * on every single call regardless of what was sent, including calls that returned a truncated 5 of
+ * 50. It is therefore NOT projected. A `has_next: false` that is always false is not an answer about
+ * whether more rows exist, and passing it through would be inventing one.
+ */
+export async function getMarketMovers(opts: MarketMoversOptions = {}): Promise<MarketMoversResult> {
   const params: QueryParams = {};
-  if (limit !== undefined) params.limit = positiveInt("limit", limit);
-  return cached(keyFor("marketMover", params), CACHE.defaultTtlMs, () =>
-    readData("marketMover", "market mover", { params }),
-  );
+  if (opts.view !== undefined) {
+    const wire = MARKET_MOVER_WIRE[opts.view];
+    // Not a defensive nicety: an unlisted member is a 400 from this endpoint, and refusing locally
+    // says which members exist instead of spending a round trip to be told the request was invalid.
+    if (wire === undefined) {
+      throw new StockbitError(
+        "invalid_param",
+        `view must be one of ${MARKET_MOVER_VIEWS.join(", ")} — got ${String(opts.view)}. The UI's ` +
+          "IEP/IEV tab is deliberately absent: it is not a view this endpoint accepts, and its " +
+          "figures arrive on every row as iepIev instead.",
+      );
+    }
+    params.mover_type = wire;
+  }
+  if (opts.limit !== undefined) params.limit = positiveInt("limit", opts.limit);
+
+  return cached(keyFor("marketMover", params), CACHE.defaultTtlMs, async () => {
+    const data = (await readData("marketMover", "market mover", { params })) as
+      | Record<string, unknown>
+      | null;
+    const obj = data && typeof data === "object" ? data : {};
+    const list = obj.mover_list;
+    const rows = Array.isArray(list) ? (list as Record<string, unknown>[]) : [];
+    const session = readSessionInfo(obj.net_foreign_session_info);
+
+    return {
+      // The echo. Never `opts.view`.
+      view: typeof obj.mover_type === "string" ? obj.mover_type : null,
+      requested: opts.view ?? null,
+      rows: rows.map(projectMoverRow),
+      count: rows.length,
+      rowsFrom: Array.isArray(list) ? "mover_list" : null,
+      dataKeys: Object.keys(obj),
+      foreign: {
+        isShown: typeof obj.is_show_net_foreign === "boolean" ? obj.is_show_net_foreign : null,
+        updatedAt: typeof obj.net_foreign_updated_at === "string" ? obj.net_foreign_updated_at : null,
+        sessionDate: session.date,
+        isLastSession: session.isLast,
+        sessionLabel: session.label,
+      },
+      limitNote:
+        opts.limit === undefined
+          ? "No limit sent; the service returned its default page (50 rows when measured)."
+          : `limit=${opts.limit} was sent and this endpoint honours it, but it caps the result at 50 ` +
+            "rows however large the limit. page and per_page are ignored, and the payload's own " +
+            "pagination block reads all zeros on every call, so it is not reported.",
+    } satisfies MarketMoversResult;
+  });
 }
 
 /** The order-trade service's top-stock list. Same caveats as `getMarketMovers`. */
@@ -811,8 +1097,9 @@ export async function getMarketSession(): Promise<unknown> {
 
 /* ================================= batch prices ================================= */
 
-/** Our own ceiling on one batch, to keep a query string from growing without bound. */
-export const PRICES_BATCH_MAX = 50;
+// `PRICES_BATCH_MAX` used to live here — our own 50-symbol ceiling on a batch. It is gone because
+// the batch is gone: this route takes one `stock_code`, so a ceiling on a list it does not accept
+// would only describe a shape no caller can reach. See `getPricesBatch`.
 
 export interface PricesBatch {
   /** What was asked for, normalized and de-duplicated. */
@@ -824,8 +1111,39 @@ export interface PricesBatch {
   rows: Array<Record<string, unknown>>;
   /** Where the rows were located, or `null` when the response held no row array at all. */
   dataPath: string | null;
-  /** The `data` block verbatim when no rows could be located, so nothing is lost. */
+  /**
+   * The price series, when the payload carried bare NUMBERS rather than records.
+   *
+   * This is what the route actually returned when measured on 2026-09-01: `data.prices` held 20
+   * bare numbers for one symbol. `locateRows` looks for arrays of RECORDS and correctly declines to
+   * bind an array of numbers, so without this field the result was `rows: []` with `dataPath: null`
+   * — indistinguishable from "this symbol has no prices", which is a claim about the market made
+   * out of a projection mismatch.
+   *
+   * `null` means no numeric series was found, which is different from an empty one.
+   */
+  series: number[] | null;
+  /** Where the series was located, e.g. `data.prices`. Null when there was none. */
+  seriesPath: string | null;
+  /** The `data` block verbatim when neither rows nor a series could be located, so nothing is lost. */
   raw?: unknown;
+}
+
+/**
+ * Find an array of bare numbers in the payload, one level under `data`.
+ *
+ * Deliberately narrow: it looks for a numeric array, not for anything array-shaped, so it cannot
+ * quietly claim a row array as a series. Returns the key it bound to, because "which field was
+ * this" is the diagnostic that makes a schema change one line to fix.
+ */
+function locateSeries(data: unknown): { path: string; values: number[] } | null {
+  if (!data || typeof data !== "object") return null;
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (!Array.isArray(value) || value.length === 0) continue;
+    const nums = value.map((v) => readRaw(v));
+    if (nums.every((n): n is number => n !== null)) return { path: `data.${key}`, values: nums };
+  }
+  return null;
 }
 
 /**
@@ -846,36 +1164,70 @@ function symbolsIn(row: Record<string, unknown>, requested: readonly string[]): 
 }
 
 /**
- * Last price for several symbols in one request.
+ * Last price for ONE symbol. The "batch" in the name is a premise this route does not support.
  *
- * The multi-value encoding is the open question. `stock_code` is singular, so the symbols are sent
- * comma-joined; if the endpoint in fact wants a repeated key it will read only the first and answer
- * 200 with one row, exactly the silent narrowing that `brokerActivity` was bitten by.
+ * ## The encoding question is closed, and the answer is that there is no encoding
  *
- * That is why the result reports `found` and `missing` instead of just rows. A wrong encoding then
- * shows up as "asked for six, one found, five missing" — a loud, correct description of what
- * happened — rather than as a short list nobody questions. `missing` is not proof a symbol has no
- * price; it means no returned row mentioned it.
+ * The `found`/`missing` reporting below was built to diagnose a suspected encoding bug, and it did
+ * its job: it said "asked for three, found none" rather than returning an empty list that reads as
+ * "no prices". Measured 2026-09-01, every encoding was tried and the route is simply not a batch:
+ *
+ *   - `stock_code=BBRI` → 200, `data.prices` = an array of **20 bare numbers** — a price SERIES for
+ *     that one symbol, not one last price per symbol
+ *   - `stock_code=BBRI,BBCA,TLKM` → 200, `data.prices` = **empty**
+ *   - `stock_code=BBRI&stock_code=BBCA` (repeated key, the encoding the field report proposed) →
+ *     **400 `too many values for field "stock_code"`**. Explicitly refused, so it is not the answer
+ *   - `stock_code[]=…` → the same 400
+ *   - `symbols=…` → 400 `Silahkan Periksa permintaan`
+ *   - `stock_code=BBRI|BBCA|TLKM` → 200, empty
+ *
+ * A comma-joined list is read as one invalid code and answers empty; a repeated key is a hard 400.
+ * There is no third option left to try. `/company-price-feed/prices` takes one `stock_code`.
+ *
+ * So this refuses more than one symbol locally rather than sending a request that has been measured
+ * to come back empty. Returning an empty batch here would be the exact failure this repo's notes
+ * call worse than an error: it reads as "these symbols have no prices", which is a claim about the
+ * market rather than about the request.
  */
 export async function getPricesBatch(symbols: readonly string[]): Promise<PricesBatch> {
   if (!Array.isArray(symbols) || symbols.length === 0) {
     throw new StockbitError("invalid_param", "At least one symbol is required");
   }
   const requested = [...new Set(symbols.map((s) => normalizeSymbol(s)))];
-  if (requested.length > PRICES_BATCH_MAX) {
+  if (requested.length > 1) {
     throw new StockbitError(
       "invalid_param",
-      `Too many symbols (${requested.length}); this client sends at most ${PRICES_BATCH_MAX} per ` +
-        "request. Split the list and call again.",
+      `This route takes ONE symbol, and ${requested.length} were given. Measured 2026-09-01: ` +
+        "comma-joining them returns an empty list, and the repeated-key form answers 400 " +
+        '"too many values for field stock_code", so there is no encoding that batches. Call it ' +
+        "once per symbol, or use quote for a single last price. It returns a price SERIES for the " +
+        "one symbol, not a last price.",
     );
   }
 
-  const params: QueryParams = { stock_code: requested.join(",") };
+  const params: QueryParams = { stock_code: requested[0] };
   return cached(keyFor("pricesBatch", params), CACHE.quoteTtlMs, async () => {
     const data = await readData("pricesBatch", "batch prices", { params });
     const located = locateRows(data);
+    // Checked whether or not rows were found: the measured payload is a numeric series, and a
+    // result that reported only `rows: []` for it would read as "no prices" for a symbol whose
+    // prices were right there.
+    const series = locateSeries(data);
+
     if (!located) {
-      return { requested, found: [], missing: [...requested], rows: [], dataPath: null, raw: data };
+      return {
+        requested,
+        // A numeric series carries no ticker to match, so `found` cannot be filled from it. The
+        // symbol is nonetheless answered-for: exactly one was requested and the route echoed a
+        // series for it, which is why `missing` is empty when a series came back.
+        found: series ? [...requested] : [],
+        missing: series ? [] : [...requested],
+        rows: [],
+        dataPath: null,
+        series: series?.values ?? null,
+        seriesPath: series?.path ?? null,
+        raw: data,
+      };
     }
     const found = [...new Set(located.rows.flatMap((row) => symbolsIn(row, requested)))];
     return {
@@ -884,6 +1236,8 @@ export async function getPricesBatch(symbols: readonly string[]): Promise<Prices
       missing: requested.filter((s) => !found.includes(s)),
       rows: located.rows,
       dataPath: located.path,
+      series: series?.values ?? null,
+      seriesPath: series?.path ?? null,
     };
   });
 }
@@ -904,33 +1258,33 @@ export interface MarketPricesOptions {
 /**
  * One symbol's prices broken down by market board, for a session.
  *
- * Board values are sent **unprefixed**. This repo already carries two prefixed board vocabularies
- * that disagree with each other — `MARKET_BOARD_` on broker summary, `MARKET_TYPE_` on broker
- * distribution, and sending one endpoint's spelling to the other 400s — so inventing a third prefix
- * here would be guessing twice over. The caller's value goes out as written, uppercased.
+ * ## This endpoint cannot be called. It is not a vocabulary problem.
+ *
+ * Measured 2026-09-01: `/company-price-feed/prices/BBRI/market` answers **400
+ * `Silahkan Periksa permintaan` with no query parameters at all** — a bare call, nothing to be
+ * wrong about. It also refuses every board spelling tried (`REGULER`, `RG`, `regular`, `REGULAR`,
+ * `TN`, `NG`, `CASH`, `ALL`, `MARKET_TYPE_REGULAR`, `MARKET_TYPE_ALL`, `BOARD_REGULAR`, `1`, `0`)
+ * under every key tried (`market`, `board`, `market_type`, `type`).
+ *
+ * A bare call being refused is what settles it: if no arguments is also an error, then no argument
+ * combination can be the fix. Earlier passes read the 400s as "the board vocabulary is unknown" and
+ * kept probing spellings; the missing control was the empty request.
+ *
+ * **The workaround exists and returns the same information.** `orderbook`'s `market_data[]` already
+ * carries the per-board split (All Market / Regular / Nego / Cash) for a symbol.
+ *
+ * This therefore refuses locally and names the alternative, rather than offering arguments for a
+ * call that cannot succeed. A tool that cannot be called should say so — spending a round trip to
+ * be told the request is invalid teaches the caller nothing this comment does not.
  */
 export async function getMarketPrices(opts: MarketPricesOptions): Promise<unknown> {
-  const sym = normalizeSymbol(opts.symbol);
-  const params: QueryParams = {};
-  const date = opts.date === undefined ? undefined : normalizeTradeDate(opts.date, "date");
-  if (date !== undefined) params.date = date;
-  if (opts.boards !== undefined && opts.boards.length > 0) {
-    params.boards = opts.boards.map((b) => {
-      const board = String(b).trim().toUpperCase();
-      if (!BOARD_RE.test(board)) {
-        throw new StockbitError(
-          "invalid_param",
-          `Invalid market board ${JSON.stringify(b)}: expected an uppercase name such as REGULER, ` +
-            "NEGO or TUNAI",
-        );
-      }
-      return board;
-    });
-  }
-  // A session that closed before today can no longer change; only a request touching today needs a
-  // short lifetime. Same split `src/core/brokerdistribution.ts` makes for a settled date range.
-  const ttl = date !== undefined && date < todayIso() ? CACHE.keystatsTtlMs : CACHE.quoteTtlMs;
-  return cached(`${keyFor("pricesMarket", params)}:${sym}`, ttl, () =>
-    readData("pricesMarket", "market prices", { segments: { symbol: sym }, params }),
+  throw new StockbitError(
+    "upstream",
+    "price_market cannot be called: /company-price-feed/prices/:symbol/market answers 400 " +
+      '"Silahkan Periksa permintaan" with NO parameters at all, and with every board spelling and ' +
+      "parameter name tried (measured 2026-09-01). Since a bare request is also refused, no " +
+      "argument combination fixes it. Use orderbook instead — its market_data[] already returns " +
+      "the per-board split (All Market / Regular / Nego / Cash) for a symbol.",
   );
 }
+

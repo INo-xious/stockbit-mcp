@@ -88,6 +88,46 @@ export const MOVER_WIRE = {
 export type MoverTypeName = keyof typeof MOVER_WIRE;
 
 /**
+ * The `market-mover` service's OWN view vocabulary. A different endpoint from `MOVER_WIRE` above,
+ * and a different spelling system — protobuf enum members rather than lowercase path segments.
+ *
+ * **Every member here was echoed back by the server on 2026-09-01.** That is the whole standard for
+ * this table, and it is a stronger one than it looks, because of the control:
+ * `MOVER_TYPE_DEFINITELY_NOT_REAL` answers **400 `Your request is invalid`**. So this endpoint
+ * REJECTS unknown members rather than silently serving its default — which is the failure mode that
+ * hid the `topGainer`/`topgainer` bug in `MOVER_WIRE` for months, and it is absent here. An echo
+ * that matches what was sent is therefore evidence of acceptance, not merely of a 200.
+ *
+ * Fifteen further spellings were refused and are deliberately NOT listed as members. The ones worth
+ * knowing about, so nobody re-guesses them: `MOVER_TYPE_TOP_GAINERS` and `_TOP_LOSERS` (plural),
+ * `MOVER_TYPE_TOP_FREQ`, `MOVER_TYPE_FOREIGN_BUY` and `_FOREIGN_SELL` (without `NET_`).
+ *
+ * **The UI's IEP/IEV tab is not here, and must not be added.** Ten spellings of it were refused
+ * (`MOVER_TYPE_IEP_IEV`, `_IEPIEV`, `_IEV`, `_IEP`, `_IEP_IEV_DETAIL`, `_INDICATIVE`,
+ * `_INDICATIVE_EQUILIBRIUM`, `_PRE_OPENING`, `_PREOPENING`, `_IEP_CHANGE`, `_TOP_IEP`). It is not a
+ * view at all: `iepiev_detail` rides on every row of every view, so that tab is served by reading a
+ * field. See `getMarketMovers`.
+ *
+ * Keeping the friendly name in the tool schema and the wire member here is the same bargain
+ * `MOVER_WIRE` makes, for the same reason: exactly one place for the two to disagree.
+ */
+export const MARKET_MOVER_WIRE = {
+  topGainer: "MOVER_TYPE_TOP_GAINER",
+  topLoser: "MOVER_TYPE_TOP_LOSER",
+  topValue: "MOVER_TYPE_TOP_VALUE",
+  topVolume: "MOVER_TYPE_TOP_VOLUME",
+  topFrequency: "MOVER_TYPE_TOP_FREQUENCY",
+  netForeignBuy: "MOVER_TYPE_NET_FOREIGN_BUY",
+  netForeignSell: "MOVER_TYPE_NET_FOREIGN_SELL",
+  bigMoneyNetValue: "MOVER_TYPE_BIG_MONEY_NET_VALUE",
+} as const;
+
+export type MarketMoverView = keyof typeof MARKET_MOVER_WIRE;
+
+/** The friendly names, for a tool schema's enum. Ordered as the UI's own dialog orders its tabs. */
+export const MARKET_MOVER_VIEWS = Object.keys(MARKET_MOVER_WIRE) as MarketMoverView[];
+
+/**
  * The corporate-action kinds that appear as a path segment.
  *
  * A closed table for the same reason `MOVER_WIRE` is one: these go into the URL, and Stockbit

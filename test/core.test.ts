@@ -370,6 +370,37 @@ test("a payload of the wrong shape yields nulls rather than throwing", () => {
   }
 });
 
+test("the foreign figures say they cannot be dated, rather than implying they are today's", () => {
+  // R1. The orderbook payload carries fbuy/fsell/fnet and NO date, and foreign flow publishes at
+  // roughly 18:00 WIB — so before that release these are the previous session's and nothing on the
+  // response says so. The sharpest form: technicals has reported netForeignIdr 0 for today while
+  // orderbook reported -12.2B, and neither payload let a caller adjudicate.
+  const bands = extractBands("BBRI", { fbuy: 1000, fsell: 400, fnet: 600 });
+
+  assert.equal(bands.foreignNet, 600);
+  // Explicitly null, and null on EVERY payload — the date is genuinely not there, so any value
+  // here would be invented.
+  assert.equal(bands.dataAsOf, null);
+  assert.match(bands.noteAsOf, /18:00 WIB/, "the note must say when the figures publish");
+  assert.match(bands.noteAsOf, /market_movers/, "and where the date actually lives");
+});
+
+test("dataAsOf is null even when the payload is complete, because no date is ever on it", () => {
+  // Guards the tempting wrong fix: filling dataAsOf in from a second endpoint. That would attribute
+  // market_movers' date to orderbook's numbers, which is inventing a date with extra steps.
+  const complete = extractBands("BBRI", {
+    ara: 5200,
+    arb: 4400,
+    next_ara: 5320,
+    next_arb: 4510,
+    fbuy: 1,
+    fsell: 2,
+    fnet: 3,
+  });
+  assert.deepEqual(complete.missing, [], "every field present");
+  assert.equal(complete.dataAsOf, null, "and still no date, because the payload has none");
+});
+
 /* ------------------------------ the one wire reader ------------------------------ */
 
 test("wireNumber reads a value, or says it could not — it never invents a zero", () => {

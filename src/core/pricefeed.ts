@@ -199,10 +199,35 @@ export interface PriceBands {
   /** The band for the NEXT session, where Stockbit publishes it. */
   nextAra: number | null;
   nextArb: number | null;
-  /** Foreign buy / sell / net for the session, in the units the payload uses. */
+  /**
+   * Foreign buy / sell / net for the session, in RUPIAH — the units the payload uses.
+   *
+   * **Which session these are from is NOT on this payload.** See `dataAsOf`, and read it before
+   * treating these as today's.
+   */
   foreignBuy: number | null;
   foreignSell: number | null;
   foreignNet: number | null;
+  /**
+   * Which trading session the foreign figures above belong to — and it is deliberately `null`.
+   *
+   * This payload does not carry a date. That is the finding, not an omission here: the orderbook
+   * response has no field naming the session its `fbuy`/`fsell`/`fnet` came from, so anything put
+   * here would be invented.
+   *
+   * It matters because foreign flow across this API publishes at roughly **18:00 WIB**. Before that
+   * release these figures are the PREVIOUS session's, and nothing on this payload says so. The
+   * sharpest form of the problem: `technicals` has been seen reporting `netForeignIdr: 0` for today
+   * while `orderbook` reported −12.2B, and neither payload lets a caller adjudicate.
+   *
+   * **The date is not fetched from elsewhere on purpose.** `market_movers` does carry it
+   * (`foreign.sessionDate`, `foreign.isShown`), but reaching for a second endpoint to fill this in
+   * would couple two routes and attribute one's date to the other's numbers — which is inventing a
+   * date with extra steps. `noteAsOf` says where to look instead.
+   */
+  dataAsOf: string | null;
+  /** Why `dataAsOf` is null, and where the answer actually lives. */
+  noteAsOf: string;
   /** Field names that were present in the response. */
   found: string[];
   /** Field names that were looked for and were not there. */
@@ -243,6 +268,17 @@ export function extractBands(symbol: string, payload: unknown): PriceBands {
     foreignBuy: out.foreignBuy,
     foreignSell: out.foreignSell,
     foreignNet: out.foreignNet,
+    // Always null, and always for the same reason: this payload carries no date. Stated as a field
+    // rather than left to the caller to notice, because the figures above are unusable without it
+    // and their absence of provenance is invisible otherwise.
+    dataAsOf: null,
+    noteAsOf:
+      "This payload carries no session date, so the foreign figures above cannot be attributed to " +
+      "a day from this response alone. Foreign flow publishes at roughly 18:00 WIB: before that " +
+      "release these are the PREVIOUS session's. market_movers carries the date explicitly as " +
+      "foreign.sessionDate, with foreign.isShown flagging whether the current session's figures " +
+      "have published yet. It is not read from there automatically — attributing one endpoint's " +
+      "date to another's numbers would be inventing it.",
     found,
     missing,
   };
