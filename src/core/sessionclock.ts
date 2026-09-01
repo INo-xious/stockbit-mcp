@@ -99,6 +99,21 @@ function shiftToWib(now: Date): Date {
   return new Date(now.getTime() + WIB_OFFSET_MINUTES * 60_000);
 }
 
+/**
+ * Today's calendar date in Jakarta, as `YYYY-MM-DD`.
+ *
+ * `todayIso` in `dates.ts` answers the same question in UTC, and for seven hours of every day the
+ * two disagree: at 02:00 WIB it is still yesterday in UTC. A market window that ends "today" has to
+ * mean the trading day the user is living in, so anything building one from a relative period reads
+ * this rather than the UTC date.
+ *
+ * Lives here because this module already owns `WIB_OFFSET_MINUTES`, and a second copy of the offset
+ * is exactly the kind of duplication that drifts.
+ */
+export function wibTodayIso(now: Date = new Date()): string {
+  return shiftToWib(now).toISOString().slice(0, 10);
+}
+
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }

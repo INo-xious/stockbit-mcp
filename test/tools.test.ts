@@ -374,6 +374,12 @@ const OBSERVED = [
   "stream_trending",
   "brokers",
   "broker_top",
+  // Moved up from PROJECTED on 2026-09-01: called live against YP and every field this tool now
+  // names — symbol, side, date, value, lot, avgPrice, freq, investorType — was read out of a real
+  // row. The same call is what exposed the defect, so the shape is not in doubt: the two sides are
+  // nested in an OBJECT, which is why the old reader found no array and reported none of the 1704
+  // rows. The window is settled too — `from`/`to` bind and are echoed back.
+  "broker_activity",
   "chart_series",
   "stream_user",
   "status",
@@ -488,7 +494,6 @@ const PROJECTED = [
   "order_queue",
   "market_session",
   "price_market",
-  "broker_activity",
   // Its no-argument form WAS measured live on 2026-09-01 and its bucket reader was fixed from that
   // capture — but `date` and `from`/`to` were not, and the code keeps a flat-shape branch for them.
   // Same grading `shareholding` got for the same reason: one settled mode is not a settled tool.

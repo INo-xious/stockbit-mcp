@@ -76,13 +76,20 @@ export function registerBrokerTools(define: Definer): void {
       "of a stock from broker_summary, then ask here what else that broker was distributing.\n" +
       "`broker_code` is the two-letter code (YP, CC, XL); use the `brokers` tool to find one by " +
       "name. An unknown or malformed code is rejected before any request goes out.\n" +
-      "NO WINDOW TO CHOOSE. This endpoint has no period filter: measured on 2026-09-01, every " +
-      "value of `period` answers 400 — including LAST_1_DAY, which its sibling broker_distribution " +
-      "accepts on the same vocabulary — while sending none returns rows. Passing `period` here is " +
-      "REFUSED with that explanation rather than dropped on the way out, because a filter you " +
-      "asked for and silently did not get is worse than one that errors. The window is the " +
-      "server's and it announces it: read `from` and `to` on the result, which is where these rows " +
-      "are dated. Use broker_distribution when you need to choose the window yourself.\n" +
+      "CHOOSING THE WINDOW. Pass `period` for a preset, or `from`+`to` (YYYY-MM-DD) for an exact " +
+      "range; both ends are required together. Omit both and you get the server's default, which " +
+      "measured 2026-09-01 was that single day. Rows are per stock PER DAY, so a multi-day window " +
+      "returns several rows for the same ticker — one per session it traded.\n" +
+      "The `period` NAME never goes on the wire. This endpoint answers 400 to `period` on every " +
+      "spelling and every value (measured 2026-09-01), but it accepts `from`/`to`, so a preset is " +
+      "resolved into a date pair here and the dates are sent. That resolution is this server's own " +
+      "calendar arithmetic, checked against Stockbit's: asked for LAST_7_DAYS and LAST_3_MONTHS, " +
+      "broker_summary resolved them to the same dates this does. YEAR_TO_DATE it starts on " +
+      "January 1st where Stockbit starts on the first trading day — a difference that cannot move " +
+      "a figure, because a window padded with days the exchange was shut contains no extra trades " +
+      "(measured: a Saturday start and the following Monday returned identical rows).\n" +
+      "You never have to trust that arithmetic. `request` echoes the dates actually sent and " +
+      "`from`/`to` on the result are the window the SERVER says it served.\n" +
       "FILTERS: `market_types` and `investor_types` each take a LIST, and each value is sent as its " +
       "own repeated parameter. Passing several boards means the union of those boards. Omit a " +
       "filter and it is not sent at all, in which case the server picks the default and this tool " +
@@ -91,28 +98,36 @@ export function registerBrokerTools(define: Definer): void {
       "larger.\n" +
       "`request` in the result echoes exactly what was sent, so the filters behind the rows are " +
       "always visible.\n" +
-      "The route HAS answered live and its envelope is known, but the names inside its ROWS have " +
-      "not been recorded. So only the traded `symbol` is projected, with `readFrom.symbol` naming " +
-      "the key it came from; the value, volume and frequency figures are left inside the raw `row` " +
-      "under their own names rather than renamed on a guess, because a net figure read out of the " +
-      "wrong key would point confidently the wrong way. Read them from `row`.\n" +
-      "`rowsFrom: null` with `count: 0` means the response carried no array — an empty result or an " +
-      "unrecognised shape, distinguished by `dataKeys` — and NOT a broker who traded nothing.",
+      "BUY AND SELL ARE SEPARATE ROWS, and `side` is the only thing that tells them apart. The " +
+      "response splits the two halves into `brokers_buy` and `brokers_sell` and sends BOTH as " +
+      "positive numbers, so a sell row read without its side looks exactly like a buy. Never infer " +
+      "the direction from a sign, and never sum `value` across sides without grouping by `side` " +
+      "first — that total is turnover, not net flow.\n" +
+      "Each row carries `symbol`, `side`, `date`, `value` (rupiah), `lot`, `avgPrice`, `freq` and " +
+      "`investorType`, every one with `readFrom` naming the wire key it came from, and the whole " +
+      "untouched row beside them. Absent means the wire did not carry it — never zero.\n" +
+      "`rowsFrom` names the containers the rows came out of. `count: 0` with a populated " +
+      "`rowsFrom` is a broker who traded nothing in that window; `rowsFrom: null` means the " +
+      "payload was NOT PARSED — a shape this tool does not recognise, with `dataKeys` naming what " +
+      "was actually there. Reporting the second as the first is the defect this tool was fixed " +
+      "for: it read `count: 0` for a broker with 868 buy rows and 836 sell rows, because it " +
+      "searched for an array and this route nests the two sides inside an object.",
     {
       broker_code: z.string().describe("Broker code, 2-4 uppercase letters or digits, e.g. YP"),
-      // Still ACCEPTED by the schema, and then refused — deliberately. Dropping the key from the
-      // shape would make the SDK strip it, and the caller would read rows for a window they asked
-      // to change and never learn the ask went nowhere. A plain string rather than the enum so
-      // every spelling of the mistake reaches the refusal that explains it, instead of half of
-      // them bouncing off a zod enum error that explains nothing.
       period: z
-        .string()
+        .enum(brokers.ACTIVITY_PERIODS)
         .optional()
         .describe(
-          "NOT ACCEPTED — this endpoint answers 400 to every value of it, so passing it is " +
-            "refused here with an explanation. The window is fixed by the server and reported " +
-            "back in `from`/`to`. Use broker_distribution to choose a window.",
+          "Preset window, resolved here into `from`/`to` and sent as dates — the name itself is " +
+            "refused by this endpoint. Ignored when `from`/`to` are given. Omitted means the " +
+            "server's own default window.",
         ),
+      from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`."),
+      to: z.string().optional().describe("Range end, YYYY-MM-DD (inclusive). Requires `from`."),
+      date_from: z.string().optional().describe("Alias for `from`."),
+      date_to: z.string().optional().describe("Alias for `to`."),
+      start_date: z.string().optional().describe("Alias for `from`."),
+      end_date: z.string().optional().describe("Alias for `to`."),
       market_types: z
         .array(z.enum(brokers.BROKER_MARKET_TYPES))
         .optional()
@@ -137,6 +152,12 @@ export function registerBrokerTools(define: Definer): void {
         brokers.getBrokerActivity({
           brokerCode: a.broker_code,
           period: a.period,
+          from: a.from,
+          to: a.to,
+          date_from: a.date_from,
+          date_to: a.date_to,
+          start_date: a.start_date,
+          end_date: a.end_date,
           marketTypes: a.market_types as readonly unknown[] | undefined,
           investorTypes: a.investor_types as readonly unknown[] | undefined,
           sortBy: a.sort_by,
@@ -144,6 +165,11 @@ export function registerBrokerTools(define: Definer): void {
           limit: a.limit,
         }),
       ),
+    // Settled by live calls on 2026-09-01 against YP: rows came back and every field named above
+    // was read out of one of them, which is the bar. The same session settled the window —
+    // `from`/`to` bind and are echoed — and exposed the two-sided container. Opts out of the
+    // family default, which is `projected`.
+    { evidence: "observed" },
   );
 
   define.read(

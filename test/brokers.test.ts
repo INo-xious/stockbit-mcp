@@ -13,6 +13,7 @@ import { clearCache } from "../src/core/_util.ts";
 import {
   BROKER_PERIODS,
   buildActivityParams,
+  resolveActivityPeriod,
   getBandarDetector,
   getBrokerActivity,
   getBrokerDirectory,
@@ -57,13 +58,50 @@ const DIRECTORY_BODY = {
  * projection expects, a second plausible one, and a row it cannot read at all. The container is
  * measured; what sits in it is not, and the fixture says which is which.
  */
+/**
+ * The shape `brokerActivity` was measured returning on 2026-09-01, and the correction matters.
+ *
+ * This fixture used to make `broker_activity_transaction` an ARRAY. It is not one. The live route
+ * answers with an OBJECT holding `brokers_buy` and `brokers_sell`, each an array — 868 and 836 rows
+ * for YP on a single session. Because the fixture agreed with what the reader expected rather than
+ * with the wire, every test over it passed while the real tool reported `count: 0, rowsFrom: null`
+ * for a broker that had traded 1704 stock-sides.
+ *
+ * Both figures are POSITIVE on both sides: a sell row is not a negative buy row, and nothing inside
+ * a row says which half it came from. That is why `side` is projected from the container.
+ *
+ * The figures arrive as JSON NUMBERS here, not the numeric strings `brokerTop` sends — which is why
+ * the activity projection has its own number reader.
+ */
 const ACTIVITY_BODY = {
   data: {
-    broker_activity_transaction: [
-      { symbol: "BBRI", net_value: "445525972000", total_volume: "1200" },
-      { stock_code: "TLKM", net_value: "-2000000" },
-      { unexpected: 1 },
-    ],
+    broker_activity_transaction: {
+      brokers_buy: [
+        {
+          stock_code: "BBRI",
+          broker_code: "YP",
+          type: "BROKER_TYPE_LOCAL",
+          date: "2026-09-01",
+          value: 445525972000,
+          lot: 1200,
+          avg_price: 3712.5,
+          freq: 48,
+        },
+        { unexpected: 1 },
+      ],
+      brokers_sell: [
+        {
+          stock_code: "TLKM",
+          broker_code: "YP",
+          type: "BROKER_TYPE_FOREIGN",
+          date: "2026-09-01",
+          value: 2000000,
+          lot: 30,
+          avg_price: 2666.67,
+          freq: 5,
+        },
+      ],
+    },
     from: "2026-09-01",
     to: "2026-09-01",
     broker_code: "YP",
@@ -573,28 +611,69 @@ test("activity: market_type and investor_type REPEAT on the wire, never comma-jo
   assert.equal(url.searchParams.has("period"), false, "this endpoint 400s on every value of it");
 });
 
-test("activity: `period` is REFUSED with an explanation, not dropped on the way to the wire", async () => {
-  // Measured 2026-09-01: every one of the ten BROKER_PERIODS members answers 400 here, as do eight
-  // other spellings, while sending none answers 200 with rows. The control that makes that a fact
-  // about `period` and not about the call: unknown keys (`tb_period`, `periode`) answer 200 and are
-  // ignored, so a 400 is a RECOGNISED field refusing a value. There is no spelling left to find.
+test("activity: `period` becomes from/to, and the NAME never reaches the wire", () => {
+  // Measured 2026-09-01, and this is the whole finding. The `period` KEY answers 400 here on every
+  // one of the ten BROKER_PERIODS members and on eight other spellings, while unknown keys
+  // (`tb_period`, `periode`) answer 200 and are ignored — so a 400 is a RECOGNISED field refusing a
+  // value and no spelling of the name will ever work.
   //
-  // Refused rather than silently dropped, because a filter the caller asked for and did not get is
-  // worse than one that errors: they would read rows for a window they never chose.
-  await assert.rejects(
-    () => getBrokerActivity({ brokerCode: "YP", period: "LAST_1_DAY" }),
-    (e: unknown) => {
-      assert.ok(e instanceof StockbitError);
-      assert.equal(e.kind, "invalid_param");
-      assert.match(e.message, /no period filter/i);
-      // The message has to say where the window IS, or refusing it just loses the caller a window.
-      assert.match(e.message, /from.*to|`from`\/`to`/);
-      return true;
-    },
-  );
-  // The member its sibling accepts is refused here too — that pairing is the finding, so assert it.
-  await assert.rejects(() => getBrokerActivity({ brokerCode: "YP", period: "YEAR_TO_DATE" }), StockbitError);
-  assert.equal(requests.activity, 0, "a refused parameter must cost no request");
+  // But the DATES do. `from=2026-08-17&to=2026-08-21` echoed those exact dates back in
+  // `data.from`/`data.to` and returned 1034 buy rows against the default 868. So a preset is
+  // resolved to a date pair here and sent as dates.
+  const params = buildActivityParams({ brokerCode: "YP", period: "LAST_7_DAYS" });
+  assert.equal("period" in params, false, "the name 400s on this route and must never be sent");
+  assert.match(String(params.from), /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(String(params.to), /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(String(params.from) < String(params.to), "a seven-day window must span days");
+});
+
+test("activity: the preset arithmetic is the one Stockbit itself used", () => {
+  // Not invented. broker_summary resolves these names server-side and echoes the dates: asked on
+  // 2026-09-01 it answered LAST_7_DAYS -> 2026-08-26..2026-09-01 and LAST_3_MONTHS ->
+  // 2026-06-01..2026-09-01. Pinned against a FIXED today so the assertion cannot drift.
+  assert.deepEqual(resolveActivityPeriod("LAST_7_DAYS", "2026-09-01"), {
+    from: "2026-08-26",
+    to: "2026-09-01",
+  });
+  assert.deepEqual(resolveActivityPeriod("LAST_3_MONTHS", "2026-09-01"), {
+    from: "2026-06-01",
+    to: "2026-09-01",
+  });
+  // The one place this DIFFERS from Stockbit, recorded rather than hidden: it answered 2026-01-02,
+  // the first trading day of the year. This starts on January 1st, because finding the first
+  // trading day needs a holiday table this project refuses to hard-code. The extra day is one the
+  // exchange was shut, and a window padded with those contains no extra trades — measured, by
+  // comparing a Saturday start against the following Monday and getting identical rows.
+  assert.deepEqual(resolveActivityPeriod("YEAR_TO_DATE", "2026-09-01"), {
+    from: "2026-01-01",
+    to: "2026-09-01",
+  });
+  // Month arithmetic must not roll a short month forward: 31 March minus one month is 28 February
+  // in a common year, never 3 March.
+  assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-03-31").from, "2026-02-01");
+  assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-03-31").to, "2026-02-28");
+});
+
+test("activity: an explicit range wins over a preset, and half a range is refused", () => {
+  const both = buildActivityParams({
+    brokerCode: "YP",
+    period: "LAST_1_YEAR",
+    from: "2026-08-17",
+    to: "2026-08-21",
+  });
+  assert.equal(both.from, "2026-08-17", "an explicit range must win over a preset");
+  assert.equal(both.to, "2026-08-21");
+
+  // This endpoint tolerates a lone `from` (it answers from..today and says so), but one date-range
+  // contract across the broker family is worth more than one route's leniency.
+  assert.throws(() => buildActivityParams({ brokerCode: "YP", from: "2026-08-17" }), StockbitError);
+
+  // `date_from`/`date_to` are among the keys this service silently IGNORES, so they are normalised
+  // to from/to here rather than sent — sending them would return today under a caller's belief
+  // that they had asked for a window.
+  const aliased = buildActivityParams({ brokerCode: "YP", date_from: "2026-08-17", date_to: "2026-08-21" });
+  assert.equal(aliased.from, "2026-08-17");
+  assert.equal("date_from" in aliased, false, "the alias is ignored by the service and must not be sent");
 });
 
 test("activity: BROKER_PERIODS is untouched — broker_distribution still uses it", async () => {
@@ -618,11 +697,12 @@ test("activity: omitted filters are absent parameters, not empty ones", async ()
 test("activity: binds to the measured row container and carries the window beside it", async () => {
   const activity = await getBrokerActivity({ brokerCode: "YP" });
 
-  // `broker_activity_transaction` is the container the live call answered with. It used to be
-  // absent from ROW_CONTAINERS, so this tool returned `rowsFrom: null, count: 0` while `dataKeys`
-  // showed the array sitting right there.
-  assert.equal(activity.rowsFrom, "broker_activity_transaction");
-  assert.equal(activity.count, 3);
+  // The defect this route was fixed for. `broker_activity_transaction` is an OBJECT holding the two
+  // sides, so a reader that searches for an ARRAY finds nothing and reports `count: 0` — which it
+  // did, live, for a broker with 868 buy rows and 836 sell rows. Naming the container in
+  // ROW_CONTAINERS could never have helped: that lookup tests `Array.isArray`.
+  assert.equal(activity.rowsFrom, "data.broker_activity_transaction.{brokers_buy,brokers_sell}");
+  assert.equal(activity.count, 3, "both sides, not just the first one found");
   assert.deepEqual(activity.dataKeys, [
     "broker_activity_transaction",
     "from",
@@ -652,21 +732,64 @@ test("activity: a window the response did not carry is absent, never today's dat
   assert.equal("to" in blank, false);
 });
 
-test("activity: projects the traded symbol and leaves the figures in the raw row", async () => {
+test("activity: projects the measured figures, and tags each row with the side it came from", async () => {
   const activity = await getBrokerActivity({ brokerCode: "YP" });
 
   assert.equal(activity.brokerCode, "YP");
   assert.deepEqual(activity.request, { broker_code: "YP" });
   assert.equal(activity.count, 3);
 
-  assert.equal(activity.rows[0].symbol, "BBRI");
-  assert.deepEqual(activity.rows[0].readFrom, { symbol: "symbol" });
-  // Deliberately NOT renamed: the value field's wire name is unverified, so it stays in `row`.
-  assert.equal(activity.rows[0].row.net_value, "445525972000");
-  assert.equal(activity.rows[1].symbol, "TLKM");
-  assert.deepEqual(activity.rows[1].readFrom, { symbol: "stock_code" });
-  assert.equal(activity.rows[2].symbol, undefined);
+  const buy = activity.rows[0];
+  assert.equal(buy.symbol, "BBRI");
+  assert.equal(buy.side, "buy");
+  assert.equal(buy.value, 445525972000);
+  assert.equal(buy.lot, 1200);
+  assert.equal(buy.avgPrice, 3712.5);
+  assert.equal(buy.freq, 48);
+  assert.equal(buy.date, "2026-09-01");
+  assert.equal(buy.investorType, "BROKER_TYPE_LOCAL");
+  // Every projected figure names the key it came out of, so a wrong binding is visible.
+  assert.deepEqual(buy.readFrom, {
+    symbol: "stock_code",
+    date: "date",
+    value: "value",
+    lot: "lot",
+    avgPrice: "avg_price",
+    freq: "freq",
+    investorType: "type",
+  });
+
+  // The sell side is a SEPARATE row and its figures are POSITIVE. Nothing but `side` distinguishes
+  // it, which is why the side is required rather than optional.
+  const sell = activity.rows.find((r) => r.side === "sell");
+  assert.ok(sell, "the sell half must be read, not dropped");
+  assert.equal(sell.symbol, "TLKM");
+  assert.equal(sell.value, 2000000, "sell values arrive positive; the side is what carries direction");
+
+  // A row nothing could be read from still comes back, counted as unmapped.
+  assert.equal(activity.rows[1].symbol, undefined);
   assert.deepEqual(activity.unmapped, { count: 1, sampleKeys: ["unexpected"] });
+});
+
+test("activity: an unrecognised payload still reads honestly rather than throwing", async () => {
+  // The two-sided reader runs ahead of the generic one and returns null when the shape is not its
+  // own, so a service that goes back to a flat array is still read — by `readRows`, as before.
+  activityBody = { data: { broker_activity_transaction: [{ symbol: "BBRI" }] } };
+  const flat = await getBrokerActivity({ brokerCode: "YP" });
+  assert.equal(flat.count, 1);
+  assert.equal(flat.rowsFrom, "broker_activity_transaction");
+  assert.equal(flat.rows[0].symbol, "BBRI");
+
+  // One side present and the other missing is named for what it is, so "only bought" is
+  // distinguishable from "the sell half was not in the payload".
+  clearCache();
+  activityBody = {
+    data: { broker_activity_transaction: { brokers_buy: [{ stock_code: "BBCA", value: 1 }] } },
+  };
+  const buyOnly = await getBrokerActivity({ brokerCode: "CC" });
+  assert.equal(buyOnly.count, 1);
+  assert.equal(buyOnly.rowsFrom, "data.broker_activity_transaction.{brokers_buy}");
+  assert.equal(buyOnly.rows[0].side, "buy");
 });
 
 test("activity: a null data block is an empty result, and says it found no array", async () => {
@@ -1118,41 +1241,35 @@ test("tools: four reads, no writes, and the arguments the model sends reach the 
   assert.equal(url.searchParams.has("period"), false);
 });
 
-test("tools: broker_activity still ACCEPTS `period` in its schema, so it can refuse it out loud", async () => {
+test("tools: broker_activity turns a window into dates, and never sends `period`", async () => {
   const { definer, reads, shapes } = fakeDefiner();
   registerBrokerTools(definer);
 
-  // The half this test used to leave unproven. Driving the handler shows the core refuses `period`;
-  // it says nothing about whether the SCHEMA declares it, and the SDK strips undeclared keys before
-  // a handler runs. Without this assertion the whole test passes against a tool that dropped
-  // `period` from its shape — which is the silent narrowing it exists to prevent, not a variant of
-  // it.
-  assert.ok(
-    Object.keys(shapes.get("broker_activity") ?? {}).includes("period"),
-    "period must stay in the schema: a stripped key is refused by nobody and reported to no one",
-  );
+  // The schema has to declare the window keys, or the SDK strips them before the handler runs and
+  // a caller asking for a window silently reads the default one. Driving the handler proves the
+  // core's behaviour; only this proves the door is open to it.
+  const shape = Object.keys(shapes.get("broker_activity") ?? {});
+  for (const key of ["period", "from", "to", "date_from", "date_to", "start_date", "end_date"]) {
+    assert.ok(shape.includes(key), `broker_activity must declare ${key}`);
+  }
 
-  // Deliberate: dropping `period` from the shape would have the SDK strip it, and the model would
-  // read rows for a window it asked to change without ever learning the ask went nowhere. It
-  // reaches the core, which refuses it with an error the model can act on.
-  const result = (await reads.get("broker_activity")!({ broker_code: "YP", period: "LAST_1_DAY" })) as {
+  const result = (await reads.get("broker_activity")!({ broker_code: "YP", period: "LAST_7_DAYS" })) as {
     isError?: boolean;
-    content: Array<{ text: string }>;
   };
-  assert.equal(result.isError, true);
-  const payload = JSON.parse(result.content[0].text) as { kind: string; message?: string; error?: string };
-  assert.equal(payload.kind, "invalid_param");
-  assert.match(JSON.stringify(payload), /no period filter/i);
-  assert.equal(requests.activity, 0);
+  assert.equal(result.isError, false);
 
-  // And a spelling the old enum would have bounced reaches the same explanation, rather than a zod
-  // error that tells the model only that its value is not in a list it should not be using.
-  const nonsense = (await reads.get("broker_activity")!({ broker_code: "YP", period: "daily" })) as {
-    isError?: boolean;
-    content: Array<{ text: string }>;
-  };
-  assert.equal(nonsense.isError, true);
-  assert.match(JSON.stringify(JSON.parse(nonsense.content[0].text)), /no period filter/i);
+  const url = lastUrl("broker/activity");
+  // The finding, asserted on the URL that was actually sent: dates go out, the name never does.
+  assert.equal(url.searchParams.has("period"), false, "this endpoint 400s on every value of it");
+  assert.match(url.searchParams.get("from") ?? "", /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(url.searchParams.get("to") ?? "", /^\d{4}-\d{2}-\d{2}$/);
+
+  // An explicit range reaches the wire verbatim.
+  await reads.get("broker_activity")!({ broker_code: "YP", from: "2026-08-17", to: "2026-08-21" });
+  const ranged = lastUrl("broker/activity");
+  assert.equal(ranged.searchParams.get("from"), "2026-08-17");
+  assert.equal(ranged.searchParams.get("to"), "2026-08-21");
+  assert.equal(ranged.searchParams.has("period"), false);
 });
 
 test("tools: broker_top's limit is applied locally and never reaches the wire", async () => {
