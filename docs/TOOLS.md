@@ -67,7 +67,7 @@ Prices, depth, movers, bars, the session clock.
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
 | `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
 | `market_movers` | read | The market movers behind Stockbit's own Movers dialog — the market-wide ranking. | Observed | view, limit |
-| `top_stocks` | read | The order-trade service's top-stock list. | Projected | limit |
+| `top_stocks` | read | The order-trade service's top-stock list — and the FRESHEST source in this server. | Projected | limit |
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
 | `market_session` | read | Where the IDX trading day currently is: pre-opening, session 1, the midday break, session 2, post-closing, or shut. | Projected | — |
 | `prices_batch` | read | A price SERIES for ONE symbol. | Observed | symbols* |
