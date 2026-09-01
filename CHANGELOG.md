@@ -10,6 +10,69 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Added
+
+- **A dead market-data session can now repair itself once, unattended, behind a switch.** Every
+  signal for a dead session already existed and not one of them acted: the health journal records
+  refusals, `status` computes `main.health: "failing"` and `webSession.rejected`, and a 401 becomes a
+  good error at the call site. All three are *reports*. What was missing was the action — the session
+  died mid-task twice in one session and a person had to notice, read, and re-run the login by hand.
+
+  On a failed refresh, `forceRefresh` now makes **one** attempt to harvest a credential out of the
+  still-live browser session. Five gates, every one required, all default to off: the process must
+  have called `armAutoRelogin()` (only `bin/stockbit-mcp.ts` does), `STOCKBIT_AUTO_RELOGIN` must be
+  set, `STOCKBIT_NO_BROWSER` must not be, the website session must be *provably* alive
+  (`likelyValid`, never `!expired` — those are not complements), and `login.lock` must be free.
+
+  Arming is how "never inside `stockbit-batch`" is enforced. Batch reaches `forceRefresh` through the
+  same client as everything else and there is no run-mode marker in this repo, so a condition in the
+  auth layer would have to *infer* the entry point. A capability batch never grants itself cannot be
+  got wrong by a later edit; a test pins the caller list to exactly one file.
+
+  **The retry is the proof.** `forcedRefreshes` is still raised when recovery returns, which switches
+  off the access cache and browser-token adoption, so the second `ensureFresh` cannot be answered
+  locally and is forced to the wire. Nothing reports success on the strength of a capture — four
+  harvested credentials in a row were once rejected on first use while login, doctor and `status` all
+  called them healthy.
+
+  **One attempt, and that is mechanical rather than policy.** The proof rotates, and rotation stales
+  the browser session the next harvest would read, so attempt *n+1* is guaranteed to start from a
+  worse position than attempt *n*. Looping does not merely spend a credential, it destroys the thing
+  recovery depends on. The latch records *which* history happened — recovered, failed, or still in
+  flight — because the advice built on it differs in each case.
+
+- **`login` takes `reap_orphans`, for a profile held open by processes nobody can see.** Eleven
+  orphaned browser processes holding `user-data-dir=~/.stockbit/browser-profile` once blocked every
+  later login with "exited immediately without opening a debugging port", and clearing it took a
+  manual `pkill` plus removing a stale `SingletonLock`. Nothing reaped them, because the spawn is not
+  detached and the MCP login is fire-and-forget.
+
+  It is **off by default and never automatic**, because it cannot tell an abandoned process from a
+  working one: each launch polls a *fresh random* debugging port, so a perfectly healthy browser
+  answering the port it was started with produces the same "exited immediately" failure. The Chartbit
+  driver leaves exactly such a browser on that profile between calls. An automatic reap would have
+  `SIGKILL`ed the chart the user was looking at.
+
+### Changed
+
+- **`login` refuses a *plain* login when the website session is provably dead, and names the one that
+  works.** With a stale session Stockbit shows an expiry dialog over the form and closes the window
+  before anything can be typed — measured, a plain login never once produced a usable form while
+  `switch_account` worked four times out of four. `src/tools/system.ts` had never read the website
+  session at all; the signal was computed in `status.ts` and only ever displayed. It now refuses on
+  the *provable* verdicts only (`rejected` or `expired`, never "unknown"), and both the refusal and
+  the auth error say out loud that `switch_account` signs the user out of Stockbit in that profile.
+
+- **`fresh_profile` now says it does not fix the chart tools.** A throwaway profile gets the API
+  session working while `~/.stockbit/browser-profile` — the profile the chartbit driver actually
+  drives — stays signed out, so every chartbit tool keeps failing until a login runs without it.
+
+- **`status` reports whether recovery is armed, available, spent or running.** It is the difference
+  between "the next 401 fixes itself" and "the next 401 stops you", and nothing else said which. The
+  rendered line appears only where recovery can actually happen — printing "auto-recovery: off" into
+  `stockbit-auth status` would name a switch that does nothing in that process.
+
+
 ## [1.2.4] — 2026-08-31
 
 > **1.2.3 was never published.** Its commits landed on `main`, but the release run failed at
