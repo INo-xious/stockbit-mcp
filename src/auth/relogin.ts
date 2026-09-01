@@ -8,9 +8,17 @@
  * error message at the call site. All three are REPORTS. When the session died mid-task the user
  * still had to notice, read, and re-run the login themselves — twice in one session.
  *
- * The recipe this implements was confirmed on the wire: when the API token is dead but the BROWSER
- * session is still alive, a forced login harvests a working credential out of the profile that is
- * already signed in, in about three seconds, with nobody typing anything.
+ * The recipe this implements: when the API token is dead but the BROWSER session is still alive, a
+ * forced login harvests a working credential out of the profile that is already signed in, in about
+ * three seconds, with nobody typing anything.
+ *
+ * That sentence is a FIELD REPORT — the account owner running the manual path on their own machine
+ * — and not a measurement made here, which an earlier version of this comment blurred by calling it
+ * "confirmed on the wire". Nothing in this repo has ever timed a harvest, or run this module against
+ * a live Stockbit session at all: the suite is offline and every capture in it is injected. What is
+ * verified here is that the gates refuse, that the one attempt is spent exactly once, and that no
+ * verdict carries a token. The three seconds is why the module exists; `UNATTENDED_TIMEOUT_MS`
+ * below, at 30 s, is what the code actually relies on. ADR-0011 records the same split.
  *
  * ## A harvest is not silent, and the brief's wording hides that
  *
@@ -52,8 +60,7 @@
  */
 import { browserSuppressed } from "../desktop/browser.js";
 import { redact } from "../redact.js";
-import { acquireDirLock } from "../util/dirlock.js";
-import { stockbitPath } from "../paths.js";
+import { acquireLoginLock } from "./loginlock.js";
 import type { TokenDomain } from "../http/transport.js";
 import { getStore, type StoreSlot } from "./store.js";
 import { webSessionHealth } from "./websession.js";
@@ -72,14 +79,6 @@ import { webSessionHealth } from "./websession.js";
  * longer only makes a failed recovery more expensive than the failure it was trying to repair.
  */
 export const UNATTENDED_TIMEOUT_MS = 30_000;
-
-/**
- * Staleness budget for `login.lock`, matching the one `src/tools/system.ts` uses on the same file.
- *
- * Deliberately duplicated rather than imported: nothing under `src/auth/` may depend on
- * `src/tools/`, and the value belongs to the LOCK, which both paths now take.
- */
-const LOGIN_LOCK_STALE_MS = 20 * 60_000;
 
 export type ReloginOutcome =
   /** This process never armed recovery — the CLI, the batch backfill, a test. */
@@ -341,11 +340,10 @@ export async function attemptAutoRelogin(
   // a SECOND browser on one profile, which is the condition that produces the orphaned processes
   // this phase also has to clean up.
   //
-  // `timeoutMs: 0` — never queue. A recovery that waits is a tool call that hangs, and by the time a
-  // person has finished signing in there is nothing left to recover.
-  const release = deps.capture
-    ? () => {}
-    : await acquireDirLock(stockbitPath("login.lock"), { staleMs: LOGIN_LOCK_STALE_MS, timeoutMs: 0 });
+  // `acquireLoginLock` never queues, and that is part of the rule rather than a choice made here: a
+  // recovery that waits is a tool call that hangs, and by the time a person has finished signing in
+  // there is nothing left to recover.
+  const release = deps.capture ? () => {} : await acquireLoginLock();
   if (!release) {
     return {
       attempted: false,

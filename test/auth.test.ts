@@ -14,6 +14,8 @@ import {
   worstCaseHoldMsFor,
 } from "../src/auth/reflock.ts";
 import { parseRefresh, ensureFresh, resetSession, decodeJwt } from "../src/auth/session.ts";
+import { clearAccessCache } from "../src/auth/accesscache.ts";
+import { StockbitError, type ErrorKind } from "../src/http/errors.ts";
 import { buildUrl } from "../src/http/transport.ts";
 
 /** Build an unsigned JWT with a given exp (seconds). */
@@ -233,6 +235,73 @@ test("refresh persists a ROTATED refresh token (or we lock ourselves out)", asyn
     globalThis.fetch = realFetch;
     store.clear();
     resetSession();
+  }
+});
+
+test("a failed refresh is labelled by its STATUS, so an outage is not a revoked credential", async () => {
+  // `refreshOnce` used to throw `kind: "auth"` on both branches of its `!res.ok` — the ternary
+  // beside it picks the MESSAGE, not the kind — so a 502 from Stockbit's refresh endpoint was
+  // indistinguishable from a session Stockbit had revoked. That is not a cosmetic label:
+  // `analysis/analyze.ts` rethrows an `auth` cause in preference to every other failure, and
+  // `core/company.ts` explains one as a token-placement bug, so a network blip told the user their
+  // session was dead and offered to sign them out of their browser to fix it.
+  //
+  // One case per status CLASS, because the rule is a table and a single 502 would only prove the
+  // one row someone happened to think of. The expectations are `kindForStatus`'s own — deliberately
+  // written out here rather than computed from it, so this test disagrees with a bad edit to that
+  // table instead of agreeing with it (the WRITES-list rule).
+  const cases: [number, ErrorKind][] = [
+    [400, "invalid_param"],
+    [401, "auth"],
+    [403, "auth"],
+    [429, "rate_limited"],
+    [500, "upstream"],
+    [502, "upstream"],
+  ];
+
+  const store = getStore();
+  const realFetch = globalThis.fetch;
+  try {
+    for (const [status, kind] of cases) {
+      // A distinct token per case, so nothing can be served from a cache written by the last one.
+      store.set(`REFRESH-${status}`);
+      resetSession();
+      clearAccessCache("main");
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ message: `refused with ${status}` }), {
+          status,
+          headers: { "content-type": "application/json" },
+        })) as typeof fetch;
+
+      const err = await ensureFresh().then(
+        () => null,
+        (e: unknown) => e,
+      );
+      assert.ok(err instanceof StockbitError, `HTTP ${status} must throw a StockbitError, got ${String(err)}`);
+      assert.equal(err.kind, kind, `HTTP ${status} must be kind ${kind}`);
+      // The status must survive on the error too: the two guards that unlock destructive advice
+      // (`src/auth/session.ts`'s escalation and `src/tools/system.ts`'s capture verdict) read it
+      // rather than the kind, because `auth` is also the kind of a throw that carries no status.
+      assert.equal(err.status, status, `HTTP ${status} must carry its status`);
+    }
+
+    // And the one auth failure that is NOT a refusal keeps its kind and carries no status at all —
+    // the state every new user is in. Narrowing those guards to a status is what would break here.
+    store.clear();
+    resetSession();
+    clearAccessCache("main");
+    const missing = await ensureFresh().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(missing instanceof StockbitError);
+    assert.equal(missing.kind, "auth", "no stored credential is still an auth failure");
+    assert.equal(missing.status, undefined, "nothing was sent, so there is no status to report");
+  } finally {
+    globalThis.fetch = realFetch;
+    store.clear();
+    resetSession();
+    clearAccessCache("main");
   }
 });
 

@@ -59,8 +59,7 @@ import { forgetRotated } from "../auth/session.js";
 import { forceRefresh, hasStoredSession, resetSession } from "../auth/session.js";
 import { StockbitError } from "../http/errors.js";
 import { logoutSecurities } from "../auth/tradinglogin.js";
-import { acquireDirLock } from "../util/dirlock.js";
-import { stockbitPath } from "../paths.js";
+import { acquireLoginLock } from "../auth/loginlock.js";
 import { redactValue } from "../redact.js";
 import { browserSuppressed } from "../desktop/browser.js";
 
@@ -109,10 +108,12 @@ export async function settleLogin(result: LoginResult): Promise<void> {
     await forceRefresh("main");
     loginFinished("captured");
   } catch (err) {
-    // By STATUS, not by `kind`. `refreshOnce` labels every non-2xx `kind: "auth"`, including a 500,
-    // so `kind` cannot separate "Stockbit refused this credential" from "Stockbit was down" — and
-    // that is the whole distinction between the two outcomes below. 401 and 403 are the refusals,
-    // which is `kindForStatus`'s own definition of an auth failure.
+    // By STATUS, not by `kind`, and still by status after P7g made `refreshOnce` derive its kind
+    // from the status through `kindForStatus`. That fixed the case this comment used to be about —
+    // a 500 arriving labelled `auth` — but not the case it is about now: `auth` is also the kind of
+    // a throw carrying NO status, which is what "no credential reached the store" raises. Reading
+    // that as a refusal would report `captured-but-rejected` for a capture Stockbit never saw. 401
+    // and 403 are the refusals, and only a refusal is one.
     const rejected =
       err instanceof StockbitError && (err.status === 401 || err.status === 403);
     const message = err instanceof Error ? err.message : String(err);
@@ -121,9 +122,6 @@ export async function settleLogin(result: LoginResult): Promise<void> {
     loginFinished(`${rejected ? "captured-but-rejected" : "captured-unproven"}: ${String(redactValue(message))}`);
   }
 }
-
-/** How long the login lock is held before it is assumed to belong to a dead process. */
-const LOGIN_LOCK_STALE_MS = 20 * 60_000;
 
 /** The terminal fallback, quoted verbatim wherever a tool refuses to open a browser. */
 const CLI_LOGIN = "npx -y -p stockbit-mcp stockbit-auth login";
@@ -410,11 +408,11 @@ async function startLogin(define: Definer, request: LoginRequest) {
   }
 
   // A directory lock, not just the in-process flag: a second server instance (a different client,
-  // or the CLI) would otherwise drive the same browser profile at the same time.
-  const release = await acquireDirLock(stockbitPath("login.lock"), {
-    staleMs: LOGIN_LOCK_STALE_MS,
-    timeoutMs: 0,
-  });
+  // or the CLI) would otherwise drive the same browser profile at the same time. All three
+  // participants take it through `acquireLoginLock`, so none of them can hold it under a different
+  // staleness budget and break a lock the others are still using — `stockbit-auth login` took
+  // nothing at all until P7g, which is exactly the hole the comment above describes.
+  const release = await acquireLoginLock();
   if (!release) {
     return refusal(
       "Another login is already in progress — a lock is held on the browser profile, probably by a terminal or a second client.",

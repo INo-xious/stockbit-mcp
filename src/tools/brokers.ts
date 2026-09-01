@@ -2,10 +2,15 @@
  * The broker family's tools: the code->name directory, one broker's stocks, the league table, and a
  * typed accumulation/distribution reading.
  *
- * Three of the four run on routes nobody has observed live, so their descriptions say which parts
- * of the output are projected and which are raw. That sentence is not decoration: these tools are
- * read by a model that has no other documentation, and a projected field it trusts blindly is worse
- * than one it knows to check.
+ * Every description here says which parts of the output are projected and which are raw. That is
+ * not decoration: these tools are read by a model that has no other documentation, and a projected
+ * field it trusts blindly is worse than one it knows to check.
+ *
+ * Two of them now say something more awkward, and have to. `broker_top` REFUSES the order the
+ * exchange sent and the `limit` the caller asked for — it sorts and trims locally, because the
+ * endpoint sorts ascending and ignores `limit` — and `broker_activity` REFUSES `period`, because
+ * every value of it is a 400 there. A correction a caller cannot see is its own kind of silence,
+ * so each is stated in the description AND carried in the result.
  */
 import { z } from "zod";
 import * as brokers from "../core/brokers.js";
@@ -71,29 +76,42 @@ export function registerBrokerTools(define: Definer): void {
       "of a stock from broker_summary, then ask here what else that broker was distributing.\n" +
       "`broker_code` is the two-letter code (YP, CC, XL); use the `brokers` tool to find one by " +
       "name. An unknown or malformed code is rejected before any request goes out.\n" +
+      "NO WINDOW TO CHOOSE. This endpoint has no period filter: measured on 2026-09-01, every " +
+      "value of `period` answers 400 — including LAST_1_DAY, which its sibling broker_distribution " +
+      "accepts on the same vocabulary — while sending none returns rows. Passing `period` here is " +
+      "REFUSED with that explanation rather than dropped on the way out, because a filter you " +
+      "asked for and silently did not get is worse than one that errors. The window is the " +
+      "server's and it announces it: read `from` and `to` on the result, which is where these rows " +
+      "are dated. Use broker_distribution when you need to choose the window yourself.\n" +
       "FILTERS: `market_types` and `investor_types` each take a LIST, and each value is sent as its " +
       "own repeated parameter. Passing several boards means the union of those boards. Omit a " +
       "filter and it is not sent at all, in which case the server picks the default and this tool " +
-      "cannot tell you which one it picked — pass `period` if the window matters to your answer. " +
-      "REGULER is the ordinary order book and what bandarmology normally means; ALL folds in " +
-      "negotiated block trades and can be several times larger.\n" +
-      "`request` in the result echoes exactly what was sent, so the window and filters behind the " +
-      "rows are always visible.\n" +
-      "PENDING VERIFICATION: this route has not been observed live. Only the traded `symbol` is " +
-      "projected, with `readFrom.symbol` naming the key it came from; the value, volume and " +
-      "frequency figures are left inside the raw `row` under their own names rather than renamed on " +
-      "a guess, because a net figure read out of the wrong key would point confidently the wrong " +
-      "way. Read them from `row`.\n" +
+      "cannot tell you which one it picked. REGULER is the ordinary order book and what " +
+      "bandarmology normally means; ALL folds in negotiated block trades and can be several times " +
+      "larger.\n" +
+      "`request` in the result echoes exactly what was sent, so the filters behind the rows are " +
+      "always visible.\n" +
+      "The route HAS answered live and its envelope is known, but the names inside its ROWS have " +
+      "not been recorded. So only the traded `symbol` is projected, with `readFrom.symbol` naming " +
+      "the key it came from; the value, volume and frequency figures are left inside the raw `row` " +
+      "under their own names rather than renamed on a guess, because a net figure read out of the " +
+      "wrong key would point confidently the wrong way. Read them from `row`.\n" +
       "`rowsFrom: null` with `count: 0` means the response carried no array — an empty result or an " +
       "unrecognised shape, distinguished by `dataKeys` — and NOT a broker who traded nothing.",
     {
       broker_code: z.string().describe("Broker code, 2-4 uppercase letters or digits, e.g. YP"),
+      // Still ACCEPTED by the schema, and then refused — deliberately. Dropping the key from the
+      // shape would make the SDK strip it, and the caller would read rows for a window they asked
+      // to change and never learn the ask went nowhere. A plain string rather than the enum so
+      // every spelling of the mistake reaches the refusal that explains it, instead of half of
+      // them bouncing off a zod enum error that explains nothing.
       period: z
-        .enum(brokers.BROKER_PERIODS)
+        .string()
         .optional()
         .describe(
-          "Window to aggregate over, e.g. LAST_1_DAY, LAST_7_DAYS, YEAR_TO_DATE. Omitted means " +
-            "the server's own default, which this tool cannot report.",
+          "NOT ACCEPTED — this endpoint answers 400 to every value of it, so passing it is " +
+            "refused here with an explanation. The window is fixed by the server and reported " +
+            "back in `from`/`to`. Use broker_distribution to choose a window.",
         ),
       market_types: z
         .array(z.enum(brokers.BROKER_MARKET_TYPES))
@@ -134,13 +152,28 @@ export function registerBrokerTools(define: Definer): void {
       "than one. Use it to pick a broker worth asking broker_activity about.\n" +
       "This is a market-level ranking, not a per-stock one — a broker at the top of it is not " +
       "thereby active in any particular stock. For a single stock use broker_summary.\n" +
+      "THE ORDER IS THIS SERVER'S, NOT THE EXCHANGE'S. The endpoint answers ASCENDING by " +
+      "`total_value` — biggest broker LAST — and no sort argument reverses it: `sort_by`, " +
+      "`order_by` and `sort_direction` are accepted and change nothing, `order` and `sort` are " +
+      "refused with a 400. So the rows are re-sorted here, DESCENDING by `total_value`, and " +
+      "`sortedLocally` on the result says so. `sortedLocally.unsortable` counts rows whose " +
+      "`total_value` could not be read; they keep their wire order at the END, because a row with " +
+      "no rank is not given one.\n" +
+      "`limit` IS ALSO THIS SERVER'S. The endpoint ignores it — the same 89 rows come back at " +
+      "limit=3 and limit=5 — so the cap is applied here, after the sort, and `limitAppliedLocally` " +
+      "names it while `countBeforeLimit` says how many rows there were before the trim. Do not " +
+      "read a short list as the exchange's answer to your `limit`.\n" +
       "Board and investor-class filters are deliberately NOT offered here: they are documented for " +
       "the broker_activity route and only for it, and a filter this endpoint quietly ignores would " +
       "widen the answer without saying so. Use broker_activity when you need them.\n" +
-      "Each entry carries `code` and " +
-      "`name` where a recognised key held them, `readFrom` naming those keys, and the whole raw " +
-      "row under `row` — the value, volume and frequency figures are in there under names that " +
-      "have not been confirmed, so read them from `row`.\n" +
+      "Each entry carries `code`, `name`, `investorType` and `group` as sent, the figures " +
+      "`totalValue`, `netValue`, `buyValue`, `sellValue`, `totalVolume` and `totalFrequency` as " +
+      "numbers, `readFrom` naming the wire key each was read from, and the whole raw row under " +
+      "`row`. Values are IDR and volumes are LOTS, as everywhere in this family. A figure that was " +
+      "not sent, or that this server would not parse, is ABSENT together with its `readFrom` " +
+      "entry — never zero.\n" +
+      "`date` carries the session the table covers (`from`, `to`, `idx`) when the response " +
+      "volunteered it, which is the only thing dating these figures.\n" +
       "`rowsFrom: null` with `count: 0` means no array was found in the response, not an empty " +
       "market; `dataKeys` shows what the response did carry.",
     {
@@ -153,10 +186,20 @@ export function registerBrokerTools(define: Definer): void {
         .optional()
         .describe(
           `Sort key without the SORT_BY_ prefix. Known values: ${brokers.BROKER_SORT_KEYS.join(", ")}. ` +
-            "The list is partial, so any uppercase token is accepted.",
+            "The list is partial, so any uppercase token is accepted. It does NOT decide the order " +
+            "you get back: no value of it was seen to change the endpoint's ordering, and the rows " +
+            "are sorted here descending by total_value regardless. It is sent, and echoed in " +
+            "`request`, in case it selects something other than order.",
         ),
       page: z.coerce.number().optional().describe("1-based page. Omitted means the server default."),
-      limit: z.coerce.number().optional().describe("Rows per page. Omitted means the server default."),
+      limit: z
+        .coerce.number()
+        .optional()
+        .describe(
+          "Rows to keep. Applied HERE after the descending sort, because the endpoint ignores its " +
+            "own limit; it is not sent. `limitAppliedLocally` echoes it and `countBeforeLimit` " +
+            "says what it trimmed.",
+        ),
     },
     async (a) =>
       runTool(() =>

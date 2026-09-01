@@ -11,6 +11,7 @@ import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
 import {
+  BROKER_PERIODS,
   buildActivityParams,
   getBandarDetector,
   getBrokerActivity,
@@ -48,19 +49,100 @@ const DIRECTORY_BODY = {
   },
 };
 
+/**
+ * The envelope `brokerActivity` was measured returning on 2026-09-01, with no `period` sent:
+ * `data = {broker_activity_transaction, from, to, broker_code, broker_name}`.
+ *
+ * The row KEYS inside it were not recorded, so they are still spelled three ways here — the one the
+ * projection expects, a second plausible one, and a row it cannot read at all. The container is
+ * measured; what sits in it is not, and the fixture says which is which.
+ */
 const ACTIVITY_BODY = {
   data: {
-    list: [
+    broker_activity_transaction: [
       { symbol: "BBRI", net_value: "445525972000", total_volume: "1200" },
       { stock_code: "TLKM", net_value: "-2000000" },
       { unexpected: 1 },
     ],
+    from: "2026-09-01",
+    to: "2026-09-01",
+    broker_code: "YP",
+    broker_name: "Sekuritas Contoh Satu",
   },
 };
 
+/**
+ * The shape `brokerTop` was measured returning on 2026-09-01: rows under `data.list`, provenance
+ * under `data.date`, and every figure a PLAIN numeric string rather than the `{raw, formatted}`
+ * pair the rest of this API sends.
+ *
+ * Two properties of it are load-bearing and deliberate.
+ *
+ * It is ASCENDING by `total_value`, because the endpoint is — the biggest house is sent LAST, which
+ * is the whole defect. Any test that asserts a descending order off this fixture is asserting that
+ * the sort actually ran.
+ *
+ * `net_value`, `buy_value` and `sell_value` carry DISTINCT values, because they do live. A field
+ * report claimed all three were `"0"` on every row; the live reading contradicted it, so a fixture
+ * of zeroes here would quietly re-install the bug it would then look like it was testing.
+ */
 const TOP_BODY = {
+  data: {
+    list: [
+      {
+        code: "ZR",
+        name: "Sekuritas Contoh Kecil",
+        investor_type: "ALL",
+        total_value: "22485000",
+        net_value: "-15025000",
+        buy_value: "3730000",
+        sell_value: "18755000",
+        total_volume: "2200",
+        total_frequency: "17",
+        group: "LOKAL",
+      },
+      {
+        code: "CC",
+        name: "Sekuritas Contoh Menengah",
+        investor_type: "ALL",
+        total_value: "9912000000",
+        net_value: "1200000000",
+        buy_value: "5556000000",
+        sell_value: "4356000000",
+        total_volume: "410000",
+        total_frequency: "3011",
+        group: "LOKAL",
+      },
+      {
+        code: "AK",
+        name: "Sekuritas Contoh Besar",
+        investor_type: "ALL",
+        total_value: "5636360451396",
+        net_value: "-88000000000",
+        buy_value: "2774180225698",
+        sell_value: "2862180225698",
+        total_volume: "9100000",
+        total_frequency: "120455",
+        group: "ASING",
+      },
+      // A row that IS a row — it has a code — whose ranking figure will not parse. "1,234" is 1234
+      // under one Indonesian convention and 1.234 under the other, so it is refused, and a broker
+      // with no readable rank must not be given one.
+      { code: "XL", name: "Sekuritas Contoh Tak Terbaca", total_value: "1,234", net_value: "" },
+      { something_else: true },
+    ],
+    date: { from: "2026-09-01", to: "2026-09-01", idx: "2026-09-01" },
+  },
+};
+
+/**
+ * The permissive envelope, kept alive on purpose: `data` as a bare array, with no `date` beside it.
+ * Only `data.list` was measured, and a reader that stopped accepting the alternatives would be
+ * narrowing itself on the strength of one reading.
+ */
+const TOP_BARE_ARRAY_BODY = {
   data: [
-    { code: "AK", name: "UBS Sekuritas Indonesia", total_value: "9912000000" },
+    { code: "AK", name: "Sekuritas Contoh Besar", total_value: "9912000000" },
     { something_else: true },
   ],
 };
@@ -161,6 +243,9 @@ const requests = { directory: 0, activity: 0, top: 0, summary: 0 };
 /** What the next activity call should answer with. Lets one test drive an empty/odd envelope. */
 let activityBody: unknown = ACTIVITY_BODY;
 
+/** The same for the league table, so the measured shape and the permissive one both get a run. */
+let topBody: unknown = TOP_BODY;
+
 /** Set non-200 to make the directory route fail, so name resolution's degraded path is exercised. */
 let directoryStatus = 200;
 
@@ -202,7 +287,7 @@ before(() => {
     }
     if (u.includes("broker/top")) {
       requests.top++;
-      return json(TOP_BODY);
+      return json(topBody);
     }
     if (u.includes("marketdetectors/TLKM")) {
       requests.summary++;
@@ -228,6 +313,7 @@ beforeEach(() => {
   clearCache();
   seenUrls.length = 0;
   activityBody = ACTIVITY_BODY;
+  topBody = TOP_BODY;
   directoryStatus = 200;
   requests.directory = 0;
   requests.activity = 0;
@@ -456,7 +542,6 @@ test("directory: a rejected page size never reaches the wire", async () => {
 test("activity: market_type and investor_type REPEAT on the wire, never comma-joined", async () => {
   await getBrokerActivity({
     brokerCode: "yp",
-    period: "LAST_7_DAYS",
     // The duplicate is deliberate: it must collapse, not repeat.
     marketTypes: ["REGULER", "NEGO", "REGULER"],
     investorTypes: ["FOREIGN", "DOMESTIC"],
@@ -482,10 +567,45 @@ test("activity: market_type and investor_type REPEAT on the wire, never comma-jo
   assert.ok(!url.search.includes(","), `raw comma in ${url.search}`);
 
   assert.equal(url.searchParams.get("broker_code"), "YP");
-  assert.equal(url.searchParams.get("period"), "TB_PERIOD_LAST_7_DAYS");
   assert.equal(url.searchParams.get("sort_by"), "SORT_BY_NET_VALUE");
   assert.equal(url.searchParams.get("limit"), "20");
   assert.equal(url.searchParams.has("page"), false, "an omitted page must be absent, not empty");
+  assert.equal(url.searchParams.has("period"), false, "this endpoint 400s on every value of it");
+});
+
+test("activity: `period` is REFUSED with an explanation, not dropped on the way to the wire", async () => {
+  // Measured 2026-09-01: every one of the ten BROKER_PERIODS members answers 400 here, as do eight
+  // other spellings, while sending none answers 200 with rows. The control that makes that a fact
+  // about `period` and not about the call: unknown keys (`tb_period`, `periode`) answer 200 and are
+  // ignored, so a 400 is a RECOGNISED field refusing a value. There is no spelling left to find.
+  //
+  // Refused rather than silently dropped, because a filter the caller asked for and did not get is
+  // worse than one that errors: they would read rows for a window they never chose.
+  await assert.rejects(
+    () => getBrokerActivity({ brokerCode: "YP", period: "LAST_1_DAY" }),
+    (e: unknown) => {
+      assert.ok(e instanceof StockbitError);
+      assert.equal(e.kind, "invalid_param");
+      assert.match(e.message, /no period filter/i);
+      // The message has to say where the window IS, or refusing it just loses the caller a window.
+      assert.match(e.message, /from.*to|`from`\/`to`/);
+      return true;
+    },
+  );
+  // The member its sibling accepts is refused here too — that pairing is the finding, so assert it.
+  await assert.rejects(() => getBrokerActivity({ brokerCode: "YP", period: "YEAR_TO_DATE" }), StockbitError);
+  assert.equal(requests.activity, 0, "a refused parameter must cost no request");
+});
+
+test("activity: BROKER_PERIODS is untouched — broker_distribution still uses it", async () => {
+  // The fix is "stop sending it HERE", not "delete the vocabulary". broker_distribution accepts
+  // TB_PERIOD_LAST_1_DAY on this same list, and narrowing the constant would break that route to
+  // fix this one.
+  assert.ok(BROKER_PERIODS.includes("LAST_1_DAY"));
+  assert.equal(BROKER_PERIODS.length, 10);
+  // And it is still live on the route that takes it.
+  await getBrokerTop({ period: "LAST_1_DAY" });
+  assert.equal(lastUrl("broker/top").searchParams.get("period"), "TB_PERIOD_LAST_1_DAY");
 });
 
 test("activity: omitted filters are absent parameters, not empty ones", async () => {
@@ -495,12 +615,48 @@ test("activity: omitted filters are absent parameters, not empty ones", async ()
   assert.equal(url.searchParams.get("broker_code"), "CC");
 });
 
+test("activity: binds to the measured row container and carries the window beside it", async () => {
+  const activity = await getBrokerActivity({ brokerCode: "YP" });
+
+  // `broker_activity_transaction` is the container the live call answered with. It used to be
+  // absent from ROW_CONTAINERS, so this tool returned `rowsFrom: null, count: 0` while `dataKeys`
+  // showed the array sitting right there.
+  assert.equal(activity.rowsFrom, "broker_activity_transaction");
+  assert.equal(activity.count, 3);
+  assert.deepEqual(activity.dataKeys, [
+    "broker_activity_transaction",
+    "from",
+    "to",
+    "broker_code",
+    "broker_name",
+  ]);
+
+  // With no period to choose, `from`/`to` are the ONLY thing dating these rows, and they were
+  // being read out of the envelope and thrown away.
+  assert.equal(activity.from, "2026-09-01");
+  assert.equal(activity.to, "2026-09-01");
+});
+
+test("activity: a window the response did not carry is absent, never today's date", async () => {
+  activityBody = { data: { broker_activity_transaction: [{ symbol: "BBRI" }] } };
+  const activity = await getBrokerActivity({ brokerCode: "YP" });
+  assert.equal(activity.count, 1);
+  assert.equal("from" in activity, false, "an unstated window is absent, not defaulted");
+  assert.equal("to" in activity, false);
+
+  // An empty string is Stockbit's "no value here" across this API, and must read the same way.
+  clearCache();
+  activityBody = { data: { broker_activity_transaction: [], from: "", to: "   " } };
+  const blank = await getBrokerActivity({ brokerCode: "CC" });
+  assert.equal("from" in blank, false);
+  assert.equal("to" in blank, false);
+});
+
 test("activity: projects the traded symbol and leaves the figures in the raw row", async () => {
   const activity = await getBrokerActivity({ brokerCode: "YP" });
 
   assert.equal(activity.brokerCode, "YP");
   assert.deepEqual(activity.request, { broker_code: "YP" });
-  assert.equal(activity.rowsFrom, "list");
   assert.equal(activity.count, 3);
 
   assert.equal(activity.rows[0].symbol, "BBRI");
@@ -544,6 +700,7 @@ test("activity: rejected arguments never reach the wire", async () => {
   await assert.rejects(() => getBrokerActivity({ brokerCode: "YP/../x" }), StockbitError);
   // A plausible misspelling of a board. It must fail here rather than be sent and ignored.
   await assert.rejects(() => getBrokerActivity({ brokerCode: "YP", marketTypes: ["REGULAR"] }), StockbitError);
+  // A period this vocabulary never had, and one it does — both refused, for the same reason now.
   await assert.rejects(() => getBrokerActivity({ brokerCode: "YP", period: "LAST_30_DAYS" }), StockbitError);
   await assert.rejects(() => getBrokerActivity({ brokerCode: "YP", sortBy: "net value" }), StockbitError);
   assert.equal(requests.activity, 0);
@@ -560,8 +717,9 @@ test("activity: the built parameters keep the lists as arrays, with no round-tri
   assert.deepEqual(params.market_type, ["MARKET_TYPE_REGULER", "MARKET_TYPE_NEGO"]);
   assert.deepEqual(params.investor_type, ["INVESTOR_TYPE_FOREIGN"]);
   assert.equal(params.broker_code, "YP");
-  assert.equal(params.period, undefined);
   assert.equal(params.sort_by, undefined);
+  // Not merely undefined: the key is not built at all, so nothing downstream can resurrect it.
+  assert.equal("period" in params, false, "period is never a parameter of this route");
 });
 
 test("activity: the cache key carries every filter, not just the broker", async () => {
@@ -572,13 +730,13 @@ test("activity: the cache key carries every filter, not just the broker", async 
   await getBrokerActivity({ brokerCode: "YP", marketTypes: ["ALL"] });
   assert.equal(requests.activity, 2, "a different board must not be served the REGULER answer");
 
-  await getBrokerActivity({ brokerCode: "YP", marketTypes: ["REGULER"], period: "LAST_7_DAYS" });
-  assert.equal(requests.activity, 3, "a different window must not be served the earlier answer");
+  await getBrokerActivity({ brokerCode: "YP", marketTypes: ["REGULER"], sortBy: "TOTAL_VALUE" });
+  assert.equal(requests.activity, 3, "a different sort must not be served the earlier answer");
 });
 
 /* ------------------------------------ top ------------------------------------ */
 
-test("top: sends only what was asked for, and reads a bare data array", async () => {
+test("top: sends only what was asked for, on the declared path", async () => {
   const top = await getBrokerTop({ period: "YEAR_TO_DATE", sortBy: "TOTAL_VALUE" });
 
   const url = lastUrl("broker/top");
@@ -587,12 +745,158 @@ test("top: sends only what was asked for, and reads a bare data array", async ()
   assert.equal(url.searchParams.get("sort_by"), "SORT_BY_TOTAL_VALUE");
   assert.deepEqual([...url.searchParams.keys()].sort(), ["period", "sort_by"]);
 
+  assert.equal(top.rowsFrom, "list");
+  assert.deepEqual(top.request, { period: "TB_PERIOD_YEAR_TO_DATE", sort_by: "SORT_BY_TOTAL_VALUE" });
+  assert.deepEqual(top.unmapped, { count: 1, sampleKeys: ["something_else"] });
+});
+
+test("top: the biggest broker comes FIRST — the endpoint sends them ascending", async () => {
+  // The defect, in one assertion. Measured across all 89 live rows: first 22,485,000, last
+  // 5,636,360,451,396. A tool whose whole description is "which brokers moved the most" was
+  // handing back the smallest house at the top, and the ignored `limit` was the only thing hiding
+  // it — nobody ever looked past row three.
+  const top = await getBrokerTop();
+
+  assert.deepEqual(
+    top.brokers.map((b) => b.code),
+    ["AK", "CC", "ZR", "XL", undefined],
+    "descending by total_value, with the two unrankable rows last in wire order",
+  );
+  assert.deepEqual(top.brokers.map((b) => b.totalValue).slice(0, 3), [
+    5_636_360_451_396, 9_912_000_000, 22_485_000,
+  ]);
+
+  // Said out loud, because a client-side sort the caller cannot see is itself a silent behaviour.
+  // No `sort_by` value reverses the order upstream, so this is the only place it can happen.
+  assert.deepEqual(top.sortedLocally, {
+    by: "total_value",
+    direction: "descending",
+    appliedLocally: true,
+    unsortable: 2,
+  });
+});
+
+test("top: a row with no readable total_value is kept, ranked LAST, and never given a zero", async () => {
+  const top = await getBrokerTop();
+  const xl = top.brokers.find((b) => b.code === "XL")!;
+
+  // "1,234" is refused rather than guessed at — 1234 under one Indonesian convention, 1.234 under
+  // the other. Absent, not zero: a zero would rank this house dead last on a real figure.
+  assert.equal(xl.totalValue, undefined);
+  assert.equal(xl.readFrom.totalValue, undefined, "an unread key is not named as a source");
+  assert.equal(xl.row.total_value, "1,234", "the raw value is still there to read");
+  // An empty string is "no value here", not an unreadable one, and reads the same way: absent.
+  assert.equal(xl.netValue, undefined);
+
+  // It sits after every ranked row, in wire order. Sorting it to the top or the bottom by
+  // comparator accident would be inventing a position for a broker that has none.
+  assert.equal(top.brokers.at(-2)!.code, "XL");
+});
+
+test("top: the row figures are projected as numbers, and readFrom names every key", async () => {
+  const top = await getBrokerTop();
+  const ak = top.brokers[0];
+
+  assert.equal(ak.code, "AK");
+  assert.equal(ak.name, "Sekuritas Contoh Besar");
+  assert.equal(ak.investorType, "ALL");
+  assert.equal(ak.group, "ASING");
+  assert.equal(ak.totalValue, 5_636_360_451_396);
+  assert.equal(ak.totalVolume, 9_100_000);
+  assert.equal(ak.totalFrequency, 120_455);
+
+  // These three are the correction to the 2026-08-31 field report, which recorded them as "0" on
+  // every row and called them dead. The live reading has 89 distinct values; they are populated,
+  // they are projected normally, and nothing here reports them absent.
+  assert.equal(ak.netValue, -88_000_000_000);
+  assert.equal(ak.buyValue, 2_774_180_225_698);
+  assert.equal(ak.sellValue, 2_862_180_225_698);
+  assert.ok(ak.netValue! < 0, "the sign is the wire's: this house was a net seller");
+
+  assert.deepEqual(ak.readFrom, {
+    code: "code",
+    name: "name",
+    investorType: "investor_type",
+    totalValue: "total_value",
+    netValue: "net_value",
+    buyValue: "buy_value",
+    sellValue: "sell_value",
+    totalVolume: "total_volume",
+    totalFrequency: "total_frequency",
+    group: "group",
+  });
+  // Nothing is dropped on the way through, and the strings are still strings underneath.
+  assert.equal(ak.row.total_value, "5636360451396");
+});
+
+test("top: the session the table covers is carried, not dropped", async () => {
+  const top = await getBrokerTop();
+  assert.deepEqual(top.date, { from: "2026-09-01", to: "2026-09-01", idx: "2026-09-01" });
+});
+
+test("top: `limit` is applied HERE, after the sort, and is never sent", async () => {
+  const top = await getBrokerTop({ limit: 2 });
+
+  // The endpoint ignores its own `limit` — the same 89 rows at limit=3 and at limit=5 — so sending
+  // it would put a cap in `request` that the server never honoured.
+  assert.equal(lastUrl("broker/top").searchParams.has("limit"), false);
+  assert.equal("limit" in top.request, false);
+
+  // After the sort, not before: a cap applied to the wire order would return the two SMALLEST.
+  assert.deepEqual(
+    top.brokers.map((b) => b.code),
+    ["AK", "CC"],
+  );
+  assert.equal(top.count, 2);
+  assert.equal(top.countBeforeLimit, 5, "the caller can see what the trim removed");
+  assert.equal(top.limitAppliedLocally, 2, "and whose cap it was");
+});
+
+test("top: with no limit, nothing claims one was applied", async () => {
+  const top = await getBrokerTop();
+  assert.equal(top.limitAppliedLocally, undefined);
+  assert.equal(top.count, 5);
+  assert.equal(top.countBeforeLimit, 5);
+});
+
+test("top: trimming never mutates the shared cache entry, and costs no second fetch", async () => {
+  // Same trap as getBrokerDirectory's `codes`: `full` is the object every later caller of that key
+  // receives, and slicing its `brokers` in place would hand the next caller this caller's cap.
+  const two = await getBrokerTop({ limit: 2 });
+  assert.equal(two.count, 2);
+
+  const all = await getBrokerTop();
+  assert.equal(requests.top, 1, "limit is not on the wire, so it is not in the cache key either");
+  assert.equal(all.count, 5, "the untrimmed table must still be whole");
+  assert.equal(all.limitAppliedLocally, undefined);
+
+  const three = await getBrokerTop({ limit: 3 });
+  assert.equal(requests.top, 1, "a second cap is a second slice, not a second request");
+  assert.equal(three.count, 3);
+});
+
+test("top: a rejected limit never reaches the fetch", async () => {
+  await assert.rejects(() => getBrokerTop({ limit: 0 }), (e: unknown) => {
+    assert.ok(e instanceof StockbitError);
+    assert.equal(e.kind, "invalid_param");
+    return true;
+  });
+  await assert.rejects(() => getBrokerTop({ limit: "ten" }), StockbitError);
+  assert.equal(requests.top, 0);
+});
+
+test("top: still reads a bare data array, with no provenance to claim", async () => {
+  // Only `data.list` was measured. A reader that stopped accepting the alternatives would be
+  // narrowing itself on the strength of one reading.
+  topBody = TOP_BARE_ARRAY_BODY;
+  const top = await getBrokerTop();
+
   assert.equal(top.rowsFrom, "data");
   assert.equal(top.brokers[0].code, "AK");
-  assert.equal(top.brokers[0].name, "UBS Sekuritas Indonesia");
-  assert.equal(top.brokers[0].row.total_value, "9912000000");
+  assert.equal(top.brokers[0].totalValue, 9_912_000_000);
+  assert.equal(top.date, undefined, "a bare array carries no date, so none is invented");
   assert.deepEqual(top.unmapped, { count: 1, sampleKeys: ["something_else"] });
-  assert.deepEqual(top.request, { period: "TB_PERIOD_YEAR_TO_DATE", sort_by: "SORT_BY_TOTAL_VALUE" });
+  assert.equal(top.sortedLocally.unsortable, 1);
 });
 
 test("top: with no arguments it sends no query at all", async () => {
@@ -607,6 +911,14 @@ test("top: a different sort is a different cache entry", async () => {
   assert.equal(requests.top, 1);
   await getBrokerTop({ sortBy: "TOTAL_VOLUME" });
   assert.equal(requests.top, 2);
+});
+
+test("top: `unmapped` describes the row it actually came from, despite the re-sort", async () => {
+  // `unmappedOf` walks the raw rows and the projected ones in parallel, so it has to run BEFORE
+  // the sort. Counting after would report some other row's keys as the unreadable one's — and the
+  // sample keys are the whole diagnostic value of the field.
+  const top = await getBrokerTop();
+  assert.deepEqual(top.unmapped, { count: 1, sampleKeys: ["something_else"] });
 });
 
 /* ------------------------------- bandar detector ------------------------------- */
@@ -775,7 +1087,6 @@ test("tools: four reads, no writes, and the arguments the model sends reach the 
     broker_code: "XL",
     market_types: ["REGULER", "NEGO"],
     investor_types: ["FOREIGN"],
-    period: "LAST_1_DAY",
     sort_by: "TOTAL_VALUE",
     page: 2,
     limit: 10,
@@ -786,10 +1097,64 @@ test("tools: four reads, no writes, and the arguments the model sends reach the 
   assert.equal(url.searchParams.get("broker_code"), "XL");
   assert.deepEqual(url.searchParams.getAll("market_type"), ["MARKET_TYPE_REGULER", "MARKET_TYPE_NEGO"]);
   assert.deepEqual(url.searchParams.getAll("investor_type"), ["INVESTOR_TYPE_FOREIGN"]);
-  assert.equal(url.searchParams.get("period"), "TB_PERIOD_LAST_1_DAY");
   assert.equal(url.searchParams.get("sort_by"), "SORT_BY_TOTAL_VALUE");
   assert.equal(url.searchParams.get("page"), "2");
   assert.equal(url.searchParams.get("limit"), "10");
+  assert.equal(url.searchParams.has("period"), false);
+});
+
+test("tools: broker_activity still ACCEPTS `period` in its schema, so it can refuse it out loud", async () => {
+  const { definer, reads } = fakeDefiner();
+  registerBrokerTools(definer);
+
+  // Deliberate: dropping `period` from the shape would have the SDK strip it, and the model would
+  // read rows for a window it asked to change without ever learning the ask went nowhere. It
+  // reaches the core, which refuses it with an error the model can act on.
+  const result = (await reads.get("broker_activity")!({ broker_code: "YP", period: "LAST_1_DAY" })) as {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+  };
+  assert.equal(result.isError, true);
+  const payload = JSON.parse(result.content[0].text) as { kind: string; message?: string; error?: string };
+  assert.equal(payload.kind, "invalid_param");
+  assert.match(JSON.stringify(payload), /no period filter/i);
+  assert.equal(requests.activity, 0);
+
+  // And a spelling the old enum would have bounced reaches the same explanation, rather than a zod
+  // error that tells the model only that its value is not in a list it should not be using.
+  const nonsense = (await reads.get("broker_activity")!({ broker_code: "YP", period: "daily" })) as {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+  };
+  assert.equal(nonsense.isError, true);
+  assert.match(JSON.stringify(JSON.parse(nonsense.content[0].text)), /no period filter/i);
+});
+
+test("tools: broker_top's limit is applied locally and never reaches the wire", async () => {
+  const { definer, reads } = fakeDefiner();
+  registerBrokerTools(definer);
+
+  const result = await reads.get("broker_top")!({ limit: 1, sort_by: "TOTAL_VALUE" });
+  assert.equal((result as { isError?: boolean }).isError, false);
+
+  const url = lastUrl("broker/top");
+  assert.equal(url.searchParams.has("limit"), false);
+  assert.equal(url.searchParams.get("sort_by"), "SORT_BY_TOTAL_VALUE");
+
+  const payload = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text) as {
+    data: {
+      brokers: Array<{ code?: string }>;
+      limitAppliedLocally?: number;
+      countBeforeLimit: number;
+      sortedLocally: { direction: string };
+    };
+  };
+  // Asserted through the SERIALISED result, which is what the model actually reads: a correction
+  // that survives only inside the core object is one the caller never sees.
+  assert.deepEqual(payload.data.brokers.map((b) => b.code), ["AK"], "the biggest, not the first sent");
+  assert.equal(payload.data.limitAppliedLocally, 1);
+  assert.equal(payload.data.countBeforeLimit, 5);
+  assert.equal(payload.data.sortedLocally.direction, "descending");
 });
 
 test("tools: bandar_detector passes its window and board through to the summary request", async () => {

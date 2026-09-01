@@ -13,7 +13,7 @@
  * gate were deleted, `login --help` would exit 1 having done nothing — a loud test failure, and no
  * browser. (`STOCKBIT_NO_BROWSER` alone would not do: `captureViaBrowserLogin` never checks it.)
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -161,9 +161,16 @@ const execFileAsync = promisify(execFile);
  * Run the real CLI. The child gets its own empty store and the browser tripwire — see the header.
  * `--import tsx` from the repo root is the same loader `npm test` itself uses, so this is portable
  * exactly as far as the suite already is.
+ *
+ * `store` hands the child a directory the CALLER owns and keeps: the login-lock tests need to seed
+ * `login.lock` before the run and to read the directory after it, which the disposable store this
+ * makes by default has already deleted by the time the assertion runs.
  */
-async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const childStore = mkdtempSync(join(tmpdir(), "stockbit-authcli-child-"));
+async function runCli(
+  args: string[],
+  opts: { store?: string } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const childStore = opts.store ?? mkdtempSync(join(tmpdir(), "stockbit-authcli-child-"));
   try {
     const env = {
       ...process.env,
@@ -190,7 +197,7 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
       return { code: e.code ?? -1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
     }
   } finally {
-    rmSync(childStore, { recursive: true, force: true });
+    if (!opts.store) rmSync(childStore, { recursive: true, force: true });
   }
 }
 
@@ -235,6 +242,81 @@ test("an unknown subcommand still gets usage on stderr and exit 2", async () => 
   const r = await runCli(["definitely-not-a-command"]);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /Usage: stockbit-auth/);
+});
+
+/* ------------------------------ the login lock ------------------------------ */
+
+/**
+ * The hole P7g closed: `login.lock` is a five-gate safety property, and gate 5 of automatic login
+ * recovery is "the lock is free". This bin took nothing, so that gate read FREE for the whole time
+ * a `stockbit-auth login` was driving `~/.stockbit/browser-profile` — and an unattended recovery
+ * could open a second browser onto the profile the user was typing their password into. The MCP
+ * `login` tool's own comment names the CLI as the thing the lock protects against.
+ *
+ * Spawned rather than called, because the lock is a property of the PROCESS: the acquisition, the
+ * refusal, and the release-on-exit all live in the bin, and the release in particular is an `exit`
+ * listener that only exists in a real process.
+ */
+test("login refuses while another process holds the profile lock, before promising a window", async () => {
+  const store = mkdtempSync(join(tmpdir(), "stockbit-authcli-held-"));
+  // A bare directory, exactly as a holder that died mid-login would leave it: no owner token, so a
+  // release from this run could only remove it by breaking the rule in `releaseDecision`.
+  mkdirSync(join(store, "login.lock"), { recursive: true });
+  try {
+    const r = await runCli(["login"], { store });
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stderr, /Another login is already in progress/);
+    assert.match(r.stderr, /lock is held on the browser profile/);
+    // The refusal must come BEFORE cmdLogin's first line. "Opening a browser…" followed by a
+    // refusal is a report of something that did not happen, and this is the assertion — not the
+    // exit code — that proves no capture was reached.
+    assert.doesNotMatch(r.stdout + r.stderr, /Opening a browser/);
+    assert.ok(existsSync(join(store, "login.lock")), "a refused login must never delete the holder's lock");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
+test("trading-login --browser takes the same lock — it drives the same profile", async () => {
+  // The other CLI participant, and the one that is easy to forget: it reaches the identical
+  // `captureViaBrowserLogin` on the identical default profile, so a PIN modal in one window and a
+  // recovery launching into the other is the same wreck as two logins.
+  //
+  // Safe to spawn only because the lock is held: the refusal is the FIRST thing in the `--browser`
+  // branch, so this run exits before any browser code is reached — which the "Opening the
+  // logged-in browser" assertion below is what proves. (The PIN branch is deliberately not locked;
+  // it posts to carina and opens nothing.)
+  const store = mkdtempSync(join(tmpdir(), "stockbit-authcli-trading-"));
+  mkdirSync(join(store, "login.lock"), { recursive: true });
+  try {
+    const r = await runCli(["trading-login", "--browser"], { store });
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stderr, /Another login is already in progress/);
+    assert.doesNotMatch(r.stdout + r.stderr, /Opening the logged-in browser/);
+    assert.ok(existsSync(join(store, "login.lock")), "a refused capture must never delete the holder's lock");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
+test("a login that FAILS still releases the lock — a leak recreates the stale lock it prevents", async () => {
+  // The failure path, not the happy one, because that is where a lock is lost: `cmdLogin` leaves
+  // through `process.exit` in five places and a `finally` would run in none of them. Here the
+  // browser tripwire makes `findBrowsers()` throw, so the run dies at the top-level `main().catch`
+  // — the hardest of those paths — with the lock already taken.
+  //
+  // A leak is not a tidiness problem. `login.lock` is only broken as stale after twenty minutes, so
+  // one leaked lock refuses every login AND every automatic recovery for that long, on behalf of a
+  // process that has already exited. That is the condition `reap_orphans` was written to clean up.
+  const store = mkdtempSync(join(tmpdir(), "stockbit-authcli-leak-"));
+  try {
+    const r = await runCli(["login"], { store });
+    assert.equal(r.code, 1, "precondition: the tripwire must make this login fail");
+    assert.match(r.stderr, /Opening a browser/, "precondition: it got past the lock and into the capture");
+    assert.equal(existsSync(join(store, "login.lock")), false, "the lock outlived the process that held it");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
 });
 
 /* ------------------------------ the wiring, by source scan ------------------------------ */

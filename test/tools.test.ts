@@ -360,6 +360,20 @@ test("every order-entry write is in the list the instructions page measures agai
  * ------------------------------------------------------------------ */
 
 const OBSERVED = [
+  // Promoted 2026-09-01 by live calls after the ~18:00 WIB broker release. Each earned it on the
+  // repo's own bar — rows came back AND every field the tool names was read out of them — not on
+  // "the route answered". See docs/PENDING-VERIFICATION.md, "Probed live on 2026-09-01".
+  //
+  // market_movers: all eight mover_type members echoed back verbatim against a control value that
+  // 400s, and every projected key read off a real mover_list row.
+  "market_movers",
+  // prices_batch: the ROUTE's behaviour was measured — every multi-symbol encoding tried and
+  // refused, and the single-symbol numeric series read off a real response. Which key a ticker
+  // sits under is still unsettled and the description says so in those words.
+  "prices_batch",
+  // calendar_today: the multi-bucket payload was captured whole, including the empty-first-bucket
+  // trap that made it report rows: [] while 19 rows sat unread.
+  "calendar_today",
   "stream_trending",
   "brokers",
   "broker_top",
@@ -473,14 +487,11 @@ const PROJECTED = [
   "ownership_composition",
   "running_trade",
   "trade_book",
-  "market_movers",
   "top_stocks",
   "order_queue",
   "market_session",
-  "prices_batch",
   "price_market",
   "broker_activity",
-  "calendar_today",
   "stock_conversion",
   "underwriters",
   "screener_run",

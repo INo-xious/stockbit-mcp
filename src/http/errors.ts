@@ -53,7 +53,24 @@ interface GatewayEnvelope {
   errors?: Array<{ key?: string; error?: string }>;
 }
 
-function kindForStatus(status: number): ErrorKind {
+/**
+ * The mapping from an HTTP status to an `ErrorKind`. One definition, and it is this one.
+ *
+ * Exported because it was private and a second copy grew: `refreshOnce` in `src/auth/session.ts`
+ * labelled every non-ok refresh response `auth` — its ternary picked the message, not the kind —
+ * so a 502 from Stockbit's refresh endpoint was indistinguishable from a revoked credential, and
+ * both `analysis/analyze.ts` and `core/company.ts` branch on `kind === "auth"`. A partial outage
+ * therefore reported itself as a dead session and offered to sign the user out of their browser to
+ * fix it. The fix is not a second table with 502 added to it; it is this one, used by both.
+ *
+ * Note what a kind does NOT say. `auth` means "the status was 401 or 403" — a refusal — and says
+ * nothing about WHICH credential was refused or whether one was even presented: `challenge` (a
+ * Cloudflare 403 that never reached Stockbit's handler) and the several `StockbitError("auth", …)`
+ * throws raised with no status at all, for a credential that is simply not stored, are both `auth`
+ * and neither came from here. A caller that needs "Stockbit refused the credential I sent" must
+ * still read `status`, which is why two guards deliberately do.
+ */
+export function kindForStatus(status: number): ErrorKind {
   if (status === 400) return "invalid_param";
   if (status === 401 || status === 403) return "auth";
   if (status === 404) return "not_found";

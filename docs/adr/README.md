@@ -19,7 +19,7 @@ unassigned rather than back-filled.
 | [0008](0008-paper-trading.md) | Paper trading: three modes, not two; the same order protocol against a local ledger | ACCEPTED 2026-08-24 |
 | [0009](0009-browser-is-the-source-of-truth.md) | The browser is the source of truth for the rotating token family; the store follows it | ACCEPTED 2026-08-26 |
 | [0010](0010-elicitation-is-decisive.md) | Elicitation is decisive: the human is asked first, and `confirm` cannot skip the ask | ACCEPTED and implemented 2026-08-28 — amends 0004, no new routes |
-| [0011](0011-automatic-login-recovery.md) | Automatic login recovery: one gated, unattended attempt to re-harvest a dead session | ACCEPTED and implemented 2026-09-01 — off by default, no new routes; first env var that RAISES a permission |
+| [0011](0011-automatic-login-recovery.md) | Automatic login recovery: one gated, unattended attempt to re-harvest a dead session | ACCEPTED and implemented 2026-09-01 — **never run against a live Stockbit session**; the gates are verified offline, the harvest end to end is Projected. Off by default, no new routes; first env var that RAISES a permission |
 
 ## Writing a new one
 

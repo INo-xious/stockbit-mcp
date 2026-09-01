@@ -1120,6 +1120,21 @@ async function attempt<T>(label: string, run: () => Promise<T>): Promise<Attempt
 function refuseEmptyReport(pillars: Pillar[], causes: unknown[]): void {
   if (pillars.some((p) => p.status !== "missing")) return;
 
+  // By KIND here, and deliberately not by status — the opposite call from the two guards in
+  // `src/auth/session.ts` and `src/tools/system.ts`, for a reason worth stating because the
+  // asymmetry looks like an oversight.
+  //
+  // Those two guards unlock DESTRUCTIVE advice ("sign your browser out of Stockbit") and must be
+  // sure a credential was judged and refused, so they demand the 401. This is a PRIORITY: several
+  // sources failed, and it picks which failure the caller is told about. The most common auth
+  // failure that reaches here carries no status at all — `No Stockbit session stored`, raised
+  // before any request is made — and narrowing to 401/403 would drop exactly the case that most
+  // needs to be surfaced, leaving the user to read "no valuation metric could be located" on a
+  // machine that has never logged in.
+  //
+  // The 5xx that used to arrive here mislabelled `auth` is handled at the source now: `refreshOnce`
+  // derives its kind from the status, so an outage falls through to the `first` branch below and is
+  // rethrown as the `upstream` error it is, rather than jumping the queue as a dead session.
   const authFailure = causes.find((c) => c instanceof StockbitError && c.kind === "auth");
   if (authFailure) throw authFailure;
 

@@ -330,7 +330,8 @@ export function registerMarketTools(define: Definer): void {
       "orderbook depth use quote or orderbook. For several symbols, call this once per symbol.\n" +
       "`missing` still does not prove a symbol has no price: it means no returned row mentioned " +
       "that ticker. Symbols are matched against the rows' own string values rather than a named " +
-      "field, because the key the ticker lives under has not been observed.",
+      "field — that ONE detail, which key the ticker sits under, is still unsettled, while the " +
+      "route's own behaviour above was measured live.",
     {
       symbols: z
         .array(z.string())

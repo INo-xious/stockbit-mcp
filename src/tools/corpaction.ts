@@ -111,8 +111,23 @@ export function registerCorpactionTools(define: Definer): void {
       "`date` alone for one specific day, or `from` and `to` together for a range. `from` without " +
       "`to` is rejected rather than sent, because a half-specified window is exactly the input this " +
       "endpoint answers with the wrong day. Mixing `date` with `from`/`to` is also rejected.\n" +
-      "An empty day is normal: weekends, holidays, and plenty of ordinary sessions have no actions. " +
-      UNVERIFIED,
+      "The response is BUCKETED, one key per action kind, and all of them are returned. Every row " +
+      "carries `corpactionType` naming the bucket it came from — added by this tool, not by " +
+      "Stockbit, and spelled exactly as the response spelled it. Two of those spellings are NOT the " +
+      "`action_type` vocabulary: the calendar says `stock_reverse` and `tender` where " +
+      "`corporate_actions` takes `reversesplit` and `tenderoffer`, and neither is translated here " +
+      "because nothing has verified they name the same thing.\n" +
+      "`buckets` lists every kind the response carried with its row count, zeros included. That is " +
+      "the difference between a kind that came back EMPTY today and one that was not in the " +
+      "response at all: the first is in `buckets` with 0, the second is missing from it. `rowsFrom` " +
+      "names the buckets that actually contributed rows (`data.{dividend,rups}`), so " +
+      "`data.{}` with a populated `buckets` is a genuinely empty day rather than an unread payload.\n" +
+      "`economic` is one of the buckets and its rows ARE in the list. An economic event is a data " +
+      "release, not a corporate action and not tied to an issuer — filter `corpactionType` on it, " +
+      "or subtract `buckets.economic`, when you need corporate actions alone.\n" +
+      "`date` is the day requested, or the `today` the response itself carried when none was sent, " +
+      "and `dateFrom` says which. Null `date` with no `dateFrom` means neither was available.\n" +
+      "An empty day is normal: weekends, holidays, and plenty of ordinary sessions have no actions.",
     {
       date: z.string().optional().describe("One day, YYYY-MM-DD. Omit for the server's today"),
       from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`"),
@@ -133,6 +148,13 @@ export function registerCorpactionTools(define: Definer): void {
           ? core.getCalendarRange({ from: a.from, to: a.to })
           : core.getCalendarDay(a.date as string | undefined);
       }),
+    // Settled by a live call on 2026-09-01: `GET /corpaction` answered from a real account, and the
+    // twelve bucket keys and the `today` string this tool names were read out of that response —
+    // which is also how the bucket shape came to light, after the reader had been binding to the
+    // empty `bonus` bucket and reporting a market-wide day of 19 actions as none. The DATED form of
+    // the same route was not measured separately, and both shapes are still read: a day that comes
+    // back as one flat list is reported with the `rowsFrom` it has always had.
+    { evidence: "observed" },
   );
 
   define.read(

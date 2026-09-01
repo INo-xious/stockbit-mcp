@@ -541,10 +541,12 @@ test("a TRANSPORT failure is never reclassified as an auth failure", async () =>
 });
 
 test("a Stockbit 5xx never triggers the destructive advice", async () => {
-  // `refreshOnce` labels EVERY non-ok status on the refresh route `auth` — its ternary picks the
-  // message, not the kind — so a 502 arrives at the escalation looking exactly like a refusal. The
-  // kind test alone therefore let a partial outage, which clears by itself, be answered with
-  // "sign your browser out of Stockbit". Only 401/403 means a credential was refused.
+  // `refreshOnce` used to label EVERY non-ok status on the refresh route `auth` — its ternary picks
+  // the message, not the kind — so a 502 arrived at the escalation looking exactly like a refusal,
+  // and the kind test alone let a partial outage, which clears by itself, be answered with "sign
+  // your browser out of Stockbit". P7g fixed the label at the source, so this now holds twice over:
+  // the kind is `upstream` AND the status is not 401. Both belts are asserted below, because the
+  // escalation must stay wrong-proof if either one is ever loosened.
   armAutoRelogin();
   process.env.STOCKBIT_AUTO_RELOGIN = "1";
   getStore("main").set(jwt(2_000_000_000, "stored"));
@@ -561,6 +563,7 @@ test("a Stockbit 5xx never triggers the destructive advice", async () => {
     );
     assert.ok(err instanceof StockbitError);
     assert.equal(err.status, 502);
+    assert.equal(err.kind, "upstream", "a 5xx on the refresh route is an outage, not a refusal");
     assert.doesNotMatch(err.message, /switch_account/, "an outage is not a reason to sign the user out");
     assert.doesNotMatch(err.message, /signs that browser profile out/i);
   } finally {

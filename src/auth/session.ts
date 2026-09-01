@@ -27,7 +27,7 @@
 import { AUTH } from "../config.js";
 import { getStore, type StoreSlot, type TokenStore } from "./store.js";
 import { acquireRefreshLock } from "./reflock.js";
-import { StockbitError } from "../http/errors.js";
+import { kindForStatus, StockbitError } from "../http/errors.js";
 import { authenticatedRequest, type RouteName, type TokenDomain } from "../http/transport.js";
 import { logStderr, redact } from "../redact.js";
 import { clearAccessCache, readAccessCache, writeAccessCache } from "./accesscache.js";
@@ -602,8 +602,16 @@ async function refreshOnce(domain: TokenDomain, attempt = 0, locked = false): Pr
     // then say "present and unexpired, but Stockbit rejected it at HH:MM" without spending anything
     // — and a revoked session becomes visible at zero requests instead of only at the next failure.
     recordRefreshFailure(spec.slot, refreshToken, res.status, `HTTP ${res.status}`);
+    // The KIND comes from the status, through the same `kindForStatus` every other HTTP failure in
+    // this project goes through. It used to be the literal `"auth"` on both branches of this
+    // ternary — the ternary picks the MESSAGE — so a 502 from the refresh endpoint was labelled a
+    // credential refusal, and two call sites that branch on `kind === "auth"` read it as one: a
+    // partial outage answered with "your session is dead, log in again", and in `analyze.ts`'s case
+    // rethrown in preference to the real cause. A refusal is 401/403 and nothing else; a 5xx is
+    // `upstream`, a 429 is `rate_limited`, and each of those already has an honest sentence
+    // elsewhere in the stack.
     throw new StockbitError(
-      "auth",
+      kindForStatus(res.status),
       res.status === 401
         ? `Refresh failed (HTTP 401) — the stored ${domain} token is no longer valid. ${spec.rejected}`
         : `Refresh failed (HTTP ${res.status}) for the ${domain} session`,
@@ -929,19 +937,19 @@ function escalate(
   if (err.kind !== "auth") return err;
 
   // And the KIND is not sufficient on its own, which is the part that is easy to miss.
-  // `refreshOnce` labels every non-ok status on the refresh route `auth` — look at its throw: the
-  // ternary chooses the MESSAGE, not the kind — so a 502 from Stockbit's refresh endpoint arrives
-  // here as an auth error. Escalating that would answer a partial outage, which clears by itself,
-  // with "sign your browser out of Stockbit".
+  //
+  // `refreshOnce` used to label every non-ok status on the refresh route `auth`, so a 502 arrived
+  // here looking exactly like a refusal; P7g made it derive the kind from the status through
+  // `kindForStatus`, so it no longer does. This guard is unchanged by that and stays, because it
+  // was never only about the 5xx: `auth` still means "401 or 403", and it is also the kind of every
+  // throw raised with NO status — a credential that is not stored at all. Neither of those is a
+  // credential Stockbit judged and refused, which is the only thing that makes the advice below
+  // true.
   //
   // 401 only, and deliberately not 403. A Cloudflare `cf-mitigated: challenge` answers 403 for a
   // request that — as `challengeError` puts it — never reached Stockbit's handler at all, so no
   // credential was judged. Since the advice this unlocks is destructive, an unobserved 403 is not
   // worth admitting on the chance that it means a refusal.
-  //
-  // (That `refreshOnce` reports a 502 as `auth` at all is a pre-existing inaccuracy — its ternary
-  // picks the message, not the kind. It was harmless while nothing branched on it, and narrowing it
-  // is not this change's to make. This guard makes the escalation independent of it either way.)
   if (err.status !== 401) return err;
 
   // Switched on the OUTCOME, never on the wording. Sniffing `detail` for a prefix would make an
