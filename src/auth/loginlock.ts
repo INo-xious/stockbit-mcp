@@ -4,8 +4,13 @@
  * Two browsers on one profile is not a slow login, it is a broken one. The documented cost, from
  * the incident that made `reap_orphans` exist: eleven orphaned browser processes, a manual `pkill`,
  * and a `SingletonLock` left in the profile that refused every later login until it was deleted by
- * hand. So every participant that can open a login window takes this lock first, and a holder is
+ * hand. So every participant that drives the SHARED profile takes this lock first, and a holder is
  * refused rather than queued.
+ *
+ * "Drives the shared profile" is the test, not "opens a browser" — `stockbit-auth doctor` opens one
+ * and is deliberately NOT a participant, because `captureSelfTest` and `harvestSelfTest` each run
+ * on their own `mkdtempSync` profile and so cannot collide with anything. Taking the lock there
+ * would refuse a real login on behalf of a self-test that could not have interfered with it.
  *
  * ## Why the rule lives here rather than at the call sites
  *

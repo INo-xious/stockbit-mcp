@@ -371,9 +371,6 @@ const OBSERVED = [
   // refused, and the single-symbol numeric series read off a real response. Which key a ticker
   // sits under is still unsettled and the description says so in those words.
   "prices_batch",
-  // calendar_today: the multi-bucket payload was captured whole, including the empty-first-bucket
-  // trap that made it report rows: [] while 19 rows sat unread.
-  "calendar_today",
   "stream_trending",
   "brokers",
   "broker_top",
@@ -492,6 +489,10 @@ const PROJECTED = [
   "market_session",
   "price_market",
   "broker_activity",
+  // Its no-argument form WAS measured live on 2026-09-01 and its bucket reader was fixed from that
+  // capture — but `date` and `from`/`to` were not, and the code keeps a flat-shape branch for them.
+  // Same grading `shareholding` got for the same reason: one settled mode is not a settled tool.
+  "calendar_today",
   "stock_conversion",
   "underwriters",
   "screener_run",

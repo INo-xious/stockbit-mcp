@@ -13,11 +13,11 @@
  * gate were deleted, `login --help` would exit 1 having done nothing — a loud test failure, and no
  * browser. (`STOCKBIT_NO_BROWSER` alone would not do: `captureViaBrowserLogin` never checks it.)
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const STORE = mkdtempSync(join(tmpdir(), "stockbit-authcli-test-"));
@@ -314,6 +314,59 @@ test("a login that FAILS still releases the lock — a leak recreates the stale 
     assert.equal(r.code, 1, "precondition: the tripwire must make this login fail");
     assert.match(r.stderr, /Opening a browser/, "precondition: it got past the lock and into the capture");
     assert.equal(existsSync(join(store, "login.lock")), false, "the lock outlived the process that held it");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
+test("Ctrl-C during a login releases the lock — an exit listener alone does NOT run on a signal", async () => {
+  // The regression this guards is specific and was nearly shipped. Node does not run `exit`
+  // listeners when a signal terminates the process by default — measured: a script that registers
+  // one and then sends itself SIGINT exits 130 without the listener printing. So releasing only
+  // from `process.once("exit", …)` leaks `login.lock` on Ctrl-C.
+  //
+  // And Ctrl-C is not an edge case for THIS command: it hands a human fifteen minutes to type into
+  // a browser window, so interrupting it is the ordinary way to change your mind. Before the CLI
+  // took a lock at all, that cost nothing. With an exit-only release it would cost twenty minutes
+  // in which every login and every unattended recovery is refused on behalf of a dead process —
+  // a REGRESSION, not a leftover risk. Taking a lock is only an improvement if releasing it is at
+  // least as reliable as never having taken it.
+  const store = mkdtempSync(join(tmpdir(), "stockbit-authcli-sigint-"));
+  try {
+    // A "browser" that exists and then blocks, so the CLI gets past `findBrowsers()`, takes the
+    // lock, and is still alive to be interrupted. The tripwire the other tests use exits at once,
+    // which is the wrong shape for this one.
+    const stub = join(store, "blocking-browser");
+    writeFileSync(stub, "#!/bin/sh\nexec sleep 120\n", { mode: 0o755 });
+
+    const child = spawn(process.execPath, ["--import", "tsx", BIN, "login"], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        STOCKBIT_NO_UPDATE_CHECK: "1",
+        STOCKBIT_FORCE_FILE_STORE: "1",
+        STOCKBIT_STORE_DIR: store,
+        STOCKBIT_BROWSER: stub,
+      },
+      stdio: "ignore",
+    });
+
+    try {
+      const lock = join(store, "login.lock");
+      // Wait for the lock to appear, so the interrupt lands while it is genuinely held rather than
+      // before it was taken — which would pass for the wrong reason.
+      const deadline = Date.now() + 30_000;
+      while (!existsSync(lock) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(existsSync(lock), "precondition: the CLI must have taken the lock before we interrupt it");
+
+      const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+      child.kill("SIGINT");
+      await exited;
+
+      assert.equal(existsSync(lock), false, "Ctrl-C left the lock behind, refusing every login for 20 minutes");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
   } finally {
     rmSync(store, { recursive: true, force: true });
   }

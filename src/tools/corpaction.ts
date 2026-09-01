@@ -126,8 +126,22 @@ export function registerCorpactionTools(define: Definer): void {
       "release, not a corporate action and not tied to an issuer — filter `corpactionType` on it, " +
       "or subtract `buckets.economic`, when you need corporate actions alone.\n" +
       "`date` is the day requested, or the `today` the response itself carried when none was sent, " +
-      "and `dateFrom` says which. Null `date` with no `dateFrom` means neither was available.\n" +
-      "An empty day is normal: weekends, holidays, and plenty of ordinary sessions have no actions.",
+      "and `dateFrom` says which. Null `date` with no `dateFrom` means no usable day was available " +
+      "— either none was sent and the response carried none, or it carried one this server would " +
+      "not parse, in which case the raw value is still in `meta.today`. Check there before " +
+      "concluding the server said nothing about the date.\n" +
+      "BEFORE REPORTING AN EMPTY DAY, CHECK WHICH KIND OF EMPTY IT IS. `rowsFrom: \"absent\"` or " +
+      "`\"unrecognized\"` with `rows: []` and NO `buckets` key means the payload was NOT PARSED — " +
+      "not that nothing is happening. Only `rows: []` alongside a populated `buckets` (every kind " +
+      "listed, all zero) is a genuinely quiet day. Reporting the first as the second is the exact " +
+      "defect this tool was fixed for: it reported a market-wide day of 19 corporate actions as " +
+      "none, because it bound to an empty bucket and never said it had failed to read the rest.\n" +
+      "The bucketed shape above was read off ONE live call, and that call sent no arguments. The " +
+      "`date` and `from`/`to` forms have not been measured, so if a dated call comes back as a " +
+      "flat list you will get rows with no `corpactionType` and no `buckets` — read `rowsFrom` " +
+      "rather than assuming the bucketed shape.\n" +
+      "An empty day is otherwise normal: weekends, holidays, and plenty of ordinary sessions have " +
+      "no actions.",
     {
       date: z.string().optional().describe("One day, YYYY-MM-DD. Omit for the server's today"),
       from: z.string().optional().describe("Range start, YYYY-MM-DD. Requires `to`"),
@@ -148,13 +162,25 @@ export function registerCorpactionTools(define: Definer): void {
           ? core.getCalendarRange({ from: a.from, to: a.to })
           : core.getCalendarDay(a.date as string | undefined);
       }),
-    // Settled by a live call on 2026-09-01: `GET /corpaction` answered from a real account, and the
-    // twelve bucket keys and the `today` string this tool names were read out of that response —
-    // which is also how the bucket shape came to light, after the reader had been binding to the
-    // empty `bonus` bucket and reporting a market-wide day of 19 actions as none. The DATED form of
-    // the same route was not measured separately, and both shapes are still read: a day that comes
-    // back as one flat list is reported with the `rowsFrom` it has always had.
-    { evidence: "observed" },
+    // PROJECTED, deliberately, and it was `observed` for a few hours before this comment replaced
+    // that claim.
+    //
+    // What WAS measured, live on 2026-09-01: `GET /corpaction` with NO arguments answered from a
+    // real account, and the twelve bucket keys and the `today` string this tool names were read out
+    // of that response. That call is also what exposed the defect — the reader had been binding to
+    // the empty `bonus` bucket and reporting a market-wide day of 19 actions as none.
+    //
+    // What was NOT measured is the rest of this tool's surface: `date`, and `from`/`to`, which
+    // `getCalendarRange` issues as one DATED request per day. Whether the dated form also returns
+    // buckets is unknown, and the code keeps a flat-shape branch whose output has neither
+    // `corpactionType` nor `buckets`.
+    //
+    // This repo has already settled how to grade that. `shareholding` was fixed and verified on one
+    // mode and STAYED `projected` because its other three were unprobed — `docs/PENDING-
+    // VERIFICATION.md` says so in as many words. One call form out of three is the same situation,
+    // and `observed` here would tell a caller the shape was seen live for a request nobody has
+    // sent. One live `GET /corpaction?date=<a past trading day>` settles it.
+    { evidence: "projected" },
   );
 
   define.read(

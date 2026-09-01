@@ -166,8 +166,26 @@ async function cmdImportHar(argv: string[]): Promise<void> {
  * automatic recovery is refused by a process that is no longer running.
  *
  * `process.exit` DOES emit `exit`, and `DirLockRelease` is synchronous and idempotent — which is
- * the whole reason it can be an exit listener at all. A signal that kills the process outright
- * still leaks, and that is the case `LOGIN_LOCK_STALE_MS` is for.
+ * the whole reason it can be an exit listener at all.
+ *
+ * ## Why SIGINT and SIGTERM are handled too, and why that is not belt-and-braces
+ *
+ * Node does **not** run `exit` listeners when a signal terminates the process by default — measured,
+ * not assumed: a script that registers one and then `process.kill(process.pid, "SIGINT")` exits 130
+ * without printing from the listener. So an `exit` listener alone would leak the lock on **Ctrl-C**,
+ * and Ctrl-C is not an edge case here — this command gives a human fifteen minutes to type into a
+ * browser window, so interrupting it is the ordinary way to change your mind.
+ *
+ * That would have been a REGRESSION rather than a leftover risk. Before the lock existed here, a
+ * Ctrl-C during a CLI login cost nothing; with an `exit`-only release it would cost twenty minutes
+ * in which every login — this CLI, the MCP tool, and every unattended recovery — is refused by a
+ * process that is no longer running. Taking a lock is only an improvement if releasing it is at
+ * least as reliable as not having taken it.
+ *
+ * The handlers release and then re-raise with the default disposition, so the exit STATUS a caller
+ * sees is still the signal's (130 for SIGINT), not a `process.exit(0)` that would tell a script the
+ * login succeeded. `kill -9` still leaks, and that is the case `LOGIN_LOCK_STALE_MS` is genuinely
+ * for.
  *
  * Held for the rest of the command rather than just the capture, deliberately: a CLI login IS the
  * command, and the proof step that follows it rotates the credential the profile is holding.
@@ -183,6 +201,16 @@ async function holdLoginLock(): Promise<void> {
     process.exit(1);
   }
   process.once("exit", release);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      release();
+      // Restore the default disposition and re-raise, so the process dies of the signal it was
+      // sent and reports the status that goes with it. `process.exit(0)` here would tell a calling
+      // script that an interrupted login had succeeded.
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
 }
 
 async function cmdLogin(argv: string[]): Promise<void> {

@@ -154,7 +154,7 @@ Dividends, splits, rights, the corporate calendar.
 |---|---|---|---|---|
 | `corporate_actions` | read | Corporate actions of ONE kind: dividends, rights issues, RUPS (shareholder meetings), bonus shares, splits, reverse splits, tender offers, warrants, public exp… | Observed | action_type*, symbol, limit |
 | `dividend_calendar` | read | Cash dividends AND stock dividends in one list, newest ex-date first. | Observed | symbol, limit |
-| `calendar_today` | read | Every corporate action happening across the whole market on ONE date, or day by day over a short range. | Observed | date, from, to |
+| `calendar_today` | read | Every corporate action happening across the whole market on ONE date, or day by day over a short range. | Projected | date, from, to |
 | `corporate_action_status` | read | UMA (unusual market activity) and IDX special-notation status for several symbols in ONE request. | Observed | symbols* |
 | `stock_conversion` | read | Warrant and rights conversion records for one issuer: the exercises that turned derivative instruments into ordinary shares, which is share-count dilution that… | Projected | symbol*, page, limit |
 | `ipo_pipeline` | read | Upcoming and recent IPOs, with whatever offering terms the row carries. | Observed | limit |

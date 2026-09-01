@@ -1053,20 +1053,35 @@ test("bandar: unreadable rows are left out of the totals, not counted as zero", 
 
 /* ------------------------------ the tool surface ------------------------------ */
 
-/** A Definer that records instead of registering, so the tool layer can be driven directly. */
-function fakeDefiner(): { definer: Definer; reads: Map<string, ToolHandler>; writes: string[] } {
+/**
+ * A Definer that records instead of registering, so the tool layer can be driven directly.
+ *
+ * `shapes` is recorded as well as `reads`, and that is not incidental. Driving only the handler
+ * proves what the CORE does with an argument, never that the argument is in the tool's schema at
+ * all — and the SDK strips anything the schema does not declare before a handler ever sees it. A
+ * test that calls `handler({period})` on a tool whose shape has no `period` passes while the real
+ * server silently drops the field, which is the precise failure `broker_activity` is here to avoid.
+ */
+function fakeDefiner(): {
+  definer: Definer;
+  reads: Map<string, ToolHandler>;
+  shapes: Map<string, Record<string, unknown>>;
+  writes: string[];
+} {
   const reads = new Map<string, ToolHandler>();
+  const shapes = new Map<string, Record<string, unknown>>();
   const writes: string[] = [];
   const definer: Definer = {
-    read: (name, _description, _shape, handler) => {
+    read: (name, _description, shape, handler) => {
       reads.set(name, handler);
+      shapes.set(name, (shape ?? {}) as Record<string, unknown>);
     },
     write: (name) => {
       writes.push(name);
     },
     writeNames: () => [...writes],
   };
-  return { definer, reads, writes };
+  return { definer, reads, shapes, writes };
 }
 
 test("tools: four reads, no writes, and the arguments the model sends reach the wire", async () => {
@@ -1104,8 +1119,18 @@ test("tools: four reads, no writes, and the arguments the model sends reach the 
 });
 
 test("tools: broker_activity still ACCEPTS `period` in its schema, so it can refuse it out loud", async () => {
-  const { definer, reads } = fakeDefiner();
+  const { definer, reads, shapes } = fakeDefiner();
   registerBrokerTools(definer);
+
+  // The half this test used to leave unproven. Driving the handler shows the core refuses `period`;
+  // it says nothing about whether the SCHEMA declares it, and the SDK strips undeclared keys before
+  // a handler runs. Without this assertion the whole test passes against a tool that dropped
+  // `period` from its shape — which is the silent narrowing it exists to prevent, not a variant of
+  // it.
+  assert.ok(
+    Object.keys(shapes.get("broker_activity") ?? {}).includes("period"),
+    "period must stay in the schema: a stripped key is refused by nobody and reported to no one",
+  );
 
   // Deliberate: dropping `period` from the shape would have the SDK strip it, and the model would
   // read rows for a window it asked to change without ever learning the ask went nowhere. It

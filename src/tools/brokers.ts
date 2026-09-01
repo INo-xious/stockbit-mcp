@@ -169,9 +169,13 @@ export function registerBrokerTools(define: Definer): void {
       "Each entry carries `code`, `name`, `investorType` and `group` as sent, the figures " +
       "`totalValue`, `netValue`, `buyValue`, `sellValue`, `totalVolume` and `totalFrequency` as " +
       "numbers, `readFrom` naming the wire key each was read from, and the whole raw row under " +
-      "`row`. Values are IDR and volumes are LOTS, as everywhere in this family. A figure that was " +
-      "not sent, or that this server would not parse, is ABSENT together with its `readFrom` " +
-      "entry — never zero.\n" +
+      "`row`. UNITS ARE NOT ESTABLISHED FOR THIS ROUTE. The value figures are consistent with " +
+      "rupiah by their magnitude (the largest broker on the 2026-09-01 reading was 5,636,360,451,396), " +
+      "but `totalVolume`'s unit was never sampled and nothing here has confirmed whether it is lots " +
+      "or shares. Elsewhere in this API that distinction is a factor of 100 and it is genuinely " +
+      "mixed — `orderbook.volume` is SHARES while `technicals.volumeLots` is LOTS — so do not " +
+      "assume this one matches either without checking. A figure that was not sent, or that this " +
+      "server would not parse, is ABSENT together with its `readFrom` entry — never zero.\n" +
       "`date` carries the session the table covers (`from`, `to`, `idx`) when the response " +
       "volunteered it, which is the only thing dating these figures.\n" +
       "`rowsFrom: null` with `count: 0` means no array was found in the response, not an empty " +

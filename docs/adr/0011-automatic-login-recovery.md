@@ -70,7 +70,7 @@ Five conditions, each closing a different way of doing harm. All five, every tim
 | `STOCKBIT_AUTO_RELOGIN` is set, parsed truthily | A window nobody opted into |
 | `STOCKBIT_NO_BROWSER` is not set | The existing no-browser contract |
 | `webSessionHealth().likelyValid` is **true** | Spending a rotation on a session already dead |
-| `login.lock` is free — taken with `timeoutMs: 0`, never queued | Two windows driving one browser profile (every participant that can open one takes it: the `login` tool, this, and `stockbit-auth login` / `trading-login --browser`) |
+| `login.lock` is free — taken with `timeoutMs: 0`, never queued | Two windows driving one browser profile. Every participant that drives the SHARED profile takes it: the `login` tool, this, and `stockbit-auth login` / `trading-login --browser`. `doctor` opens a browser and is deliberately not one — its self-tests run on their own throwaway profiles and cannot collide |
 
 Plus: `main` only, and one attempt per process.
 
