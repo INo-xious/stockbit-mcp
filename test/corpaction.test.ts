@@ -583,6 +583,20 @@ test("a calendar bucket spelling is accepted where a path kind is wanted", async
   assert.equal(resolveCorpactionType("tenderoffer"), "tenderoffer", "the path spelling is not rewritten");
 });
 
+test("the alias lookup returns strings for inherited property names, not Object.prototype members", () => {
+  // A plain object inherits from `Object.prototype`, so a bare `ALIASES[value]` answers
+  // `"constructor"` with a FUNCTION and `"__proto__"` with an object — neither of which is the
+  // `string` the signature promises. Nothing reaches this with such a value today, because the tool
+  // schema is a zod enum and the transport validates the path segment. It is asserted anyway
+  // because `fdb530f` fixed exactly this shape on the coordinate aliases, and without a test a
+  // revert to the bare lookup fails nothing.
+  for (const name of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+    const out = resolveCorpactionType(name);
+    assert.equal(typeof out, "string", `${name} must come back as a string`);
+    assert.equal(out, name, `${name} is not an alias, so it passes through unchanged`);
+  }
+});
+
 /* -------------------------------- day calendar -------------------------------- */
 
 test("the day calendar with no date sends no parameters at all", async () => {

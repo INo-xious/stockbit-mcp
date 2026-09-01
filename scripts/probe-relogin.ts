@@ -62,6 +62,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -160,24 +161,41 @@ function describe(): void {
 }
 
 /**
+ * Entries not worth copying: the Chromium profile is several hundred megabytes and nothing in this
+ * experiment touches it. Matched as whole NAMES at the top level, never as a substring of a path —
+ * `src.includes("browser-profile")` also excluded `browser-profile.json` (the profile pin), and
+ * would have excluded the store ROOT if its own path happened to contain that string, in which case
+ * `cpSync` copies nothing and does not throw.
+ */
+const SKIP_FROM_BACKUP = new Set(["browser-profile"]);
+
+/**
  * Copy the store aside.
  *
- * Two things it deliberately does not do. It does not copy `browser-profile`, which is a Chromium
- * profile of several hundred megabytes that no part of this experiment touches — copying it on
- * every run is how a debugging aid quietly fills a disk. And it does not inherit the umask:
- * `cpSync` preserves file modes but NOT directory modes, so a 0700 store would land as a 0755
- * directory in `$HOME`. The secrets inside are 0600 either way; the metadata beside them is not.
+ * Skipping anything makes this a PARTIAL backup, which is only safe because `restore` merges what
+ * was skipped back out of the copy it sets aside. If that pairing is ever broken, back up
+ * everything instead — a restore that silently drops the logged-in browser profile costs a full
+ * interactive re-login, which is the harm this whole script exists to avoid.
+ *
+ * It also does not inherit the umask: `cpSync` preserves file modes but NOT directory modes, so a
+ * 0700 store would land as a 0755 directory in `$HOME`.
  */
 function backup(): string {
   const dir = fileDir();
   const dest = join(dir, "..", `${BACKUP_PREFIX}${new Date().toISOString().replace(/[:.]/g, "-")}`);
   mkdirSync(dest, { recursive: true, mode: 0o700 });
-  cpSync(dir, dest, {
-    recursive: true,
-    filter: (src) => !src.includes("browser-profile"),
-  });
+
+  const entries = readdirSync(dir).filter((name) => !SKIP_FROM_BACKUP.has(name));
+  for (const name of entries) cpSync(join(dir, name), join(dest, name), { recursive: true });
+
+  // A backup that copied nothing is not a backup, and `cpSync` reports that case by succeeding.
+  if (readdirSync(dest).length === 0) {
+    fail(`Backup of ${dir} produced an empty directory at ${dest}. Refusing to go further.`);
+  }
+
   chmodSync(dest, 0o700);
-  writeFileSync(join(dest, MARKER), `${new Date().toISOString()}\n`, { mode: 0o600 });
+  // The source is stamped so an explicit `restore` cannot be pointed at a backup of another store.
+  writeFileSync(join(dest, MARKER), `${new Date().toISOString()}\n${dir}\n`, { mode: 0o600 });
   return dest;
 }
 
@@ -290,20 +308,57 @@ function restore(from?: string): void {
   // — already moved aside — is deleted as cleanup. Verified: it turned the store into a 13-byte
   // text file and exited 0. So the source must be a directory, and one this script wrote.
   if (!statSync(source).isDirectory()) fail(`Not a directory, so not a backup: ${source}`);
-  if (!existsSync(join(source, MARKER))) {
+  const markerPath = join(source, MARKER);
+  if (!existsSync(markerPath)) {
     fail(`No ${MARKER} in ${source}. Refusing to overwrite the store with a directory this script did not write.`);
   }
 
   const dir = fileDir();
+  // The marker records which store it came from. A marked backup of a DIFFERENT store is still not
+  // a backup of this one, and only the explicit `restore <path>` form can reach one.
+  const origin = readFileSync(markerPath, "utf8").split("\n")[1]?.trim();
+  if (origin && origin !== dir) {
+    fail(`That backup was taken from ${origin}, not ${dir}. Refusing to restore it over a different store.`);
+  }
+
   const aside = `${dir}.replaced-${Date.now()}`;
   const hadOne = existsSync(dir);
   if (hadOne) renameSync(dir, aside);
   try {
     cpSync(source, dir, { recursive: true });
+
+    // Merge back whatever the backup deliberately skipped. Without this the restore is LOSSY:
+    // `browser-profile` is the logged-in Chromium profile, and losing it costs a full interactive
+    // re-login — the exact harm this script exists to avoid, and a regression this file shipped
+    // once already. Anything present in the replaced store and absent from the backup is carried
+    // across rather than discarded.
+    if (hadOne) {
+      for (const name of readdirSync(aside)) {
+        if (!existsSync(join(dir, name))) cpSync(join(aside, name), join(dir, name), { recursive: true });
+      }
+    }
   } catch (err) {
-    if (hadOne) renameSync(aside, dir);
-    fail(`Restore failed, and the previous store was put back: ${String(err)}`);
+    // The recovery must not throw on its own. `renameSync` onto a non-empty directory raises
+    // ENOTEMPTY, which would replace this explanation with a raw stack and leave the real store
+    // under a `.replaced-*` name nothing had printed.
+    if (hadOne) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        renameSync(aside, dir);
+        fail(`Restore failed, and the previous store was put back: ${String(err)}`);
+      } catch (recoveryErr) {
+        fail(
+          `Restore failed (${String(err)}) AND putting the previous store back failed ` +
+            `(${String(recoveryErr)}). Your previous store is at ${aside} — move it to ${dir} by hand.`,
+        );
+      }
+    }
+    fail(`Restore failed: ${String(err)}`);
   }
+
+  // Not litter in the credential store — and it would otherwise make the store itself satisfy the
+  // marker check that exists to tell a backup from anything else.
+  rmSync(join(dir, MARKER), { force: true });
   if (hadOne) rmSync(aside, { recursive: true, force: true });
 
   process.stdout.write(`Restored ${source} -> ${dir}\n\nState now:\n`);
