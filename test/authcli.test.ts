@@ -319,7 +319,27 @@ test("a login that FAILS still releases the lock — a leak recreates the stale 
   }
 });
 
-test("Ctrl-C during a login releases the lock — an exit listener alone does NOT run on a signal", async () => {
+test(
+  "Ctrl-C during a login releases the lock — an exit listener alone does NOT run on a signal",
+  {
+    // Not a caveat on the FIX — a real console Ctrl-C on Windows does deliver SIGINT and does run
+    // the handler, so the lock is released there too. What Windows lacks is the way this test
+    // SIMULATES it: `child.kill("SIGINT")` terminates the process outright rather than delivering a
+    // signal, so the handler never gets its chance and the assertion would fail for a reason that
+    // says nothing about the behaviour under test.
+    //
+    // SIGTERM is separately a no-op on Windows — node cannot listen for it — which the handler
+    // registration tolerates and nothing here can improve.
+    //
+    // Options go BEFORE the function: `test(name, options, fn)`. Passing them after the callback
+    // parses fine and is silently ignored, which is how the first attempt at this skip shipped a
+    // Windows failure that looked exactly like the bug it was meant to document.
+    skip:
+      process.platform === "win32"
+        ? "child.kill('SIGINT') on Windows terminates without delivering the signal, so Ctrl-C cannot be simulated"
+        : false,
+  },
+  async () => {
   // The regression this guards is specific and was nearly shipped. Node does not run `exit`
   // listeners when a signal terminates the process by default — measured: a script that registers
   // one and then sends itself SIGINT exits 130 without the listener printing. So releasing only
@@ -348,15 +368,36 @@ test("Ctrl-C during a login releases the lock — an exit listener alone does NO
         STOCKBIT_STORE_DIR: store,
         STOCKBIT_BROWSER: stub,
       },
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
     });
 
     try {
       const lock = join(store, "login.lock");
-      // Wait for the lock to appear, so the interrupt lands while it is genuinely held rather than
-      // before it was taken — which would pass for the wrong reason.
-      const deadline = Date.now() + 30_000;
-      while (!existsSync(lock) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      // Synchronise on the child's OWN output, not on the lock file appearing.
+      //
+      // `holdLoginLock` creates the lock directory inside `acquireLoginLock()` and registers the
+      // signal handlers a few statements later, so "the lock exists" is true slightly BEFORE the
+      // handlers are installed. Polling for the file and firing immediately raced that window —
+      // fine when this file runs alone, and a real failure under the loaded machine of a full suite
+      // run, which is exactly the kind of flake that gets muted rather than fixed.
+      //
+      // "Opening a browser…" is `cmdLogin`'s first line and it prints only AFTER `holdLoginLock`
+      // has returned, so it is proof the handlers are in place. Deterministic, not a sleep.
+      let seen = "";
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`child never opened a browser; saw: ${seen}`)), 60_000);
+        child.stderr?.on("data", (c) => {
+          seen += String(c);
+          if (seen.includes("Opening a browser")) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.once("exit", () => {
+          clearTimeout(timer);
+          reject(new Error(`child exited before opening a browser; saw: ${seen}`));
+        });
+      });
       assert.ok(existsSync(lock), "precondition: the CLI must have taken the lock before we interrupt it");
 
       const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
@@ -370,21 +411,7 @@ test("Ctrl-C during a login releases the lock — an exit listener alone does NO
   } finally {
     rmSync(store, { recursive: true, force: true });
   }
-},
-  {
-    // Not a platform caveat on the FIX — a real console Ctrl-C on Windows does deliver SIGINT and
-    // does run the handler, so the lock is released there too. What Windows lacks is the way this
-    // test SIMULATES it: `child.kill("SIGINT")` terminates the process outright rather than
-    // delivering a signal, so the handler never gets the chance and the assertion fails for a
-    // reason that says nothing about the behaviour under test.
-    //
-    // SIGTERM is separately a no-op on Windows — node cannot listen for it — which the handler
-    // registration tolerates and nothing here can improve.
-    skip:
-      process.platform === "win32"
-        ? "child.kill('SIGINT') on Windows terminates without delivering the signal, so Ctrl-C cannot be simulated"
-        : false,
-  });
+});
 
 /* ------------------------------ the wiring, by source scan ------------------------------ */
 
