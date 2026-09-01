@@ -37,7 +37,7 @@ import { getJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
-import { normalizeDateRange, type DateRange, type DateRangeInput } from "./dates.js";
+import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput } from "./dates.js";
 import { wibTodayIso } from "./sessionclock.js";
 import {
   getBrokerSummary,
@@ -953,21 +953,37 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
   const params = buildActivityParams(opts);
   const request = sent(params);
 
-  return cached(`brokers:activity:${JSON.stringify(request)}`, CACHE.brokerSummaryTtlMs, async () => {
+  // A window that ended before today can never change, so it caches the way `broker_summary`'s
+  // does. This only became available when the route gained `from`/`to`: with a server-chosen
+  // window there was no range to settle, and everything took the 60 s TTL.
+  const from = typeof params.from === "string" ? params.from : undefined;
+  const to = typeof params.to === "string" ? params.to : undefined;
+  const ttl =
+    from !== undefined && to !== undefined && isSettledRange({ from, to })
+      ? CACHE.brokerSummarySettledTtlMs
+      : CACHE.brokerSummaryTtlMs;
+
+  return cached(`brokers:activity:${JSON.stringify(request)}`, ttl, async () => {
     const body = await getJson("brokerActivity", { params });
-    const generic = readRows(body, "broker activity");
-    const { dataKeys, dataObject } = generic;
-    // The two-sided reader first, the generic one behind it — the same order `bucketsOf` takes
-    // ahead of `rowsOf` on the day calendar, and for the same reason: a shape this one does not
-    // recognise must still be read honestly rather than dropped.
+    // The two-sided reader FIRST, and the generic one only if it declines — the order `bucketsOf`
+    // takes ahead of `rowsOf` on the day calendar, and the order this comment claimed while the
+    // code did the opposite. `readRows` ran unconditionally, and it throws on any top-level array
+    // of non-objects beside the container: a `warnings: ["stale"]` key would abort a response the
+    // two-sided reader parses correctly. Only `dataKeys` was ever needed from it here, and that is
+    // read off the envelope directly.
+    const { data } = parseOr(Envelope, body, "broker activity");
+    const dataObject = isRecordLike(data) ? (data as Row) : null;
+    const dataKeys = dataObject ? Object.keys(dataObject) : [];
+
     const sided = activityRows(dataObject);
-    const rows = sided ? sided.rows.map((r) => r.row) : generic.rows;
-    const from = sided ? sided.from : generic.from;
+    const generic = sided ? null : readRows(body, "broker activity");
+    const rows = sided ? sided.rows.map((r) => r.row) : (generic?.rows ?? []);
+    const from = sided ? sided.from : (generic?.from ?? null);
 
     // An unrecognised shape still yields rows, but their side is unknowable — so it is left absent
     // rather than defaulted to one of the two answers.
     const pairs: Array<{ row: Row; side?: BrokerActivitySide }> =
-      sided?.rows ?? generic.rows.map((row) => ({ row }));
+      sided?.rows ?? rows.map((row) => ({ row }));
 
     const mapped: BrokerActivityRow[] = pairs.map(({ row, side }) => {
       const symbol = pick(row, SYMBOL_KEYS, isSymbolish);

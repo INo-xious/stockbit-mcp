@@ -818,6 +818,27 @@ test("activity: an unrecognised payload still reads honestly rather than throwin
   assert.equal(buyOnly.rows[0].side, "buy");
 });
 
+test("activity: an unrelated array beside the container does not abort the read", async () => {
+  // The two-sided reader runs FIRST and the generic one only if it declines. It used to run
+  // unconditionally, and it throws on any top-level array of non-objects in `data` — so a
+  // `warnings: ["stale"]` key beside the container aborted a response the two-sided reader parses
+  // perfectly. Only `dataKeys` was ever wanted from it here.
+  activityBody = {
+    data: {
+      broker_activity_transaction: { brokers_buy: [{ stock_code: "BBRI", value: 1 }] },
+      warnings: ["stale"],
+      from: "2026-09-01",
+      to: "2026-09-01",
+    },
+  };
+  const activity = await getBrokerActivity({ brokerCode: "YP" });
+
+  assert.equal(activity.count, 1);
+  assert.equal(activity.rowsFrom, "data.broker_activity_transaction.{brokers_buy}");
+  assert.equal(activity.rows[0].symbol, "BBRI");
+  assert.ok(activity.dataKeys.includes("warnings"), "dataKeys still describes the whole envelope");
+});
+
 test("activity: a container this module does not know still contributes its rows", async () => {
   // The reader is STRUCTURAL, like `bucketsOf`. Recognising a name is how the SIDE is known, not how
   // the ROWS are found — so a renamed half, or a third one, is read rather than dropped. Filtering

@@ -70,7 +70,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileDir, getStore } from "../src/auth/store.js";
 import { accessCachePath } from "../src/auth/accesscache.js";
 import {
@@ -321,20 +321,30 @@ function restore(from?: string): void {
     fail(`That backup was taken from ${origin}, not ${dir}. Refusing to restore it over a different store.`);
   }
 
-  const aside = `${dir}.replaced-${Date.now()}`;
+  // `resolve` strips a trailing slash. Without it, a STOCKBIT_STORE_DIR ending in `/` makes this
+  // concatenation land INSIDE the store, and `renameSync` fails EINVAL with a raw stack — at the
+  // one moment the user needs this tool, while they are sitting in the deliberately broken state.
+  const aside = `${resolve(dir)}.replaced-${Date.now()}`;
   const hadOne = existsSync(dir);
   if (hadOne) renameSync(dir, aside);
   try {
     cpSync(source, dir, { recursive: true });
 
-    // Merge back whatever the backup deliberately skipped. Without this the restore is LOSSY:
+    // Merge back exactly what the backup deliberately skipped. Without this the restore is LOSSY:
     // `browser-profile` is the logged-in Chromium profile, and losing it costs a full interactive
-    // re-login — the exact harm this script exists to avoid, and a regression this file shipped
-    // once already. Anything present in the replaced store and absent from the backup is carried
-    // across rather than discarded.
+    // re-login — the harm this script exists to avoid, and a regression this file shipped once
+    // already.
+    //
+    // SKIPPED, not "anything missing". Carrying back every absent name would also resurrect files
+    // created after the backup was taken — including the access cache `stage` deletes on purpose,
+    // which the probe run then rewrites. Restoring a file the staging step removed is not a
+    // restore.
     if (hadOne) {
-      for (const name of readdirSync(aside)) {
-        if (!existsSync(join(dir, name))) cpSync(join(aside, name), join(dir, name), { recursive: true });
+      for (const name of SKIP_FROM_BACKUP) {
+        const kept = join(aside, name);
+        if (existsSync(kept) && !existsSync(join(dir, name))) {
+          cpSync(kept, join(dir, name), { recursive: true });
+        }
       }
     }
   } catch (err) {
