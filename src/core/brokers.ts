@@ -577,11 +577,14 @@ function normalizeCodeFilter(input: unknown): string[] {
 
 /* --------------------------------- activity --------------------------------- */
 
-/** The two sides of `broker_activity_transaction`, in the order they are reported. */
-const ACTIVITY_SIDES = [
-  ["brokers_buy", "buy"],
-  ["brokers_sell", "sell"],
-] as const;
+/**
+ * Which container name means which side. Recognising a name is how the SIDE is known; it is not how
+ * the ROWS are found — see `activityRows`, which finds them structurally.
+ */
+const ACTIVITY_SIDE_KEYS: Readonly<Record<string, BrokerActivitySide>> = {
+  brokers_buy: "buy",
+  brokers_sell: "sell",
+};
 
 /**
  * The rows of a broker-activity response, from BOTH sides.
@@ -608,22 +611,34 @@ const ACTIVITY_SIDES = [
  * Returns `null` when the payload is not this shape, so the caller can fall back to `readRows` and
  * an unrecognised response still reports honestly rather than throwing.
  */
-function activityRows(data: unknown): { rows: Array<{ row: Row; side: BrokerActivitySide }>; from: string } | null {
+function activityRows(
+  data: unknown,
+): { rows: Array<{ row: Row; side?: BrokerActivitySide }>; from: string } | null {
   if (!isRecordLike(data)) return null;
   const container = (data as Row).broker_activity_transaction;
   if (!isRecordLike(container)) return null;
 
-  const present = ACTIVITY_SIDES.filter(([key]) => Array.isArray((container as Row)[key]));
+  // STRUCTURAL, like `bucketsOf`: every array-of-records inside the container contributes its rows,
+  // whether or not this module knows the name. Filtering to the two names it does know would make a
+  // renamed half — or a third one — vanish with no signal at all, since `dataKeys` lists `data`'s
+  // top-level keys and would still show only the container. That silent under-count is the exact
+  // defect this route was just fixed for, and hard-coding the names would reintroduce it one level
+  // down.
+  const present = Object.entries(container as Row).filter(
+    (entry): entry is [string, Row[]] => Array.isArray(entry[1]) && entry[1].every((v) => isRecordLike(v)),
+  );
   if (present.length === 0) return null;
 
-  const rows: Array<{ row: Row; side: BrokerActivitySide }> = [];
-  for (const [key, side] of present) {
-    for (const row of parseOr(RowArray, (container as Row)[key], `broker activity ${side} rows`)) {
-      rows.push({ row, side });
+  const rows: Array<{ row: Row; side?: BrokerActivitySide }> = [];
+  for (const [key, value] of present) {
+    // A name this module does not know yields rows with NO side, rather than a guessed one.
+    const side = Object.hasOwn(ACTIVITY_SIDE_KEYS, key) ? ACTIVITY_SIDE_KEYS[key] : undefined;
+    for (const row of parseOr(RowArray, value, `broker activity ${key} rows`)) {
+      rows.push(side === undefined ? { row } : { row, side });
     }
   }
-  // Names both halves even when one is empty, so "this broker only bought" is distinguishable from
-  // "the sell half was not in the payload".
+  // Names every container that contributed, even an empty one, so "this broker only bought" is
+  // distinguishable from "the sell half was not in the payload".
   return { rows, from: `data.broker_activity_transaction.{${present.map(([key]) => key).join(",")}}` };
 }
 

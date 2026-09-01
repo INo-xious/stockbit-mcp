@@ -818,6 +818,31 @@ test("activity: an unrecognised payload still reads honestly rather than throwin
   assert.equal(buyOnly.rows[0].side, "buy");
 });
 
+test("activity: a container this module does not know still contributes its rows", async () => {
+  // The reader is STRUCTURAL, like `bucketsOf`. Recognising a name is how the SIDE is known, not how
+  // the ROWS are found — so a renamed half, or a third one, is read rather than dropped. Filtering
+  // to the two known names would make it vanish with no signal, because `dataKeys` lists `data`'s
+  // top-level keys and would still show nothing but the container.
+  activityBody = {
+    data: {
+      broker_activity_transaction: {
+        brokers_buy: [{ stock_code: "AAAA", value: 1 }],
+        brokers_net: [{ stock_code: "BBBB", value: 2 }],
+      },
+      from: "2026-09-01",
+      to: "2026-09-01",
+    },
+  };
+  const activity = await getBrokerActivity({ brokerCode: "YP" });
+
+  assert.equal(activity.count, 2, "the unknown container's rows must not be dropped");
+  assert.equal(activity.rowsFrom, "data.broker_activity_transaction.{brokers_buy,brokers_net}");
+  assert.equal(activity.rows[0].side, "buy");
+  // Known name -> known side. Unknown name -> NO side, rather than a guess at one.
+  assert.equal("side" in activity.rows[1], false, "an unrecognised container gives no side");
+  assert.equal(activity.rows[1].symbol, "BBBB");
+});
+
 test("activity: a null data block is an empty result, and says it found no array", async () => {
   activityBody = { data: null };
   const activity = await getBrokerActivity({ brokerCode: "ZZ" });

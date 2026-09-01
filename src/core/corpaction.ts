@@ -182,9 +182,17 @@ const CALENDAR_TYPE_ALIASES: Readonly<Record<string, CorpactionType>> = {
   stock_reverse: "reversesplit",
 };
 
-/** Accept a calendar bucket key where a path kind is wanted. Anything else passes through. */
+/**
+ * Accept a calendar bucket key where a path kind is wanted. Anything else passes through.
+ *
+ * `hasOwn`, not a bare lookup: a plain object inherits from `Object.prototype`, so
+ * `ALIASES["constructor"]` is a FUNCTION and `ALIASES["__proto__"]` is an object, neither of which
+ * is the `string` this returns. Nothing reaches here with such a value today — the tool schema is a
+ * zod enum and the transport validates the path segment — but this is the same defect `fdb530f`
+ * fixed on the coordinate aliases, and it is cheaper to not reintroduce it than to re-find it.
+ */
 export function resolveCorpactionType(value: string): string {
-  return CALENDAR_TYPE_ALIASES[value] ?? value;
+  return Object.hasOwn(CALENDAR_TYPE_ALIASES, value) ? CALENDAR_TYPE_ALIASES[value] : value;
 }
 
 /** The alias spellings, for the tool schema that has to accept them. */

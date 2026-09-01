@@ -39,8 +39,14 @@
  *     node --import tsx scripts/probe-relogin.ts stage
  *     node --import tsx scripts/probe-relogin.ts restore [<backup dir>]
  *
- * `inspect` changes nothing. `stage` takes a full backup of the store directory FIRST and prints
- * where it went. `restore` puts the most recent backup back, or one you name.
+ * `inspect` changes nothing. `stage` backs the store directory up FIRST and prints where it went.
+ * `restore` puts the most recent backup back, or one you name.
+ *
+ * **`stage` refuses unless the main credential is file-backed**, and that refusal is load-bearing
+ * rather than fussiness. On default macOS the credential lives in the Keychain, which is not inside
+ * the directory being copied — so overwriting it would destroy the real refresh token with nothing
+ * to restore from, while `restore` printed "Restored" and reported a healthy-looking absence. A
+ * backup that does not cover the thing being changed is not a backup.
  *
  * Between `stage` and `restore`, drive the BUILT server — `bin/stockbit-mcp.ts` is the only entry
  * point that calls `armAutoRelogin()` — with `STOCKBIT_AUTO_RELOGIN=1` and no `STOCKBIT_NO_BROWSER`,
@@ -51,7 +57,18 @@
  * Four harvested credentials in a row were once rejected on first use while login, doctor and status
  * all reported healthy. The retry is the proof, not the outcome word.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { fileDir, getStore } from "../src/auth/store.js";
 import { accessCachePath } from "../src/auth/accesscache.js";
@@ -65,6 +82,9 @@ import {
 } from "../src/auth/websession.js";
 
 const BACKUP_PREFIX = "stockbit-backup-";
+
+/** A marker written into every backup this script takes, so `restore` cannot be pointed at junk. */
+const MARKER = "PROBE-RELOGIN-BACKUP";
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
@@ -123,25 +143,71 @@ function describe(): void {
   );
 }
 
+/**
+ * Copy the store aside.
+ *
+ * Two things it deliberately does not do. It does not copy `browser-profile`, which is a Chromium
+ * profile of several hundred megabytes that no part of this experiment touches — copying it on
+ * every run is how a debugging aid quietly fills a disk. And it does not inherit the umask:
+ * `cpSync` preserves file modes but NOT directory modes, so a 0700 store would land as a 0755
+ * directory in `$HOME`. The secrets inside are 0600 either way; the metadata beside them is not.
+ */
 function backup(): string {
   const dir = fileDir();
   const dest = join(dir, "..", `${BACKUP_PREFIX}${new Date().toISOString().replace(/[:.]/g, "-")}`);
-  mkdirSync(dest, { recursive: true });
-  cpSync(dir, dest, { recursive: true });
+  mkdirSync(dest, { recursive: true, mode: 0o700 });
+  cpSync(dir, dest, {
+    recursive: true,
+    filter: (src) => !src.includes("browser-profile"),
+  });
+  chmodSync(dest, 0o700);
+  writeFileSync(join(dest, MARKER), `${new Date().toISOString()}\n`, { mode: 0o600 });
   return dest;
 }
 
+/** The newest backup this script wrote. Unmarked directories are ignored, not guessed at. */
 function newestBackup(): string | null {
   const parent = join(fileDir(), "..");
   const found = readdirSync(parent)
     .filter((name) => name.startsWith(BACKUP_PREFIX))
+    .filter((name) => existsSync(join(parent, name, MARKER)))
     .sort();
   return found.length ? join(parent, found[found.length - 1]) : null;
 }
 
 function stage(): void {
+  // A directory backup does not cover a credential that is not in the directory.
+  //
+  // On macOS with no `backend.json` override — the DEFAULT — `getStore("main")` is the Keychain
+  // store, and `.set()` writes to the Keychain and nowhere else. `backup()` copies `~/.stockbit`,
+  // which holds no copy of it. Restoring would put the files back, print "Restored", and leave the
+  // Keychain holding this script's nonsense JWT: the real refresh token destroyed, recoverable only
+  // by a full interactive re-login — which `stage` has just made harder by ageing out the web
+  // session too.
+  //
+  // So this refuses rather than pretending the backup is whole. It is not a limitation worth
+  // engineering around: the file backend is a supported configuration, and running the experiment
+  // there costs one setting.
+  const backend = getStore("main").backend;
+  if (backend !== "file") {
+    fail(
+      `Refusing to stage: the main credential is held by the ${backend} backend, and a backup of\n` +
+        `${fileDir()} cannot contain it. Overwriting it here would destroy the real refresh token\n` +
+        "with nothing to restore from.\n\n" +
+        "Run the experiment against a file-backed store instead — either point STOCKBIT_STORE_DIR at\n" +
+        "a copy, or record the file fallback for `main` — and re-run.",
+    );
+  }
+
   const session = loadWebSession();
   if (!session) fail("No web session on disk — nothing to age out. Log in first.");
+
+  // Staging twice would make the DELIBERATELY BROKEN store the newest backup, which is what a bare
+  // `restore` puts back. The probe JWT names itself so this is detectable.
+  const current = getStore("main").get();
+  if (current && current.includes(Buffer.from('"sub":"probe"').toString("base64url").slice(0, 12))) {
+    fail("The stored credential is already this script's probe token. Restore first, then stage again.");
+  }
 
   const cookie = readCookiePayload(session);
   if (!cookie) fail(`No readable ${CREDENTIAL_COOKIE} cookie — cannot stage condition 2.`);
@@ -198,6 +264,14 @@ function restore(from?: string): void {
   const source = from ?? newestBackup();
   if (!source) fail("No backup found. Pass one explicitly.");
   if (!existsSync(source)) fail(`No such backup: ${source}`);
+  // `existsSync` alone is not validation. A regular file passes it, `cpSync` then SUCCEEDS at
+  // writing a file where the store directory was, the catch below never fires, and the real store
+  // — already moved aside — is deleted as cleanup. Verified: it turned the store into a 13-byte
+  // text file and exited 0. So the source must be a directory, and one this script wrote.
+  if (!statSync(source).isDirectory()) fail(`Not a directory, so not a backup: ${source}`);
+  if (!existsSync(join(source, MARKER))) {
+    fail(`No ${MARKER} in ${source}. Refusing to overwrite the store with a directory this script did not write.`);
+  }
 
   const dir = fileDir();
   const aside = `${dir}.replaced-${Date.now()}`;

@@ -32,9 +32,18 @@ test("every name in CORE_TOOLS is a tool that actually exists", () => {
   assert.deepEqual(dangling, []);
 });
 
-test("core fits under Cursor's cap, which is the reason it exists", () => {
+test("core stays inside its declared cap, and the cap stays inside a client's", () => {
+  // The title used to say "fits under Cursor's cap, which is the reason it exists". That stopped
+  // being true when CORE_CAP went to 41 for `market_movers`, and a test whose name asserts an
+  // invariant it no longer checks is worse than no test — it reads as coverage.
+  //
+  // So the two properties are now separate. The first is that `core` respects whatever ceiling this
+  // project has declared for it. The second is that the ceiling is still a CLIENT-shaped number
+  // rather than something that drifted: 41 is one over Cursor and well under VS Code's 128, and a
+  // core that sailed past every client's limit would have no reason to exist at all.
   assert.ok(CORE_TOOLS.length <= CORE_CAP, `core has ${CORE_TOOLS.length} tools, cap is ${CORE_CAP}`);
   assert.ok(CORE_TOOLS.length >= 30, "a core so small it cannot answer anything is not a profile");
+  assert.ok(CORE_CAP <= 128, `core must still fit a real client's cap; ${CORE_CAP} does not fit VS Code`);
   assert.equal(new Set(CORE_TOOLS).size, CORE_TOOLS.length, "a duplicate would waste one of the 41");
 });
 
