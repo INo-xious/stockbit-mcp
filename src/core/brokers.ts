@@ -763,13 +763,18 @@ export interface BrokerActivityRow {
   /** The traded ticker, when a symbol-shaped value sat under a key this module recognises. */
   symbol?: string;
   /**
-   * `buy` or `sell`, from the container this row sat in — NOT from the sign of any figure.
+   * `buy` or `sell`, from the CONTAINER this row sat in — never from the sign of any figure.
    *
    * The response splits the two sides into `brokers_buy` and `brokers_sell` and sends both as
-   * POSITIVE numbers, so a sell row read without its container looks exactly like a buy. This is
-   * the only thing that distinguishes them, which is why it is not optional.
+   * POSITIVE numbers, so a sell row read without its container looks exactly like a buy. The
+   * container is the only thing that distinguishes them.
+   *
+   * **Absent** when the payload was not that two-sided shape and the generic reader was used
+   * instead. That is a real state — an unrecognised response still returns its rows — and the side
+   * is then genuinely unknown. It is left off rather than defaulted, because a row labelled `buy`
+   * on no evidence is worse than one that admits it does not know: the label would be summed.
    */
-  side: BrokerActivitySide;
+  side?: BrokerActivitySide;
   /** The session this row is for, when the row carried one. Rows are per stock PER DAY. */
   date?: string;
   /** Traded value in rupiah on this side. Positive on both sides; read `side`. */
@@ -927,9 +932,12 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
     const rows = sided ? sided.rows.map((r) => r.row) : generic.rows;
     const from = sided ? sided.from : generic.from;
 
-    const mapped: BrokerActivityRow[] = (
-      sided ?? { rows: generic.rows.map((row) => ({ row, side: "buy" as BrokerActivitySide })) }
-    ).rows.map(({ row, side }) => {
+    // An unrecognised shape still yields rows, but their side is unknowable — so it is left absent
+    // rather than defaulted to one of the two answers.
+    const pairs: Array<{ row: Row; side?: BrokerActivitySide }> =
+      sided?.rows ?? generic.rows.map((row) => ({ row }));
+
+    const mapped: BrokerActivityRow[] = pairs.map(({ row, side }) => {
       const symbol = pick(row, SYMBOL_KEYS, isSymbolish);
       const value = activityFigure(row, "value");
       const lot = activityFigure(row, "lot");
@@ -939,7 +947,7 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
       const investorType = label(row, "type");
       return {
         symbol: symbol.value,
-        side,
+        ...(side === undefined ? {} : { side }),
         ...(date.value === undefined ? {} : { date: date.value }),
         ...(value.value === undefined ? {} : { value: value.value }),
         ...(lot.value === undefined ? {} : { lot: lot.value }),

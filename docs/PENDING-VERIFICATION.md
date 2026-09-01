@@ -579,8 +579,19 @@ reach `attemptAutoRelogin`, so it neither confirms nor refutes it. ADR-0011 stay
 the strength of this, and now says so with a reason rather than an absence.
 
 **To settle it:** expire the web session's ACCESS token while leaving its REFRESH token alive, then
-repeat the method above. `scripts/p7-recovery-probe.mjs` in the P7 worktree is the harness minus
-that one step.
+repeat the method above.
+
+`scripts/probe-relogin.ts` is that harness, with the step. (An earlier note here named a
+`scripts/p7-recovery-probe.mjs` "in the P7 worktree"; that file was never committed and does not
+exist.) It has three modes — `inspect` changes nothing and reports which of the three conditions
+hold, `stage` backs up the store directory first and then arranges all three, `restore` puts the
+backup back. Between them, drive the BUILT server with `STOCKBIT_AUTO_RELOGIN=1`.
+
+The step that had never been staged is condition 2, and the reason it is awkward is worth keeping:
+`saveWebSession` guards against going backwards by comparing the incoming ACCESS token's expiry
+against the stored one, and ageing out the access half is exactly a backwards write. Without
+`{ allowOlder: true }` the save is a silent no-op, so the stage appears to succeed and changes
+nothing.
 
 
 ---

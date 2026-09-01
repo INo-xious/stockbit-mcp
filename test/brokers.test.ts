@@ -779,6 +779,9 @@ test("activity: an unrecognised payload still reads honestly rather than throwin
   assert.equal(flat.count, 1);
   assert.equal(flat.rowsFrom, "broker_activity_transaction");
   assert.equal(flat.rows[0].symbol, "BBRI");
+  // The side came from a container that is not there, so it is ABSENT. Defaulting it to one of the
+  // two answers would put a label on a row nothing supports — and that label gets summed.
+  assert.equal("side" in flat.rows[0], false, "an unknown side must not be invented");
 
   // One side present and the other missing is named for what it is, so "only bought" is
   // distinguishable from "the sell half was not in the payload".

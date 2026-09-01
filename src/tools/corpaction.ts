@@ -123,10 +123,9 @@ export function registerCorpactionTools(define: Definer): void {
       "`action_type` vocabulary: the calendar says `stock_reverse` and `tender` where the path " +
       "takes `reversesplit` and `tenderoffer`. Both spellings are now ACCEPTED by " +
       "corporate_actions and translated, so a kind read off this calendar can be passed straight " +
-      "back. That equivalence was measured rather than assumed — asked on 2026-09-01, " +
-      "`/corpaction/tenderoffer` returned its rows under a container named `tender` and " +
-      "`/corpaction/reversesplit` under one named `stock_reverse`, which is Stockbit equating the " +
-      "two vocabularies itself.\n" +
+      "back. That equivalence was measured rather than assumed — asked on 2026-09-01, the " +
+      "`tenderoffer` kind returned its rows under a container named `tender` and `reversesplit` " +
+      "under one named `stock_reverse`, which is Stockbit equating the two vocabularies itself.\n" +
       "`buckets` lists every kind the response carried with its row count, zeros included. That is " +
       "the difference between a kind that came back EMPTY today and one that was not in the " +
       "response at all: the first is in `buckets` with 0, the second is missing from it. `rowsFrom` " +
