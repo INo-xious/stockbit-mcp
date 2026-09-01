@@ -16,6 +16,23 @@ repo. The suite is offline, `fetch` is stubbed, and every capture in it is injec
 session is silently replaced mid-task" is a projection from parts that work separately, not a
 behaviour anyone has watched happen here.
 
+It was **attempted against a live account on 2026-09-01**, and the attempt is what turned this from
+an absence into a reason. The stored `main` refresh token was replaced with one Stockbit would
+reject and the access cache was cleared; the built server, armed and opted in, then answered a quote
+**in 0.3 s without opening anything**. Recovery did not run, and did not need to.
+
+The cause is `ensureFresh`'s **level three**, which adopts the browser's own access token before any
+refresh is attempted. While the browser session is alive, a dead stored credential does not produce
+a 401 at all. So this path needs three things at once — a rejected stored token, a web-session
+ACCESS token that has aged out (so level three declines), and a web-session REFRESH token still
+alive (because gate 4 tests exactly that). The same artefact has to be half dead in one half and
+alive in the other.
+
+That is an ordinary state in the wild and an awkward one to stage, which is the honest explanation
+for why nobody has watched this run. `docs/PENDING-VERIFICATION.md` records the method and the one
+remaining step. Until someone completes it, the ~3 s harvest figure remains a field report from the
+account owner's machine and nothing here has timed it.
+
 **Verified offline — the safety properties, and these are the ones that matter.**
 `test/relogin.test.ts` holds each of them, and `test/reap.test.ts` the last half of the last:
 

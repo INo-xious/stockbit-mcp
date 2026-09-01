@@ -539,3 +539,46 @@ reproduced from a capture.
 
 `today` is present, so `date` can stop being `null`.
 
+### P7g item 3 — the recovery path was driven against a live account, and it did not run
+
+The attempt ADR-0011 has been waiting for. Run last, deliberately, because it breaks the session
+everything else depends on; the store was backed up first and restored afterwards, and live calls
+were re-verified working after the restore.
+
+**Method.** The stored `main` refresh token was replaced with a well-formed but dead JWT (future
+`exp`, nonsense signature, so it is STOCKBIT that rejects it rather than anything local), the shared
+access cache was cleared, and the **built** server — the only entry point that calls
+`armAutoRelogin()` — was started with `STOCKBIT_AUTO_RELOGIN=1` and no `STOCKBIT_NO_BROWSER`, then
+asked for a quote over stdio.
+
+**Result: the quote answered in 0.3 s and recovery never ran.** No browser opened, no 401 was
+raised, and `access.enc` was still empty afterwards — so nothing refreshed.
+
+**Why, and this is the finding.** `ensureFresh` has a **level three**
+(`src/auth/session.ts`, `domain === "main" && slotState.forcedRefreshes === 0`) that adopts the
+**browser's own access token** out of the web session before any refresh is attempted. With a live
+browser session, a dead stored refresh token therefore produces no 401 at all — the request is
+served from the browser's copy, which is exactly what that level was built to do.
+
+So the window in which automatic recovery can fire is **narrower than "the credential died"**. All
+three must hold at once:
+
+1. the stored refresh token is rejected by Stockbit, **and**
+2. the web session's ACCESS token is expired or unreadable, so level three declines — note it is
+   skipped anyway once `forcedRefreshes > 0`, which is the path a real 401 takes, **and**
+3. the web session's REFRESH token is still alive, because gate 4 requires
+   `webSessionHealth().likelyValid === true` and that verdict is computed from the refresh token.
+
+Conditions 2 and 3 are the interesting pair: the same artefact must be half dead and half alive, in
+the right halves. That is a real state — a web session whose access token has aged out while its
+refresh token has days left is ordinary — but it is not the state a tester lands in by killing the
+stored credential, which is why this path has never been observed.
+
+**What is therefore still unmeasured:** the harvest itself, and the ~3 s figure. This run did not
+reach `attemptAutoRelogin`, so it neither confirms nor refutes it. ADR-0011 stays **Projected** on
+the strength of this, and now says so with a reason rather than an absence.
+
+**To settle it:** expire the web session's ACCESS token while leaving its REFRESH token alive, then
+repeat the method above. `scripts/p7-recovery-probe.mjs` in the P7 worktree is the harness minus
+that one step.
+

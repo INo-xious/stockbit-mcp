@@ -12,6 +12,105 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Added
 
+- **`market_movers` reaches every view Stockbit's own Movers dialog shows.** `mover_type` is now
+  sent, as a **closed** vocabulary of the eight members the server was seen to echo back on
+  2026-09-01: `topGainer`, `topLoser`, `topValue`, `topVolume`, `topFrequency`, `netForeignBuy`,
+  `netForeignSell`, `bigMoneyNetValue`.
+
+  The echo is what makes those eight evidence rather than guesses, and a control is what makes the
+  echo trustworthy: `MOVER_TYPE_DEFINITELY_NOT_REAL` answers 400, so this endpoint rejects members
+  it does not know instead of silently serving its default. That is the failure mode which hid the
+  `topGainer`/`topgainer` hotlist bug for months, and it is absent here. The result reports the
+  **echo** as `view` — what the server says it served — never what was requested.
+
+  The dialog's ninth tab, IEP/IEV, is deliberately **not** an enum member: ten spellings of it were
+  refused. It is a field, `iepiev_detail`, carried on every row of every view, projected as `iepIev`
+  and only meaningful during pre-opening. Shipping it as a member would have told callers the server
+  accepts a value nobody has seen it accept.
+
+  Rows come from `data.mover_list` with `readFrom` naming each wire key, `unmappedKeys` for what the
+  projection does not recognise, and the raw row kept. `limit` is honoured and capped at 50 by the
+  service; `page` is ignored; the payload's own `pagination` block reads all zeros on every call and
+  is therefore **not** passed through, because a `has_next: false` that is always false is not an
+  answer about whether more rows exist.
+
+### Fixed
+
+- **`calendar_today` reported "no corporate actions today" while the response carried 19 of them.**
+  The reader took the first array-valued key, and the payload is buckets whose first bucket
+  (`bonus`) is empty — so a day holding a dividend, eight economic events, a RUPS and nine warrants
+  read as nothing, with the rows sitting unread in `meta`. Every bucket is now returned, tagged with
+  its kind, and `date` comes from the response's own `today` instead of `null`.
+
+- **`top_movers` is a nine-symbol hotlist, and now says so.** It returned the same nine symbols at
+  `limit` 5, 25, 50 and 100 — the service ignores `limit` — so it was never a market-wide ranking.
+  That also disposes of a reported sort bug: a contiguous descending run of nine changes is what a
+  correct sort over nine symbols looks like. `market_movers` is the market-wide surface, and the two
+  disagreeing is expected rather than evidence either is wrong.
+
+- **`prices_batch` does not batch.** Comma-joining symbols returns an empty list and the repeated-key
+  form is a hard 400 (`too many values for field "stock_code"`), so there is no encoding that
+  batches — the route takes one `stock_code` and returns a price *series*. More than one symbol is
+  now refused locally rather than sent to come back empty, because an empty list reads as a claim
+  about the market when the truth is a claim about the request.
+
+- **`price_market` could not be called at all**, and now says so instead of offering arguments. It
+  answers 400 with **no** query parameters, which is what settles it: if sending nothing is also an
+  error, no combination of arguments is the fix. It names `orderbook`'s `market_data[]`, which
+  already returns the per-board split.
+
+- **`chart_series`'s `raw: true` escape hatch read a different endpoint from the one it exists to
+  diagnose.** It called `/charts/:symbol` while the projection reads `/charts/:symbol/daily`, and
+  the two do not share a timeframe vocabulary — the first refuses `1w` outright and answers
+  `{chart_points: []}` for everything else. So `1w` errored and `1m` came back empty, and a caller
+  read that emptiness as "the drift is gone".
+
+- **`broker_activity` sent a `period` the endpoint refuses.** Every member of the ten-value
+  `TB_PERIOD_*` enum answers 400 here — including the one its sibling `broker_distribution` accepts
+  — while omitting it returns rows. It is no longer sent, and `broker_activity_transaction` joins
+  the row containers, so the tool stops reporting `count: 0` beside a `dataKeys` that names the
+  container the rows were in.
+
+- **`broker_top` put the biggest broker last.** Rows arrive sorted **ascending** by `total_value`
+  and `limit` is ignored, so a tool documented as "which brokers moved the most" led with the
+  smallest of 89. Now sorted descending client-side and said so.
+
+- **Payloads carrying broker- or foreign-derived figures now say which session they are from.**
+  Measured after the ~18:00 WIB broker release, `running_trade`, `broker_flow_intraday` and
+  `market_movers` all roll forward to the current day, and `is_show_net_foreign` flips false to true
+  across that release — so figures carrying yesterday's date beforehand are correct and unpublished,
+  not stale. `price_bands` carries an explicitly **null** `dataAsOf` with a note, because the
+  orderbook payload has no date and fetching one from another endpoint would attribute one route's
+  date to another's numbers.
+
+- **`orderbook` names its units.** Its `volume` is SHARES while `technicals`' `volumeLots` is LOTS,
+  reconciling ×100 — in a payload that also labels its depth figures `lot` beside a `volume` in
+  shares. Two units under similar names in one response is a silent-wrong-answer generator.
+
+- **`stockbit-auth login` drove the shared browser profile without taking `login.lock`.** Gate 5 of
+  automatic recovery is "`login.lock` must be free", so it read free for the whole time a CLI login
+  was open — and an unattended recovery could launch a second browser onto the profile where
+  someone was at that moment typing their password. The documented cost of that collision is eleven
+  orphaned browser processes and a `SingletonLock` that blocked every later login.
+
+  The lock is now released on **SIGINT and SIGTERM as well as `exit`**: node does not run `exit`
+  listeners when a signal terminates the process, and this command hands a human fifteen minutes to
+  type, so Ctrl-C is the ordinary way to cancel it. Releasing only on `exit` would have leaked the
+  lock for twenty minutes on the commonest path — worse than never taking it.
+
+- **A failed token refresh no longer reports a network outage as a dead credential.** `refreshOnce`
+  labelled every non-ok refresh `kind: "auth"`, so a 502 was indistinguishable from a revoked
+  session. It now routes through `kindForStatus`, which already encoded the rule, rather than a
+  second copy of it.
+
+### Changed
+
+- **ADR-0011's status now claims exactly what has been observed.** The recovery path has never been
+  run against a live Stockbit session, so end to end it is **Projected**; the gates, the latch and
+  the redaction are verified offline and are stated as such. An attempt on 2026-09-01 found *why*
+  nobody has seen it run: `ensureFresh` adopts the browser's own access token before any refresh, so
+  a dead stored credential does not produce a 401 while the browser session is alive.
+
 - **A dead market-data session can now repair itself once, unattended, behind a switch.** Every
   signal for a dead session already existed and not one of them acted: the health journal records
   refusals, `status` computes `main.health: "failing"` and `webSession.rejected`, and a 401 becomes a
