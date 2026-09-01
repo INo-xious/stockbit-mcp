@@ -35,7 +35,7 @@ test("every name in CORE_TOOLS is a tool that actually exists", () => {
 test("core fits under Cursor's cap, which is the reason it exists", () => {
   assert.ok(CORE_TOOLS.length <= CORE_CAP, `core has ${CORE_TOOLS.length} tools, cap is ${CORE_CAP}`);
   assert.ok(CORE_TOOLS.length >= 30, "a core so small it cannot answer anything is not a profile");
-  assert.equal(new Set(CORE_TOOLS).size, CORE_TOOLS.length, "a duplicate would waste one of the 40");
+  assert.equal(new Set(CORE_TOOLS).size, CORE_TOOLS.length, "a duplicate would waste one of the 41");
 });
 
 test("core includes status, and deliberately excludes the order writes", () => {

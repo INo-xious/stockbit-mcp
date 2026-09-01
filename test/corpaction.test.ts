@@ -32,6 +32,7 @@ import {
   getStockConversion,
   getUnderwriterPerformance,
   getUnderwriters,
+  resolveCorpactionType,
   type CorpactionType,
 } from "../src/core/corpaction.ts";
 
@@ -561,6 +562,27 @@ test("an unreadable leg is visible in rowsFrom rather than merged away", async (
   assert.equal(calendar.rows.length, 2, "the readable leg is still returned");
 });
 
+test("a calendar bucket spelling is accepted where a path kind is wanted", async () => {
+  // The gap this closes: `calendar_today` tags rows with the bucket key the response used, and two
+  // of the twelve are not members of CORPACTION_TYPES — so a kind read off the calendar could not
+  // be passed back into `corporate_actions` at all.
+  //
+  // The equivalence was measured on 2026-09-01 rather than assumed, which is why the translation
+  // exists now and did not before: `/corpaction/tenderoffer` returned its rows under a container
+  // named `tender`, and `/corpaction/reversesplit` under one named `stock_reverse`. That is the
+  // service equating the two vocabularies itself.
+  await getCorpactions("tender");
+  assert.equal(url().pathname, "/corpaction/tenderoffer", "the PATH spelling is what goes on the wire");
+
+  clearCache();
+  await getCorpactions("stock_reverse");
+  assert.equal(url().pathname, "/corpaction/reversesplit");
+
+  // Translation is one-directional and everything else passes through untouched.
+  assert.equal(resolveCorpactionType("dividend"), "dividend");
+  assert.equal(resolveCorpactionType("tenderoffer"), "tenderoffer", "the path spelling is not rewritten");
+});
+
 /* -------------------------------- day calendar -------------------------------- */
 
 test("the day calendar with no date sends no parameters at all", async () => {
@@ -575,6 +597,35 @@ test("a date is sent as the only parameter", async () => {
   assert.deepEqual(query(), { date: "2026-08-03" });
   assert.equal(day.date, "2026-08-03");
   assert.equal(day.rows[0].date, "2026-08-03", "the row came back for the day we asked for");
+});
+
+test("the day calendar runs the same date-order check its siblings do", async () => {
+  // These buckets carry the very kinds `DATE_ORDER` covers — a RUPS eligibility date against the
+  // meeting it gates, a dividend cum/ex/record/payment chain. The day calendar was returning those
+  // rows without the check `corporate_actions` and `dividend_calendar` apply to the same fields, so
+  // the one view that shows every kind at once was the one that never questioned their dates.
+  reply = () => ({
+    data: {
+      rups: [{ company_symbol: "AAAA", rups_eligible_date: "2026-08-20", rups_date: "2026-08-10" }],
+      dividend: [{ company_symbol: "BBBB", dividend_cumdate: "2026-08-05", dividend_exdate: "2026-08-06" }],
+      today: "2026-08-03",
+    },
+  });
+  const day = await getCalendarDay();
+
+  assert.ok(day.suspectDates, "an inverted pair must be reported");
+  assert.equal(day.suspectDates.length, 1, "only the RUPS pair is inverted; the dividend one is in order");
+  assert.equal(day.suspectDates[0].earlierKey, "rups_eligible_date");
+  assert.equal(day.suspectDates[0].laterKey, "rups_date");
+  // The index has to address the list actually returned, which on the bucket shape is every bucket
+  // flattened in wire order.
+  assert.equal(day.rows[day.suspectDates[0].row].company_symbol, "AAAA");
+
+  // Absent, not empty, when nothing is out of order — the same shape the siblings use.
+  clearCache();
+  reply = () => CALENDAR_BUCKETS;
+  const clean = await getCalendarDay();
+  assert.equal("suspectDates" in clean, false, "nothing out of order means the key is absent");
 });
 
 test("an impossible date is refused before the request", async () => {

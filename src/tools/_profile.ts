@@ -9,10 +9,10 @@
  * So the same surface can be registered three ways:
  *
  *   - `all` — everything. NOT the default: an unset variable means `core`, see `DEFAULT_TOOL_PROFILE`.
- *   - `core` — the 40 tools that answer the questions people actually ask, and **the default**.
- *     Exactly Cursor's cap of 40, which leaves no room for a second MCP server in that client;
- *     someone running one needs a narrower list. No order writes: whoever wants those asks for
- *     `core,trading` and has therefore thought about it once.
+ *   - `core` — the 41 tools that answer the questions people actually ask, and **the default**.
+ *     It used to be exactly Cursor's 40 and is now one over: see `CORE_CAP` for what that buys and
+ *     what it costs. On Cursor, name a narrower list rather than trusting this to fit. No order
+ *     writes: whoever wants those asks for `core,trading` and has therefore thought about it once.
  *   - a comma-separated list of families and/or individual tool names — `market,bandarmology`,
  *     `core,trading`, `quote,broker_summary,analyze`.
  *
@@ -33,7 +33,7 @@ import { FAMILIES, type Family, type ToolProfile } from "./_define.js";
 export { FAMILIES };
 
 /**
- * The default working set: 40 tools, no order writes.
+ * The default working set: 41 tools, no order writes.
  *
  * Chosen against the questions this server exists to answer — what is the price, who accumulated,
  * is the trend real, what do I hold, tell me when — rather than by taking the first N of anything.
@@ -50,6 +50,7 @@ export const CORE_TOOLS: readonly string[] = [
   "orderbook",
   "price_bands",
   "top_movers",
+  "market_movers",
   "market_session",
   // Is the move real?
   "technicals",
@@ -91,8 +92,20 @@ export const CORE_TOOLS: readonly string[] = [
   "trading_status",
 ];
 
-/** Cursor's ceiling. `core` exists to fit under it, so exceeding it would defeat the point. */
-export const CORE_CAP = 40;
+/**
+ * The ceiling on `core`, and it is no longer Cursor's.
+ *
+ * This was 40 to sit exactly on Cursor's cap. It is 41 because `market_movers` was judged worth
+ * more in the default surface than that exact fit: `top_movers` reads a NINE-symbol hotlist, and a
+ * default profile that can rank nine stocks but not the market is missing the more useful of the
+ * two. Both ship, because they read different services and neither answers the other's question.
+ *
+ * What that costs is stated rather than hidden: a Cursor user is now one over, and Cursor drops the
+ * overflow WITHOUT saying which tool it dropped. Anyone on that client should name a narrower list
+ * (a family list, or `core` minus what they do not want) rather than trust the default to fit.
+ * README says the same thing where it used to promise the fit.
+ */
+export const CORE_CAP = 41;
 
 class NamedProfile implements ToolProfile {
   constructor(
@@ -152,7 +165,7 @@ export function parseToolProfile(raw: string | undefined, knownTools?: ReadonlyS
     throw new Error(
       `STOCKBIT_TOOLS: unknown family or tool ${JSON.stringify(token)}. ` +
         `Families: ${FAMILIES.join(", ")}. Also accepted: "all", "core", or any tool name. ` +
-        // NOT "unset the variable to register everything". Unset is `core` now — 40 of 138. This
+        // NOT "unset the variable to register everything". Unset is `core` now — 41 of 138. This
         // message is printed as the server refuses to start, to a user who is already confused
         // about which tools exist; sending them to the wrong remedy from there is worse than
         // saying nothing.
@@ -171,7 +184,7 @@ export function parseToolProfile(raw: string | undefined, knownTools?: ReadonlyS
  * server boots, registers everything and answers `status` in about 200 ms. The cost is per TURN:
  * `tools/list` for the full surface is about 220,000 bytes — roughly 55,000 tokens — in the model's
  * context on every single message. `core` is about 71,000, roughly 17,700. That is the same server
- * costing a third as much to talk to, for 40 tools chosen to be the questions people actually ask.
+ * costing a third as much to talk to, for 41 tools chosen to be the questions people actually ask.
  * (Figures are approximate on purpose: they move whenever a description is edited, and a number
  * stated to the byte is a number that is quietly wrong a week later.)
  *

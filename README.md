@@ -178,9 +178,10 @@ On Windows, npx needs a shell:
 **Claude Desktop Extension** — download the latest `stockbit-mcp-*.mcpb` from
 [Releases](https://github.com/INo-xious/stockbit-mcp/releases) and double-click it.
 
-**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools and the default `core` profile is
-exactly 40, so nothing extra is needed — though that leaves no room for a second MCP server, and
-running one means a narrower list (`STOCKBIT_TOOLS=market,bandarmology`, say):
+**Cursor** — `~/.cursor/mcp.json`. Cursor stops at 40 tools and the default `core` profile is 41,
+so **set a narrower list**. Cursor drops the overflow without saying which tool it dropped, so the
+one you lose is not yours to choose — name the families you want instead
+(`STOCKBIT_TOOLS=market,bandarmology`, say):
 
 ```json
 { "mcpServers": { "stockbit": { "command": "npx", "args": ["-y", "stockbit-mcp"] } } }
@@ -448,7 +449,7 @@ roughly 55,000 tokens, on every single message; `core` is about a third of that.
 
 | Value | Effect |
 |---|---|
-| unset — **the default** | `core`: 40 tools and 6 prompts. The questions people actually ask. Fits Cursor's cap. No order writes. |
+| unset — **the default** | `core`: 41 tools and 6 prompts. The questions people actually ask. No order writes. One over Cursor's cap — see above. |
 | `all` | All 138. Roughly 55,000 tokens of tool schemas per turn, against ~17,700 for `core`. |
 | `market,bandarmology` | Those families only. |
 | `core,trading` | Core plus order entry. |
@@ -551,7 +552,7 @@ is written outside it.
 | A blank white Chartbit page | You are signed out in that browser. |
 | `broker_distribution` errors | Stockbit's Rp 10,000,000 balance gate. |
 | Empty movers | Weekend or a holiday. Check `market_session`. |
-| VS Code or Cursor: "too many tools" | You have set `STOCKBIT_TOOLS=all`. Remove it — the default is `core`, which is 40. |
+| VS Code or Cursor: "too many tools" | You have set `STOCKBIT_TOOLS=all`. Remove it — the default is `core`, which is 41. On Cursor (cap 40) name a narrower list. |
 | Windows: `npx` ENOENT | Use `"command": "cmd", "args": ["/c", "npx", …]`. |
 | Something else | `stockbit-auth doctor`, then `stockbit-auth status --json` — both are safe to paste. |
 

@@ -451,6 +451,11 @@ const OBSERVED = [
   "corporate_actions",
   "corporate_action_status",
   "dividend_calendar",
+  // Moved up from PROJECTED on 2026-09-01. It stayed projected while only its no-argument form had
+  // been measured — the `shareholding` grading. `GET /corpaction?date=2026-08-28` has now answered
+  // with the SAME twelve buckets, that day's own rows, and `today` echoing the date requested. Both
+  // wire forms this tool sends are measured; `from`/`to` are never sent at all.
+  "calendar_today",
   "ipo_pipeline",
   "stream",
   "news",
@@ -494,10 +499,6 @@ const PROJECTED = [
   "order_queue",
   "market_session",
   "price_market",
-  // Its no-argument form WAS measured live on 2026-09-01 and its bucket reader was fixed from that
-  // capture — but `date` and `from`/`to` were not, and the code keeps a flat-shape branch for them.
-  // Same grading `shareholding` got for the same reason: one settled mode is not a settled tool.
-  "calendar_today",
   "stock_conversion",
   "underwriters",
   "screener_run",
