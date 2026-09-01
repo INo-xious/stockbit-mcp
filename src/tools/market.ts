@@ -9,6 +9,8 @@
  */
 import { z } from "zod";
 import * as core from "../core/market.js";
+import { MARKET_MOVER_VIEWS } from "../http/transport.js";
+import type { MarketMoverView } from "../http/transport.js";
 import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
@@ -35,9 +37,16 @@ export function registerMarketTools(define: Definer): void {
       "series. Volume on that route comes back NULL, not 0 — a field that arrived empty on every " +
       "bar is absent, and `warnings` names every such field. `mapped`, `extraKeys` and `sample` show " +
       "which wire keys were used and what else the point carried.\n" +
-      "raw=true returns the sibling chart endpoint's payload untouched instead of bars. Use it only " +
-      "to discover real field spellings when `unmapped` or `extraKeys` is non-empty; it is not a " +
-      "fallback and returns no `bars`.",
+      "raw=true returns THIS ROUTE'S payload untouched instead of bars — the same request, with " +
+      "nothing projected. Use it only to discover real field spellings when `unmapped` or " +
+      "`extraKeys` is non-empty; it is not a fallback and returns no `bars`.\n" +
+      "raw=true used to read a DIFFERENT endpoint. It called /charts/:symbol while the projection " +
+      "reads /charts/:symbol/daily, and handed the first the second's vocabulary — so the escape " +
+      "hatch could not reproduce the payload it exists to diagnose. Measured 2026-09-01 the two do " +
+      "not share a vocabulary: /charts/:symbol REFUSES 1w with 400 \"Kurun waktu tidak valid\" and " +
+      "answers `{chart_points: []}` for everything else, while the daily route accepts 1w and " +
+      "answers the rich payload. That is why 1w errored and 1m came back empty — the route was " +
+      "wrong, not the value. Fixed: raw now reads the same route as the projection.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       timeframe: z
@@ -67,6 +76,16 @@ export function registerMarketTools(define: Definer): void {
       "default, which is not necessarily ALL.\n" +
       "grouped=true reads a different endpoint that returns the tape aggregated rather than print by " +
       "print. It is not a display option: the two return different payloads.\n" +
+      "WHICH SESSION AM I LOOKING AT. Both views carry `data.date` and it is the answer — read it " +
+      "rather than assuming today. Measured 2026-09-01 after the ~18:00 WIB broker release, both " +
+      "served that same day. Broker-derived and foreign-derived figures across this API publish at " +
+      "roughly 18:00 WIB, so before that release a payload carrying YESTERDAY's date is correct and " +
+      "not yet published — it is not stale data and not a bug. market_movers' `foreign.isShown` is " +
+      "the explicit flag for the same thing and flips false to true across that release.\n" +
+      "INTRADAY BROKER ATTRIBUTION DOES NOT EXIST TO BE RETURNED. IDX closed broker codes on live " +
+      "running trade on 6 December 2021. So `is_broker_exists: false` with empty `buyer`/`seller` " +
+      "is an honest answer about the exchange, not a parse failure or a missing field — check that " +
+      "flag per row rather than concluding the projection broke.\n" +
       "THIS TAPE IS NOT LIVE. Measured against the live API during an open session, it runs about " +
       "EIGHT TO TEN MINUTES BEHIND and refreshes in bursts — its head sat unchanged for over three " +
       "minutes while the lag grew second for second, and the staleness is at Stockbit's origin, not " +
@@ -175,7 +194,17 @@ export function registerMarketTools(define: Definer): void {
       "it covers the WHOLE session rather than the first 100 prints. Only the top few brokers " +
       "appear (five on the reading above), so it ranks the session's main participants — it is not " +
       "a complete broker list. For the full table use broker summary or broker distribution.\n" +
-      "Covers the current session only, and is empty before the first print of the day.",
+      "WHICH SESSION, AND WHEN IT IS PUBLISHED. The payload states its own window — `from`, `to` " +
+      "and `date_session_info` — and that is the answer; read it rather than assuming today. " +
+      "Measured 2026-09-01 at 18:40 WIB, all three read that same trading day. Broker-derived data " +
+      "across this API publishes at roughly 18:00 WIB, so BEFORE that release this endpoint serves " +
+      "the PREVIOUS session and says so in `from`/`to`. That is correct and unpublished, not stale " +
+      "— the earlier claim that it 'covers the current session only, and is empty before the first " +
+      "print of the day' was never achievable and is withdrawn.\n" +
+      "CAUTION on `data_last_updated`: it is stamped with a `Z` suffix but the value is WIB. The " +
+      "2026-09-01 reading was \"2026-09-01T16:28:44Z\" at a moment when UTC was 11:28 — five hours " +
+      "in the future, and 16:28 WIB is minutes after the 16:15 close, which is the only reading " +
+      "that makes sense. Do NOT parse this field as UTC; it is seven hours ahead of what it claims.",
     { symbol: z.string().describe("IDX ticker, e.g. BBRI") },
     async (a) => runTool(() => core.getRunningTradeChart(a.symbol as string)),
     // Settled by a live call on 2026-09-01: every key named above was read out of a real response.
@@ -185,16 +214,52 @@ export function registerMarketTools(define: Definer): void {
 
   define.read(
     "market_movers",
-    "Market movers from the order-trade service.\n" +
-      "This is a DIFFERENT endpoint from top_movers, which reads the hotlist. They are two services " +
-      "and are not guaranteed to agree; a disagreement is not evidence that either is wrong.\n" +
-      "Only `limit` is sent. This endpoint's category vocabulary (gainers vs losers vs most active) " +
-      "has not been observed, so no category filter is sent and you get whatever its default view " +
-      "is — check the payload to see which one that is rather than assuming gainers.\n" +
-      "An empty list is normal outside trading hours.\n" +
-      PENDING,
-    { limit: z.coerce.number().optional().describe("Max rows. Omitted takes the server default.") },
-    async (a) => runTool(() => core.getMarketMovers(a.limit as number | undefined)),
+    "The market movers behind Stockbit's own Movers dialog — the market-wide ranking.\n" +
+      "This is a DIFFERENT endpoint from top_movers, which reads the hotlist, and the difference is " +
+      "not cosmetic: measured 2026-09-01, the hotlist served NINE symbols while this served FIFTY, " +
+      "including structured warrants. Different universes. A symbol in one and not the other is " +
+      "expected, and a disagreement is not evidence that either is wrong. For a market-wide " +
+      "ranking, this is the one to use.\n" +
+      "`view` selects the tab, and the vocabulary is CLOSED to the eight members the server was " +
+      "seen to accept: topGainer, topLoser, topValue, topVolume, topFrequency, netForeignBuy, " +
+      "netForeignSell, bigMoneyNetValue. Each was echoed back verbatim on 2026-09-01, against a " +
+      "control value that answers 400 — so this endpoint rejects members it does not know rather " +
+      "than silently serving its default, which is what makes the echo trustworthy. The result's " +
+      "`view` is that echo: what the server says it SERVED, not what you asked for.\n" +
+      "The UI's ninth tab, IEP/IEV, is NOT a view — ten spellings of it were refused. It is a " +
+      "field: every row carries `iepIev` with the indicative equilibrium price and volume. Those " +
+      "are only meaningful during pre-opening (08:45-09:00 WIB) and read zero outside it.\n" +
+      "`limit` is honoured, but the service caps the answer at 50 rows however large it is. `page` " +
+      "is ignored, and the payload's own pagination block reads all zeros on every call, so it is " +
+      "not reported rather than passed through as a fake answer about whether more rows exist.\n" +
+      "Every row carries `readFrom` naming the wire key each value came from, `unmappedKeys` for " +
+      "anything this projection does not recognise, and the raw row.\n" +
+      "`foreign` says which session the net-foreign figures are from. `foreign.isShown` is the " +
+      "service's own flag for whether they mean anything yet: it reads false intraday and true " +
+      "after the ~18:00 WIB broker release on the same day. Foreign figures carrying yesterday's " +
+      "date before that release are correct and unpublished, not stale.\n" +
+      "An empty list is normal outside trading hours, though this endpoint served 50 rows with the " +
+      "market shut.",
+    {
+      view: z
+        .enum(MARKET_MOVER_VIEWS as [string, ...string[]])
+        .optional()
+        .describe("Which tab. Omitted takes the server's default view — read `view` to see which."),
+      limit: z.coerce
+        .number()
+        .optional()
+        .describe("Max rows. Honoured, but capped at 50 by the service. Omitted takes its default."),
+    },
+    async (a) =>
+      runTool(() =>
+        core.getMarketMovers({
+          view: a.view as MarketMoverView | undefined,
+          limit: a.limit as number | undefined,
+        }),
+      ),
+    // Settled by live calls on 2026-09-01: every member echoed, every projected key read out of a
+    // real row, and the limit/page/pagination behaviour measured rather than assumed.
+    { evidence: "observed" },
   );
 
   define.read(
@@ -253,35 +318,46 @@ export function registerMarketTools(define: Definer): void {
 
   define.read(
     "prices_batch",
-    "Last price for several symbols in one request.\n" +
-      "Returns `requested`, `found`, `missing` and `rows`. READ `missing` BEFORE USING THE ROWS. The " +
-      "multi-symbol encoding this endpoint wants has not been confirmed, and if it is the wrong one " +
-      "the server answers HTTP 200 with a single row instead of an error — `missing` listing almost " +
-      "everything you asked for is that failure, not a set of unlisted tickers.\n" +
-      "`missing` also does not prove a symbol has no price: it means no returned row mentioned that " +
-      "ticker. Symbols are matched against the rows' own string values rather than a named field, " +
-      "because the key the ticker lives under has not been observed.\n" +
-      "At most 50 symbols per call; split a longer list. For one symbol with orderbook depth use the " +
-      "orderbook or quote tools instead.\n" +
-      PENDING,
+    "A price SERIES for ONE symbol. Despite the name, this route does not batch — pass exactly one " +
+      "symbol.\n" +
+      "The multi-symbol question is settled and the answer is that there is no encoding. Measured " +
+      "2026-09-01: `stock_code=BBRI` returns 20 bare numbers under `data.prices`; comma-joining " +
+      "three symbols returns an EMPTY list; and the repeated-key form answers 400 \"too many values " +
+      "for field stock_code\". More than one symbol is therefore refused here rather than sent, " +
+      "because an empty list reads as \"these symbols have no prices\" — a claim about the market " +
+      "when the truth is a claim about the request.\n" +
+      "Note this returns a SERIES of prices, not one last price. For a single last price with " +
+      "orderbook depth use quote or orderbook. For several symbols, call this once per symbol.\n" +
+      "`missing` still does not prove a symbol has no price: it means no returned row mentioned " +
+      "that ticker. Symbols are matched against the rows' own string values rather than a named " +
+      "field — that ONE detail, which key the ticker sits under, is still unsettled, while the " +
+      "route's own behaviour above was measured live.",
     {
-      symbols: z.array(z.string()).describe("IDX tickers, e.g. [\"BBRI\", \"TLKM\"]. Max 50, de-duplicated."),
+      symbols: z
+        .array(z.string())
+        .describe("Exactly ONE IDX ticker, e.g. [\"BBRI\"]. More than one is refused — see above."),
     },
     async (a) => runTool(() => core.getPricesBatch(a.symbols as string[])),
+    // Settled live 2026-09-01: every encoding tried, and the single-symbol series read off a real
+    // response. What is observed is the ROUTE's behaviour; the row projection is unchanged.
+    { evidence: "observed" },
   );
 
   define.read(
     "price_market",
-    "One symbol's prices broken down by market board for a session.\n" +
-      "boards takes uppercase names such as REGULER, NEGO or TUNAI and they are sent UNPREFIXED and " +
-      "unaltered. This API uses two mutually incompatible prefixed board vocabularies elsewhere " +
-      "(MARKET_BOARD_ on broker summary, MARKET_TYPE_ on broker distribution) and which, if either, " +
-      "applies here is unknown — so nothing is added to your value. If the result looks unfiltered, " +
-      "the spelling is the first thing to suspect.\n" +
-      "Omitting `date` reads the current session. A past date is served from a 5-minute cache since " +
-      "a closed session cannot change; today is cached for 3 seconds.\n" +
-      "An empty result for a past date most likely means that date was not a trading day.\n" +
-      PENDING,
+    "DOES NOT WORK. Use orderbook instead — its `market_data[]` already returns the per-board " +
+      "split (All Market / Regular / Nego / Cash) for a symbol.\n" +
+      "This is not a vocabulary problem and there is no argument that fixes it. Measured " +
+      "2026-09-01, /company-price-feed/prices/:symbol/market answers 400 \"Silahkan Periksa " +
+      "permintaan\" with NO query parameters at all. It also refuses every board spelling tried " +
+      "(REGULER, RG, regular, REGULAR, TN, NG, CASH, ALL, MARKET_TYPE_REGULAR, MARKET_TYPE_ALL, " +
+      "BOARD_REGULAR, 1, 0) under every key tried (market, board, market_type, type).\n" +
+      "The bare call being refused is what settles it: if sending nothing is also an error, no " +
+      "combination of arguments can be the answer. Earlier passes read these 400s as an unknown " +
+      "board vocabulary and kept guessing spellings; the control that was missing was the empty " +
+      "request.\n" +
+      "Calling this tool refuses immediately and names the alternative rather than spending a round " +
+      "trip to be told the request is invalid.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       date: z.string().optional().describe("Session date, YYYY-MM-DD. Omit for the current session."),

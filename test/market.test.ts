@@ -11,9 +11,9 @@ import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
 import { StockbitError } from "../src/http/errors.ts";
+import { MARKET_MOVER_VIEWS } from "../src/http/transport.ts";
 import {
   CHART_TIMEFRAMES,
-  PRICES_BATCH_MAX,
   RUNNING_TRADE_MAX_LIMIT,
   getChartRaw,
   getMarketMovers,
@@ -315,13 +315,35 @@ test("the chart cache key distinguishes symbol and timeframe", async () => {
   assert.equal(requests, 3, "a different timeframe or symbol is a different answer");
 });
 
-test("raw reads the sibling chart route, not the daily one", async () => {
+test("raw reads the SAME route as the projection it exists to diagnose", async () => {
+  // This test used to assert the opposite, and the assertion was the bug. `raw` read
+  // /charts/:symbol while getSeriesBars reads /charts/:symbol/daily, and the two do not share a
+  // timeframe vocabulary — measured 2026-09-01, /charts/:symbol REFUSES `1w` with 400 "Kurun waktu
+  // tidak valid" and answers `{chart_points: []}` for everything else. So the escape hatch could
+  // not reproduce the payload it is for: `1w` errored and `1m` came back empty, and a caller read
+  // that emptiness as "the drift is gone".
+  //
+  // `raw: true` must differ from the projected call in exactly one way — that nothing is projected.
   responder = () => ({ data: { anything: true } });
   const raw = await getChartRaw("BBRI", "ytd");
   const url = lastUrl("/charts/");
-  assert.equal(url.pathname, "/charts/BBRI");
+  assert.equal(url.pathname, "/charts/BBRI/daily", "the same route getSeriesBars reads");
   assert.deepEqual(query(url), ["is_include_previous_historical=true", "timeframe=ytd"]);
   assert.deepEqual(raw, { anything: true });
+});
+
+test("raw and the projection request byte-identical URLs", async () => {
+  // The property the test above states in prose, asserted directly: if these ever diverge again,
+  // the escape hatch is describing a different request from the one that failed.
+  responder = () => CHART_POINTS;
+  await getSeriesBars("BBRI", "1y");
+  const projected = lastUrl("/charts/");
+  clearCache();
+  seenUrls = [];
+  await getChartRaw("BBRI", "1y");
+  const rawUrl = lastUrl("/charts/");
+  assert.equal(rawUrl.pathname, projected.pathname);
+  assert.deepEqual(query(rawUrl), query(projected));
 });
 
 /* ================================ running trade ================================ */
@@ -536,13 +558,170 @@ test("trade book chart is a different route, and is not held to the table's rule
 test("movers and top stocks send only what was asked for", async () => {
   await getMarketMovers();
   assert.deepEqual(query(lastUrl("/market-mover")), []);
-  await getMarketMovers(10);
+  await getMarketMovers({ limit: 10 });
   assert.deepEqual(query(lastUrl("/market-mover")), ["limit=10"]);
   await getTopStocks(5);
   const url = lastUrl("/top-stock");
   assert.equal(url.pathname, "/order-trade/top-stock");
   assert.deepEqual(query(url), ["limit=5"]);
   assert.equal(requests, 3, "three distinct argument sets, three requests");
+});
+
+/* ------------------------------- the movers surface ------------------------------- */
+
+/**
+ * One `mover_list` row in the shape measured live on 2026-09-01, plus one key this projection does
+ * not know so `unmappedKeys` has something to catch.
+ */
+const MOVER_PAYLOAD = {
+  data: {
+    mover_list: [
+      {
+        stock_detail: { code: "AAAA", name: "Alpha Tbk", icon_url: "", has_uma: false },
+        price: 1250,
+        change: { value: 40, percentage: 3.31 },
+        value: { raw: "477705146500", formatted: "477.7B" },
+        volume: { raw: "3545526000", formatted: "3.5B" },
+        frequency: { raw: "12043", formatted: "12,043" },
+        net_foreign_buy: { raw: "1200000", formatted: "1.2M" },
+        net_foreign_sell: { raw: "800000", formatted: "800K" },
+        net_buy: { raw: "400000", formatted: "400K" },
+        net_sell: { raw: "0", formatted: "0" },
+        iepiev_detail: {
+          iep: { raw: "1260", formatted: "1,260" },
+          iev: { raw: "5000", formatted: "5,000" },
+          ieval: { raw: "0", formatted: "-" },
+          iep_change: { raw: "0.8", formatted: "0.80%" },
+          iep_change_prev: { raw: "0", formatted: "0.00%" },
+          iep_price_diff: { raw: "10", formatted: "10" },
+          iep_prev_price_diff: { raw: "0", formatted: "0" },
+        },
+        big_money_net_value: { raw: "999", formatted: "999" },
+        market_cap: null,
+        a_key_this_projection_does_not_know: 1,
+      },
+    ],
+    mover_type: "MOVER_TYPE_TOP_GAINER",
+    is_show_net_foreign: true,
+    net_foreign_updated_at: "2026-09-01",
+    net_foreign_session_info: {
+      raw: 2,
+      formatted: "Updated 01 Sep 2026",
+      date: "2026-09-01",
+      is_last_session: true,
+    },
+    // Measured to be all zeros on every call regardless of what is sent. It must NOT be projected.
+    pagination: { page: 0, limit: 0, has_next: false, has_prev: false },
+  },
+};
+
+test("a mover view is sent as its wire member and read back from the ECHO", async () => {
+  responder = () => MOVER_PAYLOAD;
+  const result = await getMarketMovers({ view: "topGainer" });
+
+  // The friendly name never reaches the wire.
+  assert.deepEqual(query(lastUrl("/market-mover")), ["mover_type=MOVER_TYPE_TOP_GAINER"]);
+  // `view` is the server's echo, `requested` is what we asked for. They are separate on purpose.
+  assert.equal(result.view, "MOVER_TYPE_TOP_GAINER");
+  assert.equal(result.requested, "topGainer");
+  assert.equal(result.rowsFrom, "mover_list");
+  assert.equal(result.count, 1);
+});
+
+test("the echo is reported even when it disagrees with what was requested", async () => {
+  // The failure this guards: an endpoint that silently serves its default. `view` must describe
+  // what came back, so reading `requested` instead would hide exactly this.
+  responder = () => ({ ...MOVER_PAYLOAD, data: { ...MOVER_PAYLOAD.data, mover_type: "MOVER_TYPE_TOP_VALUE" } });
+  const result = await getMarketMovers({ view: "topGainer" });
+  assert.equal(result.requested, "topGainer");
+  assert.equal(result.view, "MOVER_TYPE_TOP_VALUE", "the echo, not the request");
+});
+
+test("a mover row is projected with readFrom, unmappedKeys and the raw row", async () => {
+  responder = () => MOVER_PAYLOAD;
+  const [row] = (await getMarketMovers({ view: "topGainer" })).rows;
+
+  assert.equal(row.symbol, "AAAA");
+  assert.equal(row.name, "Alpha Tbk");
+  assert.equal(row.price, 1250);
+  assert.equal(row.change, 40);
+  assert.equal(row.changePercent, 3.31);
+  // The {raw, formatted} shape: reading these with Number() once produced NaN for 100 symbols and
+  // looked like a dead market, which is why readRaw exists and why this asserts the number.
+  assert.equal(row.value, 477705146500);
+  assert.equal(row.volume, 3545526000);
+  assert.equal(row.frequency, 12043);
+  assert.equal(row.netForeignBuy, 1200000);
+  assert.equal(row.netForeignSell, 800000);
+
+  assert.equal(row.readFrom.symbol, "stock_detail.code");
+  assert.equal(row.readFrom.value, "value");
+  assert.equal(row.readFrom.changePercent, "change.percentage");
+
+  assert.deepEqual(row.unmappedKeys, ["a_key_this_projection_does_not_know"]);
+  assert.equal(row.row.price, 1250, "the raw row is kept whole");
+});
+
+test("iepIev is projected from the field, because IEP/IEV is not a view", async () => {
+  responder = () => MOVER_PAYLOAD;
+  const [row] = (await getMarketMovers({ view: "topGainer" })).rows;
+  assert.equal(row.iepIev?.iep, 1260);
+  assert.equal(row.iepIev?.iev, 5000);
+  assert.equal(row.iepIev?.iepChange, 0.8);
+  assert.equal(row.readFrom.iepIev, "iepiev_detail");
+});
+
+test("a row with no iepiev_detail reports it absent rather than zeroed", async () => {
+  responder = () => ({ data: { ...MOVER_PAYLOAD.data, mover_list: [{ stock_detail: { code: "BBBB" } }] } });
+  const [row] = (await getMarketMovers({ view: "topGainer" })).rows;
+  assert.equal(row.iepIev, undefined, "absent, not a block of zeros");
+  assert.equal(row.value, undefined, "a figure that was not on the wire is absent, not 0");
+  assert.equal(row.readFrom.value, undefined);
+});
+
+test("foreign provenance is carried, and the dead pagination block is not", async () => {
+  responder = () => MOVER_PAYLOAD;
+  const result = await getMarketMovers({ view: "topGainer" });
+  assert.deepEqual(result.foreign, {
+    isShown: true,
+    updatedAt: "2026-09-01",
+    sessionDate: "2026-09-01",
+    isLastSession: true,
+    sessionLabel: "Updated 01 Sep 2026",
+  });
+  // Measured all-zeros on every call including truncated ones, so passing it through would be
+  // inventing an answer about whether more rows exist.
+  assert.equal("pagination" in result, false);
+});
+
+test("every settled view is sendable and nothing else is", async () => {
+  responder = () => MOVER_PAYLOAD;
+  const expected: Record<string, string> = {
+    topGainer: "MOVER_TYPE_TOP_GAINER",
+    topLoser: "MOVER_TYPE_TOP_LOSER",
+    topValue: "MOVER_TYPE_TOP_VALUE",
+    topVolume: "MOVER_TYPE_TOP_VOLUME",
+    topFrequency: "MOVER_TYPE_TOP_FREQUENCY",
+    netForeignBuy: "MOVER_TYPE_NET_FOREIGN_BUY",
+    netForeignSell: "MOVER_TYPE_NET_FOREIGN_SELL",
+    bigMoneyNetValue: "MOVER_TYPE_BIG_MONEY_NET_VALUE",
+  };
+  assert.deepEqual(MARKET_MOVER_VIEWS.slice().sort(), Object.keys(expected).sort());
+  for (const [friendly, wire] of Object.entries(expected)) {
+    clearCache();
+    await getMarketMovers({ view: friendly as never });
+    assert.deepEqual(query(lastUrl("/market-mover")), [`mover_type=${wire}`]);
+  }
+});
+
+test("an unsettled view is refused locally, and IEP/IEV is named as the reason", async () => {
+  // Every IEP/IEV spelling was refused upstream on 2026-09-01, so shipping it as a member would
+  // tell the caller the server accepts a value nobody has seen it accept.
+  await assert.rejects(
+    () => getMarketMovers({ view: "iepIev" as never }),
+    (e: unknown) => e instanceof StockbitError && /IEP\/IEV/.test((e as Error).message),
+  );
+  assert.equal(requests, 0, "refused locally, without a round trip");
 });
 
 test("order queue prefixes the sort key and does not double it", async () => {
@@ -574,37 +753,64 @@ test("market session takes no arguments and is cached", async () => {
 
 /* ============================= batch and market prices ============================= */
 
-test("batch prices join the symbols and report which ones came back", async () => {
-  responder = () => ({
-    data: [
-      { symbol: "BBRI", last: 4250 },
-      { symbol: "TLKM", last: 3010 },
-    ],
-  });
-  const batch = await getPricesBatch(["bbri", "TLKM", "asii", "BBRI"]);
+test("prices_batch sends the ONE symbol and reads the numeric series", async () => {
+  // The measured payload: bare numbers under `data.prices`, not records. locateRows looks for
+  // arrays of RECORDS and correctly declines to bind this, so without the series field the result
+  // was `rows: []` / `dataPath: null` — indistinguishable from "this symbol has no prices".
+  responder = () => ({ data: { prices: [3280, 3290, 3300] } });
+  const batch = await getPricesBatch(["bbri"]);
 
   const url = lastUrl("/company-price-feed/prices");
   assert.equal(url.pathname, "/company-price-feed/prices");
-  assert.deepEqual(query(url), ["stock_code=BBRI,TLKM,ASII"], "de-duplicated, uppercased, joined");
-  assert.deepEqual(batch.requested, ["BBRI", "TLKM", "ASII"]);
-  assert.deepEqual(batch.found, ["BBRI", "TLKM"]);
-  // The failure this exists to make visible: a wrong multi-value encoding answers 200 with fewer
-  // rows than asked for, and without this the short list looks like a complete answer.
-  assert.deepEqual(batch.missing, ["ASII"]);
-  assert.equal(batch.dataPath, "data");
-  assert.equal(batch.rows.length, 2);
+  assert.deepEqual(query(url), ["stock_code=BBRI"], "uppercased, and one symbol only");
+  assert.deepEqual(batch.requested, ["BBRI"]);
+  assert.deepEqual(batch.series, [3280, 3290, 3300]);
+  assert.equal(batch.seriesPath, "data.prices");
+  assert.equal(batch.dataPath, null, "there are no records here, and pretending otherwise would lie");
+  // A series came back for the one symbol asked for, so it is not missing.
+  assert.deepEqual(batch.missing, []);
 });
 
-test("batch prices find the ticker whatever key it lives under", async () => {
+test("a numeric series is distinguished from a genuinely empty answer", async () => {
+  // The distinction this whole field exists for. Same `rows: []` in both cases; different meaning.
+  responder = () => ({ data: { prices: [] } });
+  const empty = await getPricesBatch(["BBRI"]);
+  assert.equal(empty.series, null, "an empty array is not a series");
+  assert.deepEqual(empty.missing, ["BBRI"], "nothing came back, so the symbol is unanswered");
+});
+
+test("prices_batch refuses more than one symbol, because this route does not batch", async () => {
+  // Settled 2026-09-01: comma-joining returns an EMPTY list and the repeated-key form answers
+  // 400 "too many values for field stock_code". Sending it anyway would return an empty result
+  // that reads as "these symbols have no prices" — a claim about the market, not the request.
+  await assert.rejects(
+    () => getPricesBatch(["BBRI", "TLKM"]),
+    (err: unknown) => err instanceof StockbitError && /takes ONE symbol/.test(err.message),
+  );
+  await assert.rejects(
+    () => getPricesBatch(["BBRI", "TLKM", "ASII"]),
+    (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
+  );
+  assert.equal(requests, 0, "refused locally, without a round trip");
+});
+
+test("prices_batch de-duplicates before counting, so one symbol twice is still one symbol", async () => {
+  responder = () => ({ data: { prices: [3280] } });
+  const batch = await getPricesBatch(["bbri", "BBRI"]);
+  assert.deepEqual(batch.requested, ["BBRI"]);
+  assert.deepEqual(query(lastUrl("/company-price-feed/prices")), ["stock_code=BBRI"]);
+});
+
+test("prices_batch finds the ticker whatever key it lives under", async () => {
   // The key the symbol arrives under has not been observed, so matching is on values, not names.
   responder = () => ({ data: { result: [{ code: "bbri", price: "4,250" }] } });
-  const batch = await getPricesBatch(["BBRI", "TLKM"]);
+  const batch = await getPricesBatch(["BBRI"]);
   assert.deepEqual(batch.found, ["BBRI"]);
-  assert.deepEqual(batch.missing, ["TLKM"]);
+  assert.deepEqual(batch.missing, []);
   assert.equal(batch.dataPath, "data.result");
 });
 
-test("batch prices keep the payload when no rows can be located", async () => {
+test("prices_batch keeps the payload when no rows can be located", async () => {
   responder = () => ({ data: { message: "no data" } });
   const batch = await getPricesBatch(["BBRI"]);
   assert.deepEqual(batch.rows, []);
@@ -613,69 +819,43 @@ test("batch prices keep the payload when no rows can be located", async () => {
   assert.deepEqual(batch.raw, { message: "no data" });
 });
 
-test("batch prices refuse an empty or oversized list before the wire", async () => {
+test("prices_batch refuses an empty list before the wire", async () => {
   await assert.rejects(
     () => getPricesBatch([]),
     (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
   );
-  const many = Array.from({ length: PRICES_BATCH_MAX + 1 }, (_, i) => `SYM${i}`);
-  await assert.rejects(
-    () => getPricesBatch(many),
-    (err: unknown) => err instanceof StockbitError && /at most 50/.test(err.message),
-  );
   assert.equal(requests, 0);
 });
 
-test("the batch cache key follows the symbol list", async () => {
-  await getPricesBatch(["BBRI", "TLKM"]);
-  await getPricesBatch(["BBRI", "TLKM"]);
-  assert.equal(requests, 1);
+test("the prices_batch cache key follows the symbol", async () => {
   await getPricesBatch(["BBRI"]);
-  assert.equal(requests, 2, "a different symbol list is a different answer");
+  await getPricesBatch(["BBRI"]);
+  assert.equal(requests, 1);
+  await getPricesBatch(["TLKM"]);
+  assert.equal(requests, 2, "a different symbol is a different answer");
 });
 
-test("market prices validate the date and pass boards through unprefixed", async () => {
-  await getMarketPrices({ symbol: "bbri", date: "2026-08-03", boards: ["reguler", "NEGO"] });
-  const url = lastUrl("/market");
-  assert.equal(url.pathname, "/company-price-feed/prices/BBRI/market");
-  assert.equal(url.searchParams.get("date"), "2026-08-03");
-  // No MARKET_BOARD_ / MARKET_TYPE_ prefix is added: this repo carries two incompatible board
-  // vocabularies already and which, if either, applies here is unknown.
-  assert.deepEqual(url.searchParams.getAll("boards"), ["REGULER", "NEGO"]);
-});
+/* --------------------------------- market prices --------------------------------- */
 
-test("market prices omit date and boards when they were not given", async () => {
-  await getMarketPrices({ symbol: "BBRI" });
-  assert.deepEqual(query(lastUrl("/market")), []);
-});
-
-test("a bad date or board is refused before the wire", async () => {
-  for (const date of ["2026/08/03", "20260803", "2026-02-30"]) {
-    await assert.rejects(
-      () => getMarketPrices({ symbol: "BBRI", date }),
-      (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
-      date,
-    );
-  }
+test("price_market refuses without a request, because the route cannot be called", async () => {
+  // Measured 2026-09-01: /company-price-feed/prices/:symbol/market answers 400 with NO parameters
+  // at all, and with every board spelling and parameter name tried. A bare call being refused is
+  // what settles it — if sending nothing is also an error, no argument combination is the fix.
   await assert.rejects(
-    () => getMarketPrices({ symbol: "BBRI", boards: ["reguler; drop"] }),
-    (err: unknown) => err instanceof StockbitError && err.kind === "invalid_param",
+    () => getMarketPrices({ symbol: "BBRI" }),
+    (err: unknown) => err instanceof StockbitError && /cannot be called/.test(err.message),
+  );
+  assert.equal(requests, 0, "no round trip is spent to be told the request is invalid");
+});
+
+test("price_market names orderbook as the thing that actually answers", async () => {
+  // The workaround is the point of the refusal: orderbook.market_data[] already carries the
+  // per-board split, so a caller is redirected rather than left with a dead tool.
+  await assert.rejects(
+    () => getMarketPrices({ symbol: "BBRI", date: "2026-08-03", boards: ["REGULER"] }),
+    (err: unknown) => err instanceof StockbitError && /orderbook/.test(err.message),
   );
   assert.equal(requests, 0);
-});
-
-test("the market-prices cache key includes the symbol, the date and the boards", async () => {
-  await getMarketPrices({ symbol: "BBRI", date: "2026-08-03" });
-  await getMarketPrices({ symbol: "BBRI", date: "2026-08-03" });
-  assert.equal(requests, 1);
-  // The symbol is a path segment, not a query parameter — a key built only from the query would
-  // serve BBRI's session to a caller asking about TLKM.
-  await getMarketPrices({ symbol: "TLKM", date: "2026-08-03" });
-  assert.equal(requests, 2);
-  await getMarketPrices({ symbol: "BBRI", date: "2026-08-04" });
-  assert.equal(requests, 3);
-  await getMarketPrices({ symbol: "BBRI", date: "2026-08-04", boards: ["NEGO"] });
-  assert.equal(requests, 4);
 });
 
 

@@ -39,6 +39,7 @@ import {
 } from "../src/settings.js";
 import { emptyLedger, loadLedger, paperLedgerPath, saveLedger, snapshot } from "../src/trading/paper.js";
 import { captureNeedsProof, captureViaBrowserLogin, defaultProfileDir } from "../src/auth/login.js";
+import { acquireLoginLock } from "../src/auth/loginlock.js";
 import { clearBrowserProfile } from "../src/auth/browserprofile.js";
 import { clearWebSession } from "../src/auth/websession.js";
 import { clearAccessCache } from "../src/auth/accesscache.js";
@@ -141,7 +142,82 @@ async function cmdImportHar(argv: string[]): Promise<void> {
   if (!result.accessOk) process.exit(1);
 }
 
+/**
+ * Take `login.lock` for the rest of this process, or refuse and exit.
+ *
+ * The lock is what stops two participants driving `~/.stockbit/browser-profile` at once, and until
+ * P7g this bin was the one participant that never took it — while being the participant the MCP
+ * `login` tool's own comment names ("a second server instance (a different client, or the CLI)").
+ * The hole was not theoretical: gate 5 of automatic login recovery is "login.lock must be free", so
+ * it read FREE for the whole time a `stockbit-auth login` was open, and an unattended recovery
+ * could launch a second browser onto the profile where the user was at that moment typing their
+ * password. The documented cost of that collision is eleven orphaned browser processes, a manual
+ * `pkill`, and a `SingletonLock` that blocked every later login — the incident `reap_orphans` was
+ * written for.
+ *
+ * ## Why an `exit` listener rather than `try`/`finally`
+ *
+ * Because `finally` does not run on `process.exit`, and the two handlers that take this lock exit
+ * that way from seven places between them — "No session captured", "nothing reached the store", an
+ * already-expired token and a failed proof in `cmdLogin`; a failed capture and a failed test
+ * refresh in `cmdTradingLogin`; and the top-level `main().catch` under both. A `finally` would
+ * cover the throws and leak the lock on every explicit exit, and a leaked lock is exactly the
+ * stale-lock problem the lock exists to prevent: twenty minutes in which every login and every
+ * automatic recovery is refused by a process that is no longer running.
+ *
+ * `process.exit` DOES emit `exit`, and `DirLockRelease` is synchronous and idempotent — which is
+ * the whole reason it can be an exit listener at all.
+ *
+ * ## Why SIGINT and SIGTERM are handled too, and why that is not belt-and-braces
+ *
+ * Node does **not** run `exit` listeners when a signal terminates the process by default — measured,
+ * not assumed: a script that registers one and then `process.kill(process.pid, "SIGINT")` exits 130
+ * without printing from the listener. So an `exit` listener alone would leak the lock on **Ctrl-C**,
+ * and Ctrl-C is not an edge case here — this command gives a human fifteen minutes to type into a
+ * browser window, so interrupting it is the ordinary way to change your mind.
+ *
+ * That would have been a REGRESSION rather than a leftover risk. Before the lock existed here, a
+ * Ctrl-C during a CLI login cost nothing; with an `exit`-only release it would cost twenty minutes
+ * in which every login — this CLI, the MCP tool, and every unattended recovery — is refused by a
+ * process that is no longer running. Taking a lock is only an improvement if releasing it is at
+ * least as reliable as not having taken it.
+ *
+ * The handlers release and then re-raise with the default disposition, so the exit STATUS a caller
+ * sees is still the signal's (130 for SIGINT), not a `process.exit(0)` that would tell a script the
+ * login succeeded. `kill -9` still leaks, and that is the case `LOGIN_LOCK_STALE_MS` is genuinely
+ * for.
+ *
+ * Held for the rest of the command rather than just the capture, deliberately: a CLI login IS the
+ * command, and the proof step that follows it rotates the credential the profile is holding.
+ */
+async function holdLoginLock(): Promise<void> {
+  const release = await acquireLoginLock();
+  if (!release) {
+    // The same shape the `login` tool refuses with — what is held, and what to go and finish —
+    // naming the holders a terminal is likely to be racing rather than the ones a client is.
+    logStderr("Another login is already in progress — a lock is held on the browser profile,");
+    logStderr("probably by a running stockbit-mcp server or a second terminal.");
+    logStderr("Finish or cancel that one, then run `stockbit-auth status`. Nothing was opened.");
+    process.exit(1);
+  }
+  process.once("exit", release);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      release();
+      // Restore the default disposition and re-raise, so the process dies of the signal it was
+      // sent and reports the status that goes with it. `process.exit(0)` here would tell a calling
+      // script that an interrupted login had succeeded.
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
 async function cmdLogin(argv: string[]): Promise<void> {
+  // Before the first line of output, so a refusal cannot claim a browser is opening. Unconditional,
+  // including `--fresh-profile`: the `login` tool takes the lock for a fresh profile too, and a
+  // login is a login — the second window is confusing even when the two profiles differ.
+  await holdLoginLock();
   logStderr("Opening a browser for a one-time Stockbit login…");
   const result = await captureViaBrowserLogin({
     profileDir: argv.includes("--fresh-profile") ? "fresh" : undefined,
@@ -396,6 +472,15 @@ async function cmdTradingLogin(argv: string[]): Promise<void> {
     // PIN prompt is a MODAL that appears when a buy or sell is clicked, anywhere on the site. So
     // this opens the site and says what to click; a URL here could only ever be wrong again.
     const startUrl = process.env.STOCKBIT_TRADING_URL || "https://stockbit.com/";
+    // The same asymmetry `cmdLogin` had: this branch drives `~/.stockbit/browser-profile` through
+    // the very same `captureViaBrowserLogin`, so it is a second participant in the collision the
+    // lock exists to prevent — a PIN modal in one window and an unattended recovery launching into
+    // the same profile is the same wreck whichever credential is being captured.
+    //
+    // Only this branch. The PIN path below opens nothing: it posts the six digits to carina and
+    // never touches a browser profile, so locking it would refuse a login that cannot collide with
+    // anything — and `bootstrap` and `import-har` are left alone for the same reason.
+    await holdLoginLock();
     logStderr("Opening the logged-in browser so Cloudflare sees a real one.");
     logStderr("Click Buy or Sell on any stock in that window — the 6-digit PIN prompt appears as a");
     logStderr("pop-up. Enter it there. There is no separate trading page, so nothing to navigate to.");

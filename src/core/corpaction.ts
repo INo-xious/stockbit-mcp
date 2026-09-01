@@ -54,6 +54,9 @@ export interface RowSet {
    * Where the rows were found:
    *   `data`            — `data` was itself the array
    *   `data.<key>`      — the array was nested one level down (the watchlist detail does this)
+   *   `data.{a,b}`      — SEVERAL arrays, one per kind: the day calendar's bucket shape, and these
+   *                       are the buckets that actually contributed rows. `data.{}` is every bucket
+   *                       present and empty, which is a real, empty day. See `bucketsOf`.
    *   `absent`          — the response carried no `data` at all. NOT the same as an empty list.
    *   `unrecognized`    — `data` was present but was not a row list; see `raw`, which is then the
    *                       only trustworthy answer, and treat `rows: []` as "not parsed", not "none".
@@ -76,6 +79,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * as the array with pagination beside it — and anything else is reported as `unrecognized` rather
  * than flattened to an empty list. That distinction is the point: an empty array from the server and
  * a shape this function could not read are the same value and must not be the same answer.
+ *
+ * Note the FIRST array wins, which is only safe because these routes carry one. The day calendar
+ * carries twelve, and reading it with this function bound to whichever kind sorted first; `bucketsOf`
+ * is the reader for that shape and runs ahead of this one on that one route.
  */
 function rowsOf(data: unknown): RowSet {
   if (data === undefined || data === null) return { rows: [], rowsFrom: "absent" };
@@ -471,9 +478,129 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
 
 /* --------------------------------- the day calendar --------------------------------- */
 
+/**
+ * One row of the day calendar, tagged with the bucket it was found in.
+ *
+ * `corpactionType` is added by this tool, not by Stockbit — the same convention and the same field
+ * name `getDividendCalendar` uses when it merges two kinds into one list. A second spelling for the
+ * same idea is how two readers of this server's output come to disagree about which field says what
+ * kind a row is.
+ *
+ * The value is the bucket key EXACTLY as the response spelled it, never translated, and it is a
+ * plain string rather than a `CorpactionType` for a measured reason: two of the twelve buckets seen
+ * on 2026-09-01 are not the spellings the `/corpaction/{actionType}` path takes. The calendar says
+ * `stock_reverse` and `tender` where `CORPACTION_TYPES` says `reversesplit` and `tenderoffer`.
+ * Passing one of those two straight into `corporate_actions` is therefore refused as an unknown
+ * kind — which is the right outcome, because nothing here has verified that the two vocabularies
+ * name the same thing, and rewriting `tender` to `tenderoffer` would be that claim made silently.
+ */
+export interface CalendarRow extends Record<string, unknown> {
+  corpactionType: string;
+}
+
 export interface CalendarDay extends RowSet {
-  /** The date requested, or null when none was sent and the server chose its own "today". */
+  /**
+   * The day these rows are for, `YYYY-MM-DD` — the date requested, or the `today` the response
+   * itself carried when none was sent.
+   *
+   * The server's own value is used because it is the only thing here that knows what day it is in
+   * WIB: the process clock is UTC and the two disagree for the first seven hours of every day, so a
+   * substituted local "today" would be a confident wrong date. Null means no date was requested AND
+   * the response carried no `today` this code could read as one; the raw value, if there was one, is
+   * still in `meta`.
+   */
   date: string | null;
+  /**
+   * Where `date` came from — the request, or the response's own `today`. Absent exactly when `date`
+   * is null, so it is never a claim about a value that is not there.
+   *
+   * Whether `today` echoes the date that was ASKED for or names the server's current day is not
+   * known: the only live call was undated. So it is read as a fallback and never as a check on
+   * whether a dated request was honoured — a check that fired on every legitimate past-date request
+   * would teach a reader to ignore it. `meta.today` carries the raw value beside the requested date
+   * either way, so anyone who needs to compare the two still can.
+   */
+  dateFrom?: "request" | "data.today";
+  /**
+   * Every bucket the response carried, with how many rows were in it — ZEROS INCLUDED.
+   *
+   * This is what separates the two readings of a kind that is not in `rows`. A kind listed here with
+   * 0 was returned by Stockbit and is empty for this day. A kind NOT listed was not in the response
+   * at all, and nothing here says whether that means empty or unsupported. The field being absent
+   * altogether means the response was not the bucket shape, so no row carries `corpactionType`.
+   */
+  buckets?: Record<string, number>;
+}
+
+/**
+ * The day calendar's BUCKET shape: one key per action kind, each holding that kind's rows.
+ *
+ * Measured live on 2026-09-01: `GET /corpaction` answered with twelve such keys — `bonus`,
+ * `dividend`, `economic`, `ipo`, `pubex`, `rightissue`, `rups`, `stock_reverse`, `stocksplit`,
+ * `stock_dividend`, `tender`, `warrant` — beside a `today` string. Every kind is present every day
+ * and most of them are empty, which is what made this worth its own reader: `rowsOf` binds to the
+ * FIRST array it finds, `bonus` comes first and was empty, so the calendar reported `rows: []` with
+ * `rowsFrom: "data.bonus"` while nineteen dividend, RUPS, warrant and economic rows sat unread in
+ * `meta`. An empty answer is bad. An empty answer that claims to have parsed the payload is worse,
+ * because `rowsFrom` is precisely what a reader consults to tell "none today" from "not parsed".
+ *
+ * Detection is STRUCTURAL — two or more array-of-record values — and never a match against
+ * `CORPACTION_TYPES`. One array beside its siblings is the nested shape `rowsOf` already reads (rows
+ * under a key, pagination next to them) and is left to it. A bucket whose name this module does not
+ * recognise is still a bucket full of real rows, and dropping it is the defect being fixed here; the
+ * two spellings that already differ from the path vocabulary are the standing proof that a
+ * name-matched reader would have thrown rows away.
+ *
+ * `economic` is kept in the SAME list as the rest, deliberately. An economic event is not a
+ * corporate action — it is a data release and it belongs to no issuer — but this codebase already
+ * treats it as one kind among the twelve: `economic` is in `CORPACTION_TYPES`,
+ * `/corpaction/economic` is how `corporate_actions` fetches it, and that tool's own description
+ * names it. Splitting it out only here would be a second convention for a distinction the rest of
+ * the module does not make, and would drop eight rows the server sent out of a list whose whole
+ * purpose is "what is happening today". Its rows are tagged `corpactionType: "economic"` like every
+ * other bucket, so a caller who wants corporate actions alone filters that one value out, and
+ * `buckets.economic` gives the count to subtract without walking the rows.
+ */
+function bucketsOf(
+  data: unknown,
+): (RowSet & { rows: CalendarRow[]; buckets: Record<string, number> }) | null {
+  if (!isRecord(data)) return null;
+  const buckets = Object.entries(data).filter(
+    (entry): entry is [string, Array<Record<string, unknown>>] =>
+      Array.isArray(entry[1]) && entry[1].every(isRecord),
+  );
+  if (buckets.length < 2) return null;
+
+  const names = new Set(buckets.map(([kind]) => kind));
+  const meta = Object.fromEntries(Object.entries(data).filter(([key]) => !names.has(key)));
+  const filled = buckets.filter(([, bucket]) => bucket.length > 0).map(([kind]) => kind);
+  return {
+    // The tag is spread LAST, so it always describes the bucket the row was actually found in, the
+    // same way `getDividendCalendar` adds `corpactionType` last for the same reason.
+    rows: buckets.flatMap(([kind, bucket]) => bucket.map((row): CalendarRow => ({ ...row, corpactionType: kind }))),
+    // Several places, so it names them all — the buckets that CONTRIBUTED, in wire order. Naming one
+    // of twelve would imply the other eleven were read and empty, which is the lie this whole reader
+    // exists to stop.
+    rowsFrom: `data.{${filled.join(",")}}`,
+    buckets: Object.fromEntries(buckets.map(([kind, bucket]) => [kind, bucket.length])),
+    ...(Object.keys(meta).length > 0 ? { meta } : {}),
+  };
+}
+
+/**
+ * The `today` a calendar response carries, normalized to `YYYY-MM-DD`, or null.
+ *
+ * Deliberately stricter than `asDate`: only the dashed and compact forms are taken, and the
+ * `Date.parse` fallback under them is not. This value becomes the `date` a caller reads as the day
+ * the rows describe, and `Date.parse("01/09/2026")` is the 9th of January — a confident wrong day is
+ * worse here than no day at all, which is the same bargain absent-is-not-zero makes everywhere else.
+ * A value this refuses is still in `meta.today`, unaltered, for a reader who can make sense of it.
+ */
+function serverToday(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}/.test(text) && !/^(?:19|20)\d{6}$/.test(text)) return null;
+  return asDate(text);
 }
 
 /**
@@ -486,10 +613,23 @@ export interface CalendarDay extends RowSet {
  */
 export async function getCalendarDay(date?: string): Promise<CalendarDay> {
   const day = date === undefined ? undefined : normalizeTradeDate(date);
-  return cached(`corpaction:day:${day ?? "server-default"}`, CACHE.keystatsTtlMs, async () => ({
-    date: day ?? null,
-    ...(await fetchRows("corpactionToday", "corporate action calendar", { params: { date: day } })),
-  }));
+  return cached(`corpaction:day:${day ?? "server-default"}`, CACHE.keystatsTtlMs, async () => {
+    const body = await getJson("corpactionToday", { params: { date: day } });
+    const data = parseOr(Envelope, body, "corporate action calendar").data;
+    // Buckets first, `rowsOf` behind it. Not a replacement: this endpoint has only ever been
+    // measured undated, and a day that came back as one flat list must still be read as one.
+    const set = bucketsOf(data) ?? rowsOf(data);
+    // Read off `data` itself rather than off `set.meta`, so it works on both shapes — `rowsOf`
+    // returns no `meta` at all when `data` is a bare array.
+    const served = isRecord(data) ? serverToday(data.today) : null;
+    const from: CalendarDay["dateFrom"] =
+      day !== undefined ? "request" : served !== null ? "data.today" : undefined;
+    return {
+      date: day ?? served,
+      ...(from ? { dateFrom: from } : {}),
+      ...set,
+    };
+  });
 }
 
 /** The most days one `calendar_range` call will fetch. One request per day, so this is 31 requests. */

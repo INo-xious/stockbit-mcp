@@ -360,6 +360,17 @@ test("every order-entry write is in the list the instructions page measures agai
  * ------------------------------------------------------------------ */
 
 const OBSERVED = [
+  // Promoted 2026-09-01 by live calls after the ~18:00 WIB broker release. Each earned it on the
+  // repo's own bar — rows came back AND every field the tool names was read out of them — not on
+  // "the route answered". See docs/PENDING-VERIFICATION.md, "Probed live on 2026-09-01".
+  //
+  // market_movers: all eight mover_type members echoed back verbatim against a control value that
+  // 400s, and every projected key read off a real mover_list row.
+  "market_movers",
+  // prices_batch: the ROUTE's behaviour was measured — every multi-symbol encoding tried and
+  // refused, and the single-symbol numeric series read off a real response. Which key a ticker
+  // sits under is still unsettled and the description says so in those words.
+  "prices_batch",
   "stream_trending",
   "brokers",
   "broker_top",
@@ -473,13 +484,14 @@ const PROJECTED = [
   "ownership_composition",
   "running_trade",
   "trade_book",
-  "market_movers",
   "top_stocks",
   "order_queue",
   "market_session",
-  "prices_batch",
   "price_market",
   "broker_activity",
+  // Its no-argument form WAS measured live on 2026-09-01 and its bucket reader was fixed from that
+  // capture — but `date` and `from`/`to` were not, and the code keeps a flat-shape branch for them.
+  // Same grading `shareholding` got for the same reason: one settled mode is not a settled tool.
   "calendar_today",
   "stock_conversion",
   "underwriters",

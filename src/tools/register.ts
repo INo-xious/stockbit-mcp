@@ -1170,11 +1170,26 @@ export function registerTools(
 
   defMarket.read(
     "top_movers",
-    "Top gainers, losers, or most-active IDX stocks (hotlist). Returns an empty list when the " +
-      "market is closed — that is expected, not an error.",
+    "Stockbit's HOTLIST — a small curated list, NOT a market-wide ranking. Use market_movers for " +
+      "the market-wide one.\n" +
+      "This matters because the two look interchangeable and are not. Measured 2026-09-01, every " +
+      "call to this hotlist returned the SAME NINE symbols — at limit 5, 25, 50 and 100 alike. " +
+      "`limit` is sent and the service ignores it. So the ranking you get is a correct ordering " +
+      "over a nine-symbol universe, not the top of the exchange, and reading it as 'today's top " +
+      "gainers on IDX' overstates it by a wide margin.\n" +
+      "That also disposes of a reported bug: a contiguous descending run of nine changes is what a " +
+      "correct sort over nine symbols looks like. There is nothing wrong with the ordering; the " +
+      "universe is simply small, and this description is the fix.\n" +
+      "market_movers reads a different service and returned 50 rows for the same moment, including " +
+      "structured warrants. The two disagreeing is expected and is not evidence that either is " +
+      "wrong.\n" +
+      "Returns an empty list when the market is closed — that is expected, not an error.",
     {
       type: z.enum(["topGainer", "topLoser", "mostActive"]).describe("Which hotlist"),
-      limit: z.coerce.number().optional().describe("Default 25"),
+      limit: z.coerce
+        .number()
+        .optional()
+        .describe("Sent, but the service ignores it — nine rows come back regardless. Default 25."),
     },
     async (a) => runTool(() => core.getTopMovers(a.type, a.limit ?? 25)),
   );
@@ -1223,7 +1238,20 @@ export function registerTools(
 
   defMarket.read(
     "orderbook",
-    "Full order-book depth ladder for a symbol.",
+    "Full order-book depth ladder for a symbol.\n" +
+      "UNITS, AND THEY ARE MIXED IN ONE RESPONSE. `volume` here is SHARES (e.g. 3,545,526,000) " +
+      "while `technicals`' `volumeLots` for the same symbol and session is LOTS (35,488,071). They " +
+      "reconcile at exactly 100 shares per lot — the IDX lot size — and neither figure is wrong. " +
+      "Worse, this same payload labels its `total_bid_offer` depth figures `lot` while carrying " +
+      "`volume` in shares a few keys away. Two units under similar names in one response is a " +
+      "silent-wrong-answer generator: check which one you are holding before comparing anything, " +
+      "and never compare `volume` here against `volumeLots` there without the ×100.\n" +
+      "`market_data[]` carries the per-board split (All Market / Regular / Nego / Cash). It is also " +
+      "the answer for anything price_market looks like it should do — that route cannot be called.\n" +
+      "FOREIGN FLOW HAS NO DATE ON THIS PAYLOAD. `fbuy`/`fsell`/`fnet` arrive with nothing saying " +
+      "which session they are from, and foreign flow publishes at roughly 18:00 WIB, so before that " +
+      "release they are the PREVIOUS session's. price_bands surfaces this as an explicitly null " +
+      "`dataAsOf` with a note; market_movers carries the date for real as `foreign.sessionDate`.",
     { symbol: z.string().describe("IDX ticker") },
     async (a) => runTool(() => core.getOrderbook(a.symbol)),
   );

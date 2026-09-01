@@ -501,6 +501,14 @@ async function readShareholdersChart(
     // written down anywhere in this repo. A gateway that answered the same rpc error under some
     // other status would slip past a kind-only test and hand the caller back the raw string —
     // which is the exact dead end this whole branch exists to remove.
+    //
+    // Still the kind, and still not the status, after P7g made `refreshOnce` derive its kind from
+    // the status. That change removed the one wrong match this branch could make — a 502 while
+    // refreshing the session mid-call used to arrive labelled `auth` and be explained as "the
+    // shareholder chart refused its minted token", which is a confident answer to a question nobody
+    // asked. What it does not do is give this branch a status to narrow on: the failure it is FOR
+    // has no recorded status at all, as the paragraph above says, so a status test would put the
+    // whole diagnosis behind a number nobody has written down.
     if (error instanceof StockbitError && (error.kind === "auth" || WEBVIEW_TOKEN_REFUSAL.test(error.message))) {
       throw new StockbitError(
         "auth",

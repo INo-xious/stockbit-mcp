@@ -1,9 +1,49 @@
 # ADR-0011 — Automatic login recovery
 
-**Status.** Accepted.
+**Status.** Accepted and implemented — **never run against a live Stockbit session.**
 **Supersedes nothing.** Extends [ADR-0007](0007-auth-tools-in-the-server.md) (auth tools in the
 server) and depends on [ADR-0009](0009-browser-is-the-source-of-truth.md) (the browser is the source
 of truth).
+
+## What is verified, and what is not
+
+The same qualifier [ADR-0004](0004-order-entry.md) carries, for the same reason: this describes a
+thing the code does to a user's machine, and the description must not claim more than has been seen.
+Read it on the evidence ladder in [`CONTEXT.md`](../../CONTEXT.md).
+
+**Projected — the recovery end to end.** No 401 from Stockbit has ever driven this path in this
+repo. The suite is offline, `fetch` is stubbed, and every capture in it is injected. So "a dead
+session is silently replaced mid-task" is a projection from parts that work separately, not a
+behaviour anyone has watched happen here.
+
+It was **attempted against a live account on 2026-09-01**, and the attempt is what turned this from
+an absence into a reason. The stored `main` refresh token was replaced with one Stockbit would
+reject and the access cache was cleared; the built server, armed and opted in, then answered a quote
+**in 0.3 s without opening anything**. Recovery did not run, and did not need to.
+
+The cause is `ensureFresh`'s **level three**, which adopts the browser's own access token before any
+refresh is attempted. While the browser session is alive, a dead stored credential does not produce
+a 401 at all. So this path needs three things at once — a rejected stored token, a web-session
+ACCESS token that has aged out (so level three declines), and a web-session REFRESH token still
+alive (because gate 4 tests exactly that). The same artefact has to be half dead in one half and
+alive in the other.
+
+That is an ordinary state in the wild and an awkward one to stage, which is the honest explanation
+for why nobody has watched this run. `docs/PENDING-VERIFICATION.md` records the method and the one
+remaining step. Until someone completes it, the ~3 s harvest figure remains a field report from the
+account owner's machine and nothing here has timed it.
+
+**Verified offline — the safety properties, and these are the ones that matter.**
+`test/relogin.test.ts` holds each of them, and `test/reap.test.ts` the last half of the last:
+
+- every gate refuses in the state it exists for, and the five are independent;
+- the one-attempt latch is spent exactly once, and never by a gate — standing aside for a human who
+  is signing in leaves the attempt available;
+- a capture that comes back with nothing is reported as `harvest-failed`, never as a recovery;
+- no verdict and no error carries a token, and nothing reaped is reported by command line.
+
+That split is deliberate. The unverified half is "does it fix the session"; the verified half is
+"can it do harm while trying", and only the second is a reason the default could be wrong.
 
 ## The decision
 
@@ -27,7 +67,15 @@ action.
 
 And the action was known to work: when the API token is dead but the browser session is still alive,
 a forced login reads the credential straight out of the already-signed-in profile in about three
-seconds, with nobody typing anything. That path was confirmed working unattended.
+seconds, with nobody typing anything.
+
+Where that figure comes from, because it is quoted elsewhere and reads like a measurement: it is
+**the same field report**, from the account owner's own machine. Nothing in this repo has timed a
+harvest — the suite is offline and every capture in it is injected — so "~3 s" is one person's
+observation of the manual path this one automates, not a number produced by a call made here. It is
+recorded because it is what made the decision, and qualified because a reader deciding whether to
+set `STOCKBIT_AUTO_RELOGIN` should know which of the two it is. `UNATTENDED_TIMEOUT_MS` is 30 s, and
+that ceiling is what the code actually relies on.
 
 ## What "gated" means here
 
@@ -39,7 +87,7 @@ Five conditions, each closing a different way of doing harm. All five, every tim
 | `STOCKBIT_AUTO_RELOGIN` is set, parsed truthily | A window nobody opted into |
 | `STOCKBIT_NO_BROWSER` is not set | The existing no-browser contract |
 | `webSessionHealth().likelyValid` is **true** | Spending a rotation on a session already dead |
-| `login.lock` is free — taken with `timeoutMs: 0`, never queued | Two windows driving one browser profile |
+| `login.lock` is free — taken with `timeoutMs: 0`, never queued | Two windows driving one browser profile. Every participant that drives the SHARED profile takes it: the `login` tool, this, and `stockbit-auth login` / `trading-login --browser`. `doctor` opens a browser and is deliberately not one — its self-tests run on their own throwaway profiles and cannot collide |
 
 Plus: `main` only, and one attempt per process.
 
@@ -188,6 +236,11 @@ and tested registration-purity property in `src/tools/surface.ts`.
 - Recovery takes the same `login.lock` a human login takes, so the two can never drive one browser
   profile at once — in either direction. It never queues on it: a recovery that waits is a tool call
   that hangs, and there is nothing left to recover by the time someone finishes signing in.
+  - Amended 2026-09-01 (P7g): that was true of the `login` TOOL and not of the CLI, which took no
+    lock at all — so this gate read "free" throughout a `stockbit-auth login`, which is the one
+    participant the tool's own comment names. `stockbit-auth login` and `trading-login --browser`
+    now take it too, through the single `src/auth/loginlock.ts`, and release it on every exit path
+    including a failure. Three participants, one rule; `test/authcli.test.ts` holds both halves.
 - An auth failure keeps its own error `kind`. Recovery adds a sentence; it never reclassifies a
   transport failure as an authentication one, which would make a dropped Wi-Fi read as a dead
   session to every consumer that branches on `kind`.

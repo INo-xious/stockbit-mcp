@@ -334,3 +334,251 @@ narrower than the hole it replaces, and unmeasured beyond that.
 
 **To settle it:** print `os.tmpdir()` from each client that runs this server on the same machine.
 
+---
+
+## Probed live on 2026-09-01, ~18:15–18:55 WIB (P7a)
+
+A third live pass, against a real account, on a **trading day after the ~18:00 WIB broker release**
+and with the market shut. The timing is the point: it is the only window in which the R1/R2/R3
+staleness question can be answered, and it settles the `MOVER_TYPE_*` vocabulary by echo rather than
+by rows, which needs no open session at all.
+
+Every row below is a transcript. Where a value was refused, the refusal is the finding.
+
+### The `MOVER_TYPE_*` vocabulary — settled by echo, with a control
+
+`/order-trade/market-mover` echoes `mover_type` back, so an accepted value returns as what was sent.
+The decisive addition is a **deliberate nonsense control**: `MOVER_TYPE_DEFINITELY_NOT_REAL` answers
+**400 `Your request is invalid`**. This endpoint therefore *rejects* unknown members rather than
+silently falling back to its default — which is what makes every ACCEPTED verdict below evidence
+rather than inference, and defeats this API's usual 200-with-the-default failure mode.
+
+| Member | Verdict |
+|---|---|
+| `MOVER_TYPE_TOP_VALUE` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_BIG_MONEY_NET_VALUE` | **ACCEPTED** — echoed verbatim (was bundle-only until now) |
+| `MOVER_TYPE_TOP_GAINER` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_TOP_LOSER` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_TOP_VOLUME` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_TOP_FREQUENCY` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_NET_FOREIGN_BUY` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_NET_FOREIGN_SELL` | **ACCEPTED** — echoed verbatim |
+| `MOVER_TYPE_IEP_IEV` | 400 |
+| `MOVER_TYPE_IEPIEV`, `_IEV`, `_IEP`, `_IEP_IEV_DETAIL`, `_INDICATIVE`, `_INDICATIVE_EQUILIBRIUM`, `_PRE_OPENING`, `_PREOPENING`, `_IEP_CHANGE`, `_TOP_IEP` | 400, all ten |
+| `MOVER_TYPE_TOP_FREQ`, `_FOREIGN_BUY`, `_FOREIGN_SELL`, `_TOP_GAINERS`, `_TOP_LOSERS` | 400 — near-miss spellings, recorded so nobody re-guesses them |
+
+**Eight members are settled. The IEP/IEV tab has no `mover_type` and must not be given one.**
+
+### IEP/IEV is a FIELD, not a view
+
+`iepiev_detail` is carried on **every row of every view**:
+`{iep, iev, ieval, iep_change, iep_change_prev, iep_price_diff, iep_prev_price_diff}`, each a
+`{raw, formatted}` pair. On this reading every value was `0`/`"-"`, which is expected: IEP/IEV is the
+indicative equilibrium price computed during **pre-opening (08:45–09:00 WIB)** and there is none
+outside it.
+
+So the UI's eighth tab is reachable by projecting a field, not by requesting a view. That closes the
+"all eight tabs" goal without shipping a guessed enum member.
+
+### `market-mover` shape and paging
+
+| | |
+|---|---|
+| Row container | `data.mover_list` — **50 rows with the market shut** |
+| Row fields | `stock_detail{code,name,icon_url,has_uma,notations,corpaction}`, `price`, `change{value,percentage}`, `value{raw,formatted}`, `volume{raw,formatted}`, `frequency{raw,formatted}`, `net_foreign_buy`, `net_foreign_sell`, `net_buy`, `net_sell`, `iepiev_detail`, `big_money_net_value`, `buy_value_percentage`, `sell_value_percentage`, `big_money_buy_value_percentage`, `big_money_sell_value_percentage`, `bid_percent`, `catalog_detail`, `market_cap` |
+| `limit` | **HONOURED.** `limit=5` → 5 rows; `limit=100` → 50, so 50 is the ceiling |
+| `page`, `per_page` | **IGNORED.** `page=1` returns the same 50 rows |
+| `data.pagination` | **DEAD.** Always `{page:0, limit:0, has_next:false, has_prev:false}` regardless of what is sent. It must be reported absent, never projected as meaningful — a `has_next:false` that is always false is not an answer about paging |
+| Provenance | `mover_type` (echo), `is_show_net_foreign`, `net_foreign_updated_at`, `net_foreign_session_info{raw,formatted,date,is_last_session}` |
+
+`market_cap` came back `null` on every row.
+
+### R1 / R2 / R3 — the post-18:00 adjudication. **All three roll forward. Not staleness.**
+
+The report asked whether these serve a stale date. Measured after the broker release on the same
+trading day, every one of them serves **today**:
+
+| Route | What it said |
+|---|---|
+| `runningTrade` (`symbols=BBRI&order_by=1`) | `data.date = "2026-09-01"` — today |
+| `runningTradeChart` (broker_flow_intraday) | `from = to = "2026-09-01"`, `date_session_info = "1 Sep 2026"` — today |
+| `marketMover` | `net_foreign_updated_at = "2026-09-01"`, `net_foreign_session_info.date = "2026-09-01"`, `is_last_session = true` — today |
+| `marketMover` | `is_show_net_foreign = **true**` — the field report saw `false` intraday |
+
+**This settles the reclassification.** R1, R2 and R3 are *documentation* items, not staleness bugs:
+the data is correct and fails to announce which session it is from. `is_show_net_foreign` flipping
+false→true across the release is the mechanism, observed on both sides.
+
+`brokerDistribution` already carries `date_info`, `start_date` and `end_date`; `brokerTop` carries
+`data.date{from,to,idx}`; `brokerActivity` carries `from`/`to`. Three of the four payloads that need
+a `dataAsOf` already contain one.
+
+### NEW, not in the report: `data_last_updated` is WIB stamped as UTC
+
+`runningTradeChart` returned `data_last_updated = "2026-09-01T16:28:44Z"`. At the moment of the call
+it was **11:28 UTC**, so a `Z` timestamp of 16:28 is five hours in the future. 16:28 **WIB** is
+minutes after the 16:15 close, which is the only reading that makes sense. The `Z` suffix is wrong.
+
+Anything that parses this field as UTC gets a timestamp five hours ahead of reality. It is the same
+class as the mixed units in cross-cutting observation 3, and it should be read as WIB and re-stamped,
+or surfaced verbatim with the discrepancy named — never parsed as the `Z` claims.
+
+### D5 — the hotlist universe. **Nine symbols, and `limit` does nothing.**
+
+`/emitten/hotlist/topgainer` at `limit` = 5, 25, 50 and 100 returned the **same nine rows every
+time**: `SOTS, APLI, KOBX, BOBA, ENAK, DIVA, UNIC, DFAM, HBAT`.
+
+So `limit` is ignored *and* the universe is nine. This confirms the plan's second correction: the
+report's "not ranking by change" reading is wrong — a contiguous descending sort over nine symbols is
+what a correct ranking over a nine-symbol universe looks like. There is no sort bug to fix; the tool
+must state its universe.
+
+For contrast, `market-mover`'s `MOVER_TYPE_TOP_GAINER` returned 50 rows whose codes include
+structured warrants (`ELSAZPCF7A`, `MAPIHDCZ6A`, `ACESDRCU6A`). **The two tools serve genuinely
+different universes**, which is the repo's existing position on them and is now measured.
+
+### D7 — `prices_batch` is not a batch endpoint
+
+| Request | Result |
+|---|---|
+| `stock_code=BBRI` | 200, `data.prices` = **array(20) of bare numbers** (`[3280, …]`) |
+| `stock_code=BBRI,BBCA,TLKM` | 200, `data.prices` = **array(0)** |
+| `stock_code=BBRI&stock_code=BBCA&stock_code=TLKM` | **400 `too many values for field "stock_code"`** |
+| `stock_code[]=…` (repeated) | **400 `too many values for field "stock_code"`** |
+| `symbols=BBRI,BBCA,TLKM` | 400 `Silahkan Periksa permintaan` |
+| `stock_code=BBRI\|BBCA\|TLKM` | 200, empty |
+
+`/company-price-feed/prices` takes **one** `stock_code` and returns a **series of prices for it** —
+not one last price per symbol. The repeated-key encoding the report proposed is explicitly refused,
+so there is no encoding left to find. **The tool is built on a false premise**, and the honest fix is
+to say the route is single-symbol rather than to keep returning an empty batch that reads as "no
+prices".
+
+### D9 — `price_market` cannot be called at all
+
+`/company-price-feed/prices/BBRI/market` answers **400 `Silahkan Periksa permintaan` with no
+parameters at all**, and with every one of: `market` = `REGULER`, `RG`, `regular`, `REGULAR`, `TN`,
+`NG`, `CASH`, `ALL`, `MARKET_TYPE_REGULAR`, `MARKET_TYPE_ALL`, `BOARD_REGULAR`, `1`, `0`; and with
+the keys `board`, `market_type` and `type`.
+
+**This is not a vocabulary problem.** A bare call with no query at all is refused, so no argument
+combination can fix it. The tool should say it cannot be called and point at `orderbook`'s
+`market_data[]`, which already returns the per-board split.
+
+### D10 — two chart routes, two vocabularies, and `1w` is the discriminator
+
+| timeframe | `/charts/:symbol` | `/charts/:symbol/daily` |
+|---|---|---|
+| `1w` | **400 `Kurun waktu tidak valid`** | **200** |
+| `1m`, `1d`, `3m`, `ytd`, `1y` | 200 | 200 |
+| `1D`, `1W`, `1M`, `daily`, `weekly`, `5`, `15`, `60`, `1`, `D`, `W` | 400 | — |
+
+The two routes also return **different shapes**. `/charts/:symbol` answers `{chart_points: []}` — a
+near-empty container. `/charts/:symbol/daily` answers the rich payload the projection reads:
+`prices`, `cagr`, `change`, `drawdown`, `markingpoint`, `percentage`, `timeframe`, `xaxisopt`,
+`previous`, `line_weight`, `previous_timeframe_price`, `chart_type`, `interval_in_minutes`,
+`allowed_chart_type`, `max_candles`.
+
+That is the whole of D10, measured: `getChartRaw` reads `charts` while `getSeriesBars` reads
+`chartsDaily`, and hands the first the second's vocabulary. `1w` → 400 and `1m` → empty are both
+explained by the route being wrong, not the value.
+
+### D11 — `broker_activity` has no `period`, and the row container exists without one
+
+The control is what settles it:
+
+| Call | Result |
+|---|---|
+| `brokerDistribution` + `period=TB_PERIOD_LAST_1_DAY` | **200** |
+| `brokerActivity` + `period=TB_PERIOD_LAST_1_DAY` | **400** |
+| `brokerActivity` + all ten `BROKER_PERIODS` members | **400**, every one |
+| `brokerActivity` + `period=TB_PERIOD_DAILY`/`_1D`/`_ONE_DAY`/`_WEEKLY`/`_MONTHLY`/`DAILY`/`1D`/`daily` | **400**, every one |
+| `brokerActivity` + **no** `period` | **200, with rows** |
+| `brokerActivity` + `tb_period`/`periode`/`range`/`time_period` | 200 — unknown keys are silently ignored, so the 400 on `period` is a *validated* field refusing a value, not an unknown one |
+
+The same member that its sibling accepts is refused here. **`broker_activity` must stop sending
+`period`** and say the endpoint has no period filter; its window is fixed and already reported.
+
+Row container, from a call with no `period`:
+`data` = `{broker_activity_transaction, from, to, broker_code, broker_name}`. So
+**`broker_activity_transaction` belongs in `ROW_CONTAINERS`**, and `from`/`to` give the result its
+provenance for free.
+
+### D12 — `broker_top`: `limit` ignored, sorted ASCENDING, and the report's dead fields are alive
+
+| | |
+|---|---|
+| Row container | `data.list` — **89 rows** bare, at `limit=3` and at `limit=5` alike. `limit` is ignored |
+| Sort | **ASCENDING by `total_value`**, verified across all 89: first `22,485,000`, last `5,636,360,451,396`. The tool documented as "which brokers moved the most" puts the biggest broker last |
+| `sort_by=total_value`, `sort_by=TOTAL_VALUE`, `order_by=desc`, `sort_direction=DESC` | 200 — accepted, and **none reversed the order** |
+| `order=desc`, `sort=desc` | 400 — recognised fields refusing a value |
+| Provenance | `data.date{from, to, idx}`, all `2026-09-01` |
+| Row shape | `{code, name, investor_type, total_value, net_value, buy_value, sell_value, total_volume, total_frequency, group}` — **plain strings, not `{raw,formatted}`** |
+
+**Correction to the report.** It records `net_value`, `buy_value` and `sell_value` as `"0"` on every
+row and calls them three dead fields. On this reading all three carry **89 distinct values** —
+e.g. first row `net_value: "-15025000"`, `buy_value: "3730000"`, `sell_value: "18755000"`. They are
+populated and must not be reported absent. Whatever produced the zeroes was not the schema.
+
+No `sort_by` value reverses the order, so the descending sort has to be done client-side and said so.
+
+### D13 — `calendar_today` is buckets, and the first one is empty
+
+`/corpaction` returned, in this order:
+
+```
+bonus: 0    dividend: 1    economic: 8    ipo: 0    pubex: 0    rightissue: 0
+rups: 1     stock_reverse: 0    stocksplit: 0    tender: 0    warrant: 9
+stock_dividend: 0    today: <string>
+```
+
+`rowsOf` (`src/core/corpaction.ts:80`) takes the **first** key whose value is an array of records.
+`bonus` is first and empty, so it binds there and reports `rows: []` — while **19 real rows**
+(dividend 1, economic 8, rups 1, warrant 9) go unread into `meta`. Exactly the reported defect,
+reproduced from a capture.
+
+`today` is present, so `date` can stop being `null`.
+
+### P7g item 3 — the recovery path was driven against a live account, and it did not run
+
+The attempt ADR-0011 has been waiting for. Run last, deliberately, because it breaks the session
+everything else depends on; the store was backed up first and restored afterwards, and live calls
+were re-verified working after the restore.
+
+**Method.** The stored `main` refresh token was replaced with a well-formed but dead JWT (future
+`exp`, nonsense signature, so it is STOCKBIT that rejects it rather than anything local), the shared
+access cache was cleared, and the **built** server — the only entry point that calls
+`armAutoRelogin()` — was started with `STOCKBIT_AUTO_RELOGIN=1` and no `STOCKBIT_NO_BROWSER`, then
+asked for a quote over stdio.
+
+**Result: the quote answered in 0.3 s and recovery never ran.** No browser opened, no 401 was
+raised, and `access.enc` was still empty afterwards — so nothing refreshed.
+
+**Why, and this is the finding.** `ensureFresh` has a **level three**
+(`src/auth/session.ts`, `domain === "main" && slotState.forcedRefreshes === 0`) that adopts the
+**browser's own access token** out of the web session before any refresh is attempted. With a live
+browser session, a dead stored refresh token therefore produces no 401 at all — the request is
+served from the browser's copy, which is exactly what that level was built to do.
+
+So the window in which automatic recovery can fire is **narrower than "the credential died"**. All
+three must hold at once:
+
+1. the stored refresh token is rejected by Stockbit, **and**
+2. the web session's ACCESS token is expired or unreadable, so level three declines — note it is
+   skipped anyway once `forcedRefreshes > 0`, which is the path a real 401 takes, **and**
+3. the web session's REFRESH token is still alive, because gate 4 requires
+   `webSessionHealth().likelyValid === true` and that verdict is computed from the refresh token.
+
+Conditions 2 and 3 are the interesting pair: the same artefact must be half dead and half alive, in
+the right halves. That is a real state — a web session whose access token has aged out while its
+refresh token has days left is ordinary — but it is not the state a tester lands in by killing the
+stored credential, which is why this path has never been observed.
+
+**What is therefore still unmeasured:** the harvest itself, and the ~3 s figure. This run did not
+reach `attemptAutoRelogin`, so it neither confirms nor refutes it. ADR-0011 stays **Projected** on
+the strength of this, and now says so with a reason rather than an absence.
+
+**To settle it:** expire the web session's ACCESS token while leaving its REFRESH token alive, then
+repeat the method above. `scripts/p7-recovery-probe.mjs` in the P7 worktree is the harness minus
+that one step.
+

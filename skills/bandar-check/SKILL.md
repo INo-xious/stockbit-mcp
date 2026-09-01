@@ -15,11 +15,14 @@ meaningful before saying anything about who is on it.
    closes. Say so rather than quietly presenting half a day as a day.
 2. **`broker_summary symbol=… `** — the ledger. Every broker's buy and sell over the window.
    - `period` takes one of FIVE windows, and only these five: `LATEST`, `YESTERDAY`, `LAST_7_DAYS`,
-     `LAST_3_MONTHS`, `YEAR_TO_DATE`. The longer ten-value list belongs to `broker_activity`,
-     `broker_top` and `broker_distribution`, which are different endpoints; sending one of those
-     here is rejected, and `LAST_1_DAY` / `LAST_30_DAYS` return a 400 from Stockbit itself. Or give
-     `from`/`to` for an explicit range. Do not do both — the API ignores the dates and answers with
-     the latest session, silently.
+     `LAST_3_MONTHS`, `YEAR_TO_DATE`. The longer ten-value list belongs to `broker_top` and
+     `broker_distribution`, which are different endpoints; sending one of those here is rejected,
+     and `LAST_1_DAY` / `LAST_30_DAYS` return a 400 from Stockbit itself. Or give `from`/`to` for
+     an explicit range. Do not do both — the API ignores the dates and answers with the latest
+     session, silently.
+   - `broker_activity` has **no window at all**. Measured 2026-09-01: every value of `period`
+     answers 400 there, so the tool refuses it rather than sending it. Its window is the server's,
+     and it is reported back in `from`/`to` on the result — read those to date the rows.
    - `transaction_type` is `NET` or `GROSS`. **NET is the question people mean.** GROSS tells you
      who was busy; NET tells you who ended up holding.
    - `market_board` defaults to the regular board. `NEGO` and `TUNAI` are crossings and cash

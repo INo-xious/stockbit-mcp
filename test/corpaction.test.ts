@@ -106,6 +106,47 @@ const PERFORMANCE = {
 
 const IPO = { data: [{ symbol: "RATU", offering_price: "1100", listing_date: "2026-01-08" }] };
 
+/**
+ * The market-wide day calendar: `data` is BUCKETED, one key per action kind, with a `today` string
+ * beside them. Twelve buckets come back every day and most of them are empty.
+ *
+ * The key ORDER copies the live 2026-09-01 response and is the whole point of the fixture: `bonus`
+ * is FIRST and it is EMPTY. A reader that binds to the first array it finds reports a day of
+ * nineteen actions as none, with a `rowsFrom` claiming it parsed the payload — which is worse than
+ * an empty answer, because `rowsFrom` is what tells "none today" from "not read". The per-bucket
+ * counts (dividend 1, economic 8, rups 1, warrant 9) are the live ones; the rows themselves are
+ * invented, as are the tickers.
+ */
+const CALENDAR_BUCKETS = {
+  message: "ok",
+  data: {
+    bonus: [],
+    dividend: [{ symbol: "AAAA", cum_date: "2026-09-01", ex_date: "2026-09-02", cash_dividend: "45" }],
+    // Not corporate actions — data releases, tied to no issuer. They are in the payload and in the
+    // row list all the same; see the test that pins that decision.
+    economic: Array.from({ length: 8 }, (_, i) => ({ event: `Release ${i + 1}`, country: "ID" })),
+    ipo: [],
+    pubex: [],
+    rightissue: [],
+    rups: [{ symbol: "BBBB", date: "2026-09-01", agenda: "RUPSLB" }],
+    // `stock_reverse` and `tender` are the calendar's spellings; the path segment vocabulary says
+    // `reversesplit` and `tenderoffer`. Kept as sent — see the tag test.
+    stock_reverse: [],
+    stocksplit: [],
+    tender: [],
+    warrant: Array.from({ length: 9 }, (_, i) => ({ symbol: `WRNT${i}`, instrument: `WRNT${i}-W` })),
+    stock_dividend: [],
+    today: "2026-09-01",
+  },
+};
+
+/** Every bucket present and empty: a real, quiet day. Not the same answer as a payload nobody read. */
+const CALENDAR_EMPTY = {
+  data: Object.fromEntries(
+    Object.entries(CALENDAR_BUCKETS.data).map(([key, value]) => [key, Array.isArray(value) ? [] : value]),
+  ),
+};
+
 /* ------------------------------- the fake wire ------------------------------- */
 
 type Reply = (pathname: string, params: URLSearchParams) => unknown;
@@ -540,6 +581,163 @@ test("an impossible date is refused before the request", async () => {
   await assert.rejects(() => getCalendarDay("2026-02-30"), /calendar date/i);
   await assert.rejects(() => getCalendarDay("20260803"), /YYYY-MM-DD/);
   assert.equal(seen.length, 0);
+});
+
+test("EVERY bucket is read, not the first one that happens to be an array", async () => {
+  // The defect, exactly: `bonus` sorts first in the live payload and is empty, so the reader bound
+  // to it and reported a nineteen-action day as `rows: []` with `rowsFrom: "data.bonus"` — the two
+  // together saying "parsed, and there is nothing", while the dividend, RUPS, warrant and economic
+  // rows sat in `meta`. BBCA going ex-dividend read as an empty calendar.
+  reply = () => CALENDAR_BUCKETS;
+  const day = await getCalendarDay();
+
+  assert.equal(day.rows.length, 19, "1 dividend + 8 economic + 1 rups + 9 warrant");
+  assert.notEqual(day.rowsFrom, "data.bonus", "binding to the first empty bucket is the regression");
+  assert.equal(
+    day.rowsFrom,
+    "data.{dividend,economic,rups,warrant}",
+    "rowsFrom names every bucket that contributed, because naming one implies the rest were read",
+  );
+  // Zeros included: a kind here with 0 came back empty, a kind missing from this map was not in the
+  // response at all. Nothing else in the answer can tell those two apart.
+  assert.deepEqual(day.buckets, {
+    bonus: 0,
+    dividend: 1,
+    economic: 8,
+    ipo: 0,
+    pubex: 0,
+    rightissue: 0,
+    rups: 1,
+    stock_reverse: 0,
+    stocksplit: 0,
+    tender: 0,
+    warrant: 9,
+    stock_dividend: 0,
+  });
+  // The non-array sibling is kept beside the rows rather than dropped, as it always was.
+  assert.deepEqual(day.meta, { today: "2026-09-01" });
+});
+
+test("each row says which bucket it came from, in the response's own spelling", async () => {
+  reply = () => CALENDAR_BUCKETS;
+  const day = await getCalendarDay();
+  const counted = day.rows.reduce<Record<string, number>>((acc, row) => {
+    const kind = String(row.corpactionType);
+    acc[kind] = (acc[kind] ?? 0) + 1;
+    return acc;
+  }, {});
+  assert.deepEqual(counted, { dividend: 1, economic: 8, rups: 1, warrant: 9 });
+  // The row is otherwise untouched: the tag is added, nothing is renamed or dropped.
+  assert.deepEqual(day.rows[0], {
+    symbol: "AAAA",
+    cum_date: "2026-09-01",
+    ex_date: "2026-09-02",
+    cash_dividend: "45",
+    corpactionType: "dividend",
+  });
+});
+
+test("a bucket name is never translated into the action_type vocabulary", async () => {
+  // The calendar spells two of the twelve kinds differently from the `/corpaction/{actionType}`
+  // path: `stock_reverse` and `tender` against `reversesplit` and `tenderoffer`. Rewriting one to
+  // the other would be a claim that they name the same thing, and no call here has settled that.
+  // The cost of not rewriting is visible and small: feeding `tender` to `corporate_actions` is
+  // refused as an unknown kind, which is a question, not a wrong answer.
+  reply = () => ({
+    data: {
+      bonus: [],
+      stock_reverse: [{ symbol: "CCCC", ratio: "10:1" }],
+      tender: [{ symbol: "DDDD", price: "980" }],
+    },
+  });
+  const day = await getCalendarDay();
+  assert.deepEqual(
+    day.rows.map((row) => row.corpactionType),
+    ["stock_reverse", "tender"],
+  );
+  assert.deepEqual(day.rowsFrom, "data.{stock_reverse,tender}");
+});
+
+test("the economic bucket is in the same list, and is countable on its own", async () => {
+  // Deliberate: an economic event is a data release, not a corporate action — but `economic` is
+  // already one of CORPACTION_TYPES and `corporate_actions(action_type:"economic")` fetches it from
+  // the same family, so splitting it out only here would be a second convention. Dropping it would
+  // also lose eight rows from a list whose question is "what is happening today". A caller who
+  // wants corporate actions alone has both handles: the tag and the count.
+  reply = () => CALENDAR_BUCKETS;
+  const day = await getCalendarDay();
+  assert.equal(day.buckets?.economic, 8);
+  assert.equal(day.rows.filter((row) => row.corpactionType !== "economic").length, 11);
+});
+
+test("all buckets empty is an empty DAY; a payload nobody read is still not", async () => {
+  reply = () => CALENDAR_EMPTY;
+  const day = await getCalendarDay();
+  assert.deepEqual(day.rows, []);
+  assert.equal(day.rowsFrom, "data.{}", "no bucket contributed, and all twelve were read");
+  assert.equal(Object.keys(day.buckets ?? {}).length, 12);
+  assert.deepEqual(
+    Object.values(day.buckets ?? {}),
+    Array(12).fill(0),
+    "every kind came back and every kind is empty — that is a quiet day, not an unread response",
+  );
+
+  clearCache();
+  reply = () => ({ data: { message: "maintenance", code: 7 } });
+  const unread = await getCalendarDay();
+  assert.equal(unread.rowsFrom, "unrecognized");
+  assert.equal("buckets" in unread, false, "no buckets key at all: nothing was bucketed");
+});
+
+test("the single-list shapes still read the way they always did", async () => {
+  // The bucket reader is an ADDITION. `corpaction/:actionType` and the rest answer with one list,
+  // and one array beside its siblings is still the nested shape, not a two-bucket calendar.
+  reply = () => ({ data: [{ symbol: "EEEE", action: "rups" }] });
+  const flat = await getCalendarDay();
+  assert.equal(flat.rowsFrom, "data");
+  assert.equal(flat.rows.length, 1);
+  assert.equal("buckets" in flat, false);
+  assert.equal("corpactionType" in flat.rows[0], false, "an untagged shape is never tagged by guess");
+
+  clearCache();
+  reply = () => CONVERSION;
+  const nested = await getCalendarDay();
+  assert.equal(nested.rowsFrom, "data.result", "one array with pagination beside it is not a bucket map");
+  assert.deepEqual(nested.meta, { total: 2, pagination: { page: 1, per_page: 20 } });
+  assert.equal("buckets" in nested, false);
+});
+
+test("the server's own today fills in the date, and dateFrom says where it came from", async () => {
+  reply = () => CALENDAR_BUCKETS;
+  const served = await getCalendarDay();
+  assert.equal(served.date, "2026-09-01", "null was wrong: the response said what day it is");
+  assert.equal(served.dateFrom, "data.today");
+
+  // A requested date wins — it is what was asked for. The server's value stays visible in `meta`,
+  // because whether `today` echoes the request or names the server's own day is not known here.
+  clearCache();
+  const asked = await getCalendarDay("2026-08-03");
+  assert.equal(asked.date, "2026-08-03");
+  assert.equal(asked.dateFrom, "request");
+  assert.deepEqual(asked.meta, { today: "2026-09-01" });
+});
+
+test("a today this code cannot read leaves the date null rather than guessing a day", async () => {
+  // `Date.parse("01/09/2026")` is the 9th of January, and this value is read as the day the rows
+  // describe. A confident wrong day is worse than no day; the raw string stays in `meta`.
+  reply = () => ({ data: { bonus: [], rups: [{ symbol: "FFFF" }], today: "01/09/2026" } });
+  const day = await getCalendarDay();
+  assert.equal(day.date, null);
+  assert.equal("dateFrom" in day, false, "no dateFrom without a date to have a provenance for");
+  assert.deepEqual(day.meta, { today: "01/09/2026" });
+});
+
+test("a range counts every bucket's rows, not the first bucket's", async () => {
+  // `rowsTotal` is what a caller skims to decide whether a window is worth reading.
+  reply = () => CALENDAR_BUCKETS;
+  const range = await getCalendarRange({ from: "2026-08-03", to: "2026-08-04" });
+  assert.equal(range.rowsTotal, 38, "19 rows on each of the two days");
+  assert.deepEqual(range.days.map((d) => d.dateFrom), ["request", "request"]);
 });
 
 /* ------------------------------- calendar range ------------------------------- */

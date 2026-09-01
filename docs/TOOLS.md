@@ -55,7 +55,7 @@ Prices, depth, movers, bars, the session clock.
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
 | `quote` | read | Real-time quote for an IDX symbol: last price, change, and best bid/offer. | Observed | symbol* |
-| `top_movers` | read | Top gainers, losers, or most-active IDX stocks (hotlist). | Observed | type*, limit |
+| `top_movers` | read | Stockbit's HOTLIST — a small curated list, NOT a market-wide ranking. | Observed | type*, limit |
 | `trending` | read | Trending IDX stocks right now (community-driven). | Observed | — |
 | `sectors` | read | List IDX sectors (id, name). | Observed | — |
 | `intraday_prices` | read | Intraday minutely close-price series for a symbol (the basis for volume/price-move signals). | Observed | symbol*, interval |
@@ -66,12 +66,12 @@ Prices, depth, movers, bars, the session clock.
 | `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, order_by, grouped |
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
 | `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
-| `market_movers` | read | Market movers from the order-trade service. | Projected | limit |
+| `market_movers` | read | The market movers behind Stockbit's own Movers dialog — the market-wide ranking. | Observed | view, limit |
 | `top_stocks` | read | The order-trade service's top-stock list. | Projected | limit |
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
 | `market_session` | read | Where the IDX trading day currently is: pre-opening, session 1, the midday break, session 2, post-closing, or shut. | Projected | — |
-| `prices_batch` | read | Last price for several symbols in one request. | Projected | symbols* |
-| `price_market` | read | One symbol's prices broken down by market board for a session. | Projected | symbol*, date, boards |
+| `prices_batch` | read | A price SERIES for ONE symbol. | Observed | symbols* |
+| `price_market` | read | DOES NOT WORK. | Projected | symbol*, date, boards |
 
 ## bandarmology
 

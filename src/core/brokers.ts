@@ -7,14 +7,27 @@
  *   GET /order-trade/broker/activity            one broker's stocks; REPEATED market/investor types
  *   GET /order-trade/broker/top                 the league table
  *
- * ## None of these three has been observed live
+ * ## What has been seen, and what has not
  *
- * That is the fact that shapes every projection below. Envelopes are permissive, `data` is accepted
- * as an array or as an object wrapping one, and no row field is renamed on a guess: each row is
- * returned whole under `row`, with the one or two fields this module is willing to claim it
- * recognised sitting beside it and `readFrom` naming the wire key each was read from. A wrong guess
- * therefore shows up as `code: undefined` next to a visible raw row, never as a confident wrong
- * value and never as a key that is always undefined.
+ * All three routes have now answered live. What that settled differs per route, and the difference
+ * is what shapes every projection below.
+ *
+ * `brokerTop`'s ROW SHAPE was measured on 2026-09-01 — ten keys, every figure a plain numeric
+ * string — so its rows ARE projected into named fields. Its two behaviours were measured too, and
+ * both are wrong in a way a caller cannot see from the outside: it sorts ASCENDING by
+ * `total_value`, and it ignores `limit`. `getBrokerTop` fixes both locally and says so in the
+ * result, because a correction the caller cannot see is its own kind of silence.
+ *
+ * `brokerActivity` answered, and its ENVELOPE was measured — `broker_activity_transaction`, `from`,
+ * `to`, `broker_code`, `broker_name` — but the names inside its rows were not recorded. Its
+ * `period` parameter is refused outright; see `buildActivityParams` for the control that settles it.
+ *
+ * Where a shape is still unknown the old discipline holds: envelopes are permissive, `data` is
+ * accepted as an array or as an object wrapping one, and no row field is renamed on a guess. Each
+ * row is returned whole under `row`, with the fields this module is willing to claim it recognised
+ * sitting beside it and `readFrom` naming the wire key each was read from. A wrong guess therefore
+ * shows up as `code: undefined` next to a visible raw row, never as a confident wrong value and
+ * never as a key that is always undefined.
  *
  * `bandar_detector` is the exception: it runs on `getBrokerSummary`, whose response shape was
  * measured, so it projects into named fields with no hedging.
@@ -186,10 +199,28 @@ interface Rowset {
   rows: Row[];
   from: string | null;
   dataKeys: string[];
+  /**
+   * `data` itself, when it was an object.
+   *
+   * These envelopes carry provenance BESIDE the rows — `brokerActivity` puts the window it
+   * aggregated over in `from`/`to`, `brokerTop` puts the session in `date` — and the projection
+   * used to read the array out and drop everything around it. A window the endpoint volunteers and
+   * the tool throws away is a window the caller then has to guess at.
+   */
+  dataObject: Row | null;
 }
 
-/** Envelope keys that plausibly wrap the array, tried in order before falling back to any array. */
+/**
+ * Envelope keys that plausibly wrap the array, tried in order before falling back to any array.
+ *
+ * `broker_activity_transaction` leads because it is the only member here that was MEASURED rather
+ * than guessed: a `brokerActivity` call with no `period` (2026-09-01) answered
+ * `data = {broker_activity_transaction, from, to, broker_code, broker_name}`. The rest remain
+ * plausible names for shapes nobody has seen, and a measured container must win over a guess if a
+ * response ever carries both.
+ */
 const ROW_CONTAINERS = [
+  "broker_activity_transaction",
   "result",
   "results",
   "list",
@@ -207,17 +238,29 @@ const RowArray = z.array(z.record(z.unknown()));
 
 function readRows(body: unknown, context: string): Rowset {
   const { data } = parseOr(Envelope, body, context);
-  if (data === null || data === undefined) return { rows: [], from: null, dataKeys: [] };
+  if (data === null || data === undefined) return { rows: [], from: null, dataKeys: [], dataObject: null };
   if (Array.isArray(data)) {
-    return { rows: parseOr(RowArray, data, `${context} rows`), from: "data", dataKeys: [] };
+    return {
+      rows: parseOr(RowArray, data, `${context} rows`),
+      from: "data",
+      dataKeys: [],
+      // A bare array carries no provenance beside itself. Null, not `{}`: "there was nothing to
+      // read it from" and "it was there and empty" are different answers.
+      dataObject: null,
+    };
   }
   if (typeof data === "object") {
     const obj = data as Row;
     const dataKeys = Object.keys(obj);
     const key =
       ROW_CONTAINERS.find((k) => Array.isArray(obj[k])) ?? dataKeys.find((k) => Array.isArray(obj[k]));
-    if (key === undefined) return { rows: [], from: null, dataKeys };
-    return { rows: parseOr(RowArray, obj[key], `${context} rows`), from: key, dataKeys };
+    if (key === undefined) return { rows: [], from: null, dataKeys, dataObject: obj };
+    return {
+      rows: parseOr(RowArray, obj[key], `${context} rows`),
+      from: key,
+      dataKeys,
+      dataObject: obj,
+    };
   }
   // A scalar under `data` is not a paging edge case; it is a different endpoint answering.
   throw new StockbitError(
@@ -255,6 +298,39 @@ const isCode = (v: string): boolean => BROKER_CODE_RE.test(v);
 const isName = (v: string): boolean => v.length > 0;
 /** Same charset `src/symbol.ts` admits, checked without throwing — this is a guess, not an input. */
 const isSymbolish = (v: string): boolean => /^[A-Z0-9]{1,12}(-[A-Z0-9]{1,4})?$/.test(v);
+
+/**
+ * A number off the broker wire, or `undefined`.
+ *
+ * The same pattern and the same refusals as `asBrokerNumber` in `src/core/marketdetectors.ts`, and
+ * for the same two reasons: a separated number ("1,234" / "1.234,56") is REFUSED rather than
+ * guessed at, because the two Indonesian conventions disagree about which separator is the decimal
+ * one; and E-notation is admitted, because this API sends it.
+ *
+ * It is duplicated rather than imported because that one is not exported and this one reads a
+ * different service's rows — `brokerTop` sends `total_value` as a PLAIN numeric string
+ * (`"5636360451396"`), not the `{raw, formatted}` pair most of this API uses.
+ *
+ * `undefined` on anything else, including on a number that arrived as a JSON number: every figure
+ * measured on these routes is a string, so a bare number is a shape change worth seeing as absent
+ * rather than silently absorbing.
+ */
+const WIRE_NUMBER_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+function asWireNumber(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!WIRE_NUMBER_RE.test(trimmed)) return undefined;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** A non-empty string off the envelope, or `undefined`. Empty means "no value here", not "". */
+function asWireString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 /**
  * How many rows nothing could be read from, plus the keys of the first one.
@@ -513,8 +589,17 @@ export interface BrokerActivityRow {
 
 export interface BrokerActivity {
   brokerCode: string;
-  /** Exactly what went onto the wire, so the window and filters that produced these rows are visible. */
+  /** Exactly what went onto the wire, so the filters that produced these rows are visible. */
   request: Record<string, string | number | readonly string[]>;
+  /**
+   * The window the endpoint says these rows cover, read from `data.from` / `data.to`.
+   *
+   * This route has no period filter (see `buildActivityParams`), so the window is not something a
+   * caller chose — it is something the response announces, and it is the only thing that dates
+   * these figures. Absent when the response did not carry it; never defaulted to today.
+   */
+  from?: string;
+  to?: string;
   count: number;
   rowsFrom: string | null;
   dataKeys: string[];
@@ -524,6 +609,10 @@ export interface BrokerActivity {
 
 export interface BrokerActivityOptions {
   brokerCode: unknown;
+  /**
+   * Refused, always. Present in the options so the refusal can be explicit — see
+   * `buildActivityParams`. Dropping it silently would be worse.
+   */
   period?: unknown;
   /** Boards to include. REPEATED on the wire, one `market_type` per value. */
   marketTypes?: readonly unknown[];
@@ -546,18 +635,45 @@ type WireParams = Record<string, string | number | readonly string[] | undefined
  * repetition on the URL that was actually sent and that no `%2C` appears in it.
  *
  * Every filter is omitted when the caller omits it. Nothing here defaults to a value: a default
- * this project invented would decide the window and the boards on the caller's behalf, and on a
- * route nobody has probed it could equally well be a value the server rejects.
+ * this project invented would decide the boards on the caller's behalf, and on a route nobody has
+ * probed it could equally well be a value the server rejects.
+ *
+ * ## `period` is REFUSED here, and never sent
+ *
+ * Measured on 2026-09-01. This endpoint answers **400 `Your request is invalid`** to `period` —
+ * to every one of the ten `BROKER_PERIODS` members, and to eight other spellings
+ * (`TB_PERIOD_DAILY`, `_1D`, `_ONE_DAY`, `_WEEKLY`, `_MONTHLY`, `DAILY`, `1D`, `daily`). With no
+ * `period` at all it answers **200 with rows**.
+ *
+ * Two controls make that a fact about `period` rather than about the call. `brokerDistribution`
+ * accepts `TB_PERIOD_LAST_1_DAY` on the same vocabulary, so the member is not the problem; and
+ * `tb_period`, `periode`, `range` and `time_period` all answer 200 and are ignored, so this service
+ * SILENTLY DROPS keys it does not know. A 400 therefore means `period` is a recognised field
+ * refusing a value, not an unknown parameter — there is no spelling left to find.
+ *
+ * So it is refused, loudly, rather than dropped on the way to the wire. A dropped filter is worse
+ * than one that errors: the caller reads rows for a window they never asked for and has no way to
+ * see it. `BROKER_PERIODS` is untouched — `brokerDistribution` and `brokerTop` still use it.
+ *
+ * The window is not lost by refusing: this endpoint reports its own in `data.from` / `data.to`,
+ * which `getBrokerActivity` now carries onto the result.
  *
  * Exported so the shape can be asserted without a network round-trip.
  */
 export function buildActivityParams(opts: BrokerActivityOptions): WireParams {
-  const period = opts.period === undefined ? undefined : member(BROKER_PERIODS, opts.period, "period");
+  if (opts.period !== undefined) {
+    throw new StockbitError(
+      "invalid_param",
+      "broker activity has no period filter: this endpoint answers 400 to every value of `period`, " +
+        "including the ones its sibling broker_distribution accepts. Its window is fixed by the " +
+        "server and reported back in `from`/`to` on the result. Omit `period` and read those; use " +
+        "broker_distribution when you need to choose a window.",
+    );
+  }
   const markets = tokenList(BROKER_MARKET_TYPES, opts.marketTypes, "market_type");
   const investors = tokenList(BROKER_INVESTOR_TYPES, opts.investorTypes, "investor_type");
   return {
     broker_code: normalizeBrokerCode(opts.brokerCode),
-    period: period === undefined ? undefined : `TB_PERIOD_${period}`,
     market_type: markets?.map((m) => `MARKET_TYPE_${m}`),
     investor_type: investors?.map((i) => `INVESTOR_TYPE_${i}`),
     sort_by: opts.sortBy === undefined ? undefined : `SORT_BY_${enumToken(opts.sortBy, "sort_by")}`,
@@ -582,9 +698,9 @@ function sent(params: WireParams): Record<string, string | number | readonly str
  * broker and lists stocks. Two calls chain into the question neither answers alone — find today's
  * biggest net seller of a stock, then ask what else that broker was distributing.
  *
- * The cache key is the full parameter set, so a different window, a different board list or a
- * different page is a different entry. Keying on the broker code alone would serve one broker's
- * REGULER week in answer to a question about their ALL-board day.
+ * The cache key is the full parameter set, so a different board list or a different page is a
+ * different entry. Keying on the broker code alone would serve one broker's REGULER answer to a
+ * question about their ALL board.
  */
 export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<BrokerActivity> {
   const params = buildActivityParams(opts);
@@ -592,14 +708,27 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
 
   return cached(`brokers:activity:${JSON.stringify(request)}`, CACHE.brokerSummaryTtlMs, async () => {
     const body = await getJson("brokerActivity", { params });
-    const { rows, from, dataKeys } = readRows(body, "broker activity");
+    const { rows, from, dataKeys, dataObject } = readRows(body, "broker activity");
     const mapped = rows.map((row) => {
       const symbol = pick(row, SYMBOL_KEYS, isSymbolish);
       return { symbol: symbol.value, readFrom: { symbol: symbol.key }, row };
     });
+    // Beside the rows, not inside them: `data.from` / `data.to` are the window the SERVER chose,
+    // and since `period` is refused they are the only statement of which days these figures are.
+    // Spread, so an envelope that carried neither leaves the keys absent rather than undefined.
+    // Named apart from the destructured `from` above, which is the ENVELOPE KEY the rows came out
+    // of. Two different `from`s in one scope, and confusing them would put a container name where
+    // a date belongs.
+    const windowFrom = asWireString(dataObject?.from);
+    const windowTo = asWireString(dataObject?.to);
+    const window = {
+      ...(windowFrom === undefined ? {} : { from: windowFrom }),
+      ...(windowTo === undefined ? {} : { to: windowTo }),
+    };
     return {
       brokerCode: String(params.broker_code),
       request,
+      ...window,
       count: mapped.length,
       rowsFrom: from,
       dataKeys,
@@ -611,19 +740,92 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
 
 /* ----------------------------------- top ----------------------------------- */
 
+/**
+ * Which wire key each of `brokerTop`'s figures was read from.
+ *
+ * Wider than `ReadFrom` because this route's row shape IS observed (2026-09-01) and its figures are
+ * therefore projected into named fields rather than left in `row`. A key appears here only when a
+ * value actually came out of it: a `total_value` that would not parse leaves both `totalValue` and
+ * `readFrom.totalValue` absent, so "the wire did not send it" and "this server would not read it"
+ * never look like a figure of zero.
+ */
+export interface BrokerTopReadFrom extends ReadFrom {
+  investorType?: string;
+  totalValue?: string;
+  netValue?: string;
+  buyValue?: string;
+  sellValue?: string;
+  totalVolume?: string;
+  totalFrequency?: string;
+  group?: string;
+}
+
 export interface BrokerTopRow {
   code?: string;
   name?: string;
-  readFrom: ReadFrom;
-  /** The whole row: the value/volume/frequency figures are in here under unobserved names. */
+  /** `investor_type` verbatim — a wire vocabulary this project has not mapped, so it is not renamed. */
+  investorType?: string;
+  /** IDR. The figure the league table is ranked by, and the key the local sort reads. */
+  totalValue?: number;
+  /** IDR. Buys netted against sells. Negative is a net seller; the sign is the wire's. */
+  netValue?: number;
+  buyValue?: number;
+  sellValue?: number;
+  totalVolume?: number;
+  totalFrequency?: number;
+  /** `group` verbatim, e.g. a house's affiliation label. Not mapped, not renamed. */
+  group?: string;
+  readFrom: BrokerTopReadFrom;
+  /** The whole row as it arrived. Nothing is dropped, and a key this projection does not know is here. */
   row: Row;
 }
 
+/**
+ * How the rows got into the order they are in.
+ *
+ * Returned rather than merely documented, because the order is OURS. The endpoint answers
+ * **ascending** by `total_value` (measured across all 89 rows on 2026-09-01: first `22,485,000`,
+ * last `5,636,360,451,396`) and no `sort_by` value reverses it — `sort_by=total_value`,
+ * `sort_by=TOTAL_VALUE`, `order_by=desc` and `sort_direction=DESC` are all accepted with a 200 and
+ * all leave the order alone, while `order=desc` and `sort=desc` answer 400. So a descending league
+ * table can only be produced here, and a re-sort the caller cannot see would be exactly the kind of
+ * silent behaviour this module exists to refuse.
+ */
+export interface BrokerTopSort {
+  /** The row key the sort read. Always `total_value`: it is the only ranking the route publishes. */
+  by: "total_value";
+  direction: "descending";
+  /** True always, and stated anyway — the caller must not read this order as the exchange's. */
+  appliedLocally: true;
+  /**
+   * Rows whose `total_value` could not be read. They keep their wire order and sit AFTER every
+   * sorted row, because a row with no rank cannot be given one.
+   */
+  unsortable: number;
+}
+
+/** The session this table covers, from `data.date`. Absent keys stay absent. */
+export interface BrokerTopDate {
+  from?: string;
+  to?: string;
+  /** Stockbit's own index-date field. Passed through under its wire name; its meaning is unmapped. */
+  idx?: string;
+}
+
 export interface BrokerTop {
+  /** Exactly what went onto the wire. `limit` is NOT in here — see `getBrokerTop`. */
   request: Record<string, string | number | readonly string[]>;
+  /** Provenance the response volunteered: which session these figures are. Absent if it did not. */
+  date?: BrokerTopDate;
+  /** Rows in `brokers` — after the local `limit`, when one was given. */
   count: number;
+  /** Rows the response actually carried. Equal to `count` when no `limit` was applied. */
+  countBeforeLimit: number;
+  /** Present only when `limit` was passed. The cap is OURS: the endpoint ignores its own. */
+  limitAppliedLocally?: number;
   rowsFrom: string | null;
   dataKeys: string[];
+  sortedLocally: BrokerTopSort;
   brokers: BrokerTopRow[];
   unmapped: Unmapped;
 }
@@ -632,7 +834,36 @@ export interface BrokerTopOptions {
   period?: unknown;
   sortBy?: unknown;
   page?: unknown;
+  /**
+   * Rows to keep. Applied HERE, after the descending sort, because the endpoint ignores it: at
+   * `limit=3` and at `limit=5` it returned the same 89 rows (2026-09-01).
+   */
   limit?: unknown;
+}
+
+/** Read one measured numeric key, naming it only when a number actually came out of it. */
+function figure(row: Row, key: string): { value?: number; key?: string } {
+  const value = asWireNumber(row[key]);
+  return value === undefined ? {} : { value, key };
+}
+
+/** The same for a measured string key. */
+function label(row: Row, key: string): { value?: string; key?: string } {
+  const value = asWireString(row[key]);
+  return value === undefined ? {} : { value, key };
+}
+
+/** `data.date` — three strings, each absent rather than empty when the wire sent nothing. */
+function readTopDate(raw: Row): BrokerTopDate | undefined {
+  const from = asWireString(raw.from);
+  const to = asWireString(raw.to);
+  const idx = asWireString(raw.idx);
+  if (from === undefined && to === undefined && idx === undefined) return undefined;
+  return {
+    ...(from === undefined ? {} : { from }),
+    ...(to === undefined ? {} : { to }),
+    ...(idx === undefined ? {} : { idx }),
+  };
 }
 
 /**
@@ -642,34 +873,122 @@ export interface BrokerTopOptions {
  * parameters are documented for the activity route and only for it, so they are not sent here —
  * a filter this endpoint ignores would silently widen the answer, and one it rejects would 400 a
  * call that had no need to carry it.
+ *
+ * ## Two things this function does that the endpoint does not
+ *
+ * **It sorts.** Descending by `total_value`, locally. See `BrokerTopSort` for what was measured.
+ * A tool whose whole description is "which brokers moved the most" was putting the biggest broker
+ * last, and the ignored `limit` was the only thing hiding it.
+ *
+ * **It applies `limit`.** Also locally, and `limit` is NOT sent: the endpoint ignores it, and a
+ * parameter on the wire that changes nothing reads back through `request` as a cap the server
+ * honoured. Refusing it outright was the alternative, but a league table is exactly the shape a
+ * caller wants the top of, and `limitAppliedLocally` says whose cap it is.
+ *
+ * Because `limit` is not on the wire it is not in the cache key either — which is the point. The
+ * FULL sorted table is what is cached, and the trim happens on a copy, so asking for the top 3 and
+ * then the top 10 is one fetch. Same shape, and the same trap, as `getBrokerDirectory`'s `codes`:
+ * trimming the cached object in place would hand every later caller this caller's cap.
  */
 export async function getBrokerTop(opts: BrokerTopOptions = {}): Promise<BrokerTop> {
   const period = opts.period === undefined ? undefined : member(BROKER_PERIODS, opts.period, "period");
+  // Validated before the fetch, so a mistyped cap is an error here rather than a silent full table.
+  const limit = opts.limit === undefined ? undefined : pageNumber(opts.limit, "limit");
   const params: WireParams = {
     period: period === undefined ? undefined : `TB_PERIOD_${period}`,
     sort_by: opts.sortBy === undefined ? undefined : `SORT_BY_${enumToken(opts.sortBy, "sort_by")}`,
     page: opts.page === undefined ? undefined : pageNumber(opts.page, "page"),
-    limit: opts.limit === undefined ? undefined : pageNumber(opts.limit, "limit"),
   };
   const request = sent(params);
 
-  return cached(`brokers:top:${JSON.stringify(request)}`, CACHE.brokerSummaryTtlMs, async () => {
+  const full = await cached(`brokers:top:${JSON.stringify(request)}`, CACHE.brokerSummaryTtlMs, async () => {
     const body = await getJson("brokerTop", { params });
-    const { rows, from, dataKeys } = readRows(body, "top brokers");
-    const brokers = rows.map((row) => {
+    const { rows, from, dataKeys, dataObject } = readRows(body, "top brokers");
+    const mapped = rows.map((row) => {
       const code = pick(row, CODE_KEYS, isCode);
       const name = pick(row, NAME_KEYS, isName);
-      return { code: code.value, name: name.value, readFrom: { code: code.key, name: name.key }, row };
+      // These eight are read by their MEASURED key, not from a candidate list: the row shape was
+      // observed on 2026-09-01 and each figure is a plain numeric string ("-15025000"), not the
+      // `{raw, formatted}` pair most of this API sends. A candidate list here would be pretending
+      // not to know something that was measured.
+      const investorType = label(row, "investor_type");
+      const group = label(row, "group");
+      const totalValue = figure(row, "total_value");
+      const netValue = figure(row, "net_value");
+      const buyValue = figure(row, "buy_value");
+      const sellValue = figure(row, "sell_value");
+      const totalVolume = figure(row, "total_volume");
+      const totalFrequency = figure(row, "total_frequency");
+      return {
+        code: code.value,
+        name: name.value,
+        investorType: investorType.value,
+        totalValue: totalValue.value,
+        netValue: netValue.value,
+        buyValue: buyValue.value,
+        sellValue: sellValue.value,
+        totalVolume: totalVolume.value,
+        totalFrequency: totalFrequency.value,
+        group: group.value,
+        readFrom: {
+          code: code.key,
+          name: name.key,
+          investorType: investorType.key,
+          totalValue: totalValue.key,
+          netValue: netValue.key,
+          buyValue: buyValue.key,
+          sellValue: sellValue.key,
+          totalVolume: totalVolume.key,
+          totalFrequency: totalFrequency.key,
+          group: group.key,
+        },
+        row,
+      };
     });
-    return {
+    // Counted BEFORE the sort: `unmappedOf` walks `rows` and `mapped` in parallel, so it has to see
+    // them in the same order. Sorting first would report another row's keys as the unreadable one's.
+    const unmapped = unmappedOf(rows, mapped, "code");
+
+    // Partition, then sort — rather than one comparator that pushes undefined to the end. A row
+    // with no readable `total_value` has no rank, and giving it one (top or bottom, by comparator
+    // accident) is inventing a position. These keep wire order and sit after everything ranked.
+    const ranked = mapped.filter((b) => b.totalValue !== undefined);
+    const unranked = mapped.filter((b) => b.totalValue === undefined);
+    // Node's sort is stable, so brokers tied on value stay in the order the exchange sent them.
+    ranked.sort((a, b) => (b.totalValue as number) - (a.totalValue as number));
+    const brokers = [...ranked, ...unranked];
+
+    const rawDate = dataObject?.date;
+    const date =
+      typeof rawDate === "object" && rawDate !== null && !Array.isArray(rawDate)
+        ? readTopDate(rawDate as Row)
+        : undefined;
+
+    const result: BrokerTop = {
       request,
+      ...(date === undefined ? {} : { date }),
       count: brokers.length,
+      countBeforeLimit: brokers.length,
       rowsFrom: from,
       dataKeys,
+      sortedLocally: {
+        by: "total_value",
+        direction: "descending",
+        appliedLocally: true,
+        unsortable: unranked.length,
+      },
       brokers,
-      unmapped: unmappedOf(rows, brokers, "code"),
+      unmapped,
     };
+    return result;
   });
+
+  if (limit === undefined) return full;
+
+  // A NEW object. `full` is the shared cache entry, and slicing its `brokers` in place would hand
+  // every later caller of that entry this caller's cap.
+  const brokers = full.brokers.slice(0, limit);
+  return { ...full, count: brokers.length, brokers, limitAppliedLocally: limit };
 }
 
 /* ------------------------------ bandar detector ------------------------------ */
