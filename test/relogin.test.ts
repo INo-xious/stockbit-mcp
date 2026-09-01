@@ -15,7 +15,7 @@
  */
 import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
 process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-relogin-"));
@@ -624,7 +624,13 @@ test("only the MCP server arms recovery — batch and the CLIs cannot", () => {
       return entry.name.endsWith(".ts") ? [full] : [];
     });
   for (const file of [...walk(join(ROOT, "src")), ...walk(join(ROOT, "bin"))]) {
-    const rel = file.slice(ROOT.length);
+    // Separators normalised BEFORE anything reads this path, and that is load-bearing rather than
+    // cosmetic. `slice` leaves a native path, so on Windows `rel` was `src\auth\relogin.ts` and the
+    // `endsWith("auth/relogin.ts")` guard below did not match — the DEFINITION escaped its own
+    // exclusion and was reported as a caller. A security property that pins "exactly one file arms
+    // this" was therefore failing on Windows for a reason that had nothing to do with the property,
+    // which is the worst kind of red: it trains a reader to ignore the test.
+    const rel = file.slice(ROOT.length).split(sep).join("/");
     // The definition itself, not a call.
     if (rel.endsWith("auth/relogin.ts")) continue;
     if (/\barmAutoRelogin\s*\(/.test(readFileSync(file, "utf8"))) callers.push(rel);

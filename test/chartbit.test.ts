@@ -16,7 +16,7 @@
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
 process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-chartbit-test-"));
 
@@ -451,7 +451,11 @@ test("every chart session is opened inside the lock, and nothing re-enters it", 
   // while the property it protects was broken.
   const openers = allSourceFiles(SRC).filter((f) => /ChartbitSession\.open\s*\(/.test(readFileSync(f, "utf8")));
   assert.deepEqual(
-    openers.map((f) => f.slice(SRC.length + 1)),
+    // Separators normalised: `slice` leaves a NATIVE path, so on Windows this compared
+    // `chartbit\driver.ts` against a literal written with a forward slash and failed on a property
+    // that was perfectly true. The assertion is about WHICH FILE, never about how the OS spells a
+    // path — CI runs on three operating systems and a source scan must read the same on all of them.
+    openers.map((f) => f.slice(SRC.length + 1).split(sep).join("/")),
     ["chartbit/driver.ts"],
     "a module that opens a chart session outside driver.ts drives the browser outside the mutex",
   );

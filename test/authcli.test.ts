@@ -370,7 +370,21 @@ test("Ctrl-C during a login releases the lock — an exit listener alone does NO
   } finally {
     rmSync(store, { recursive: true, force: true });
   }
-});
+},
+  {
+    // Not a platform caveat on the FIX — a real console Ctrl-C on Windows does deliver SIGINT and
+    // does run the handler, so the lock is released there too. What Windows lacks is the way this
+    // test SIMULATES it: `child.kill("SIGINT")` terminates the process outright rather than
+    // delivering a signal, so the handler never gets the chance and the assertion fails for a
+    // reason that says nothing about the behaviour under test.
+    //
+    // SIGTERM is separately a no-op on Windows — node cannot listen for it — which the handler
+    // registration tolerates and nothing here can improve.
+    skip:
+      process.platform === "win32"
+        ? "child.kill('SIGINT') on Windows terminates without delivering the signal, so Ctrl-C cannot be simulated"
+        : false,
+  });
 
 /* ------------------------------ the wiring, by source scan ------------------------------ */
 
