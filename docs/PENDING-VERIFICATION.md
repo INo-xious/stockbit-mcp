@@ -532,7 +532,7 @@ rups: 1     stock_reverse: 0    stocksplit: 0    tender: 0    warrant: 9
 stock_dividend: 0    today: <string>
 ```
 
-`rowsOf` (`src/core/corpaction.ts:80`) takes the **first** key whose value is an array of records.
+`rowsOf` (`src/core/corpaction.ts`) takes the **first** key whose value is an array of records.
 `bonus` is first and empty, so it binds there and reports `rows: []` — while **19 real rows**
 (dividend 1, economic 8, rups 1, warrant 9) go unread into `meta`. Exactly the reported defect,
 reproduced from a capture.
@@ -582,3 +582,92 @@ the strength of this, and now says so with a reason rather than an absence.
 repeat the method above. `scripts/p7-recovery-probe.mjs` in the P7 worktree is the harness minus
 that one step.
 
+
+---
+
+## Probed live on 2026-09-01/02 (P8)
+
+Read-only GETs through the route table, via `scripts/probe-route.ts`.
+
+### D11 reopened — `broker_activity` HAS a window, and was dropping 1704 rows
+
+Two findings, and the second was hiding under the first.
+
+**The window.** The earlier D11 pass concluded "no period filter" and stopped. It was right about
+the `period` KEY — 400 on all ten members, 400 on eight other spellings, and unknown keys answering
+200-and-ignored, so no spelling of the name could ever work. But every probe in that table varied
+the `period` key or its value. Nobody tried the form its sibling on the same path prefix accepts,
+and which this route already **echoes back in every response**:
+
+| Call | Result |
+|---|---|
+| `brokerActivity` + no dates | 200, `data.from` = `data.to` = today |
+| `brokerActivity` + `from=2026-08-17&to=2026-08-21` | **200, echo moved to those exact dates**, 1034 buy rows vs 868 |
+| `brokerActivity` + `from=2026-07-06&to=2026-07-10` | 200, echo moved again, rows' own `date` inside the window |
+| `brokerActivity` + `date_from`/`date_to` | 200, **silently ignored** — fell back to today |
+| `brokerActivity` + `from` alone | 200, `from`..today, honestly echoed |
+
+So the window is choosable by date pair. `period` is now accepted and resolved locally into
+`from`/`to`; the name is still never sent.
+
+The local arithmetic was checked against Stockbit's own, by asking `broker_summary` — which resolves
+the same names server-side and echoes the result:
+
+| Period | Stockbit resolved to | This server |
+|---|---|---|
+| `LAST_7_DAYS` | 2026-08-26 .. 2026-09-01 | same |
+| `LAST_3_MONTHS` | 2026-06-01 .. 2026-09-01 | same |
+| `YEAR_TO_DATE` | 2026-01-**02** .. 2026-09-01 | 2026-01-**01** |
+
+The YTD difference is the first *trading* day versus the first calendar day. It cannot move a
+figure, and that was measured too: `from=2026-08-15` (a Saturday) and `from=2026-08-17` (the
+Monday) returned byte-identical rows. Computing the first trading day would need a holiday table,
+which this project refuses to hard-code.
+
+**The dropped rows.** `data.broker_activity_transaction` is an **object** holding `brokers_buy` and
+`brokers_sell`, not an array. The container lookup tests `Array.isArray`, so it matched nothing and
+the tool returned `count: 0, rowsFrom: null` for YP on a session where the wire carried **868 buy
+rows and 836 sell rows**. Naming the container in `ROW_CONTAINERS` — which the previous pass did —
+could never have fixed it.
+
+Both sides send POSITIVE figures, and the row shape is
+`{stock_code, broker_code, type, date, value, lot, avg_price, freq, company_detail, nval_trend}`
+with the four figures as **JSON numbers**, not the numeric strings `brokerTop` sends.
+
+`broker_activity` moves to **observed**.
+
+### `calendar_today` — the dated form is the same shape, and `today` echoes the request
+
+`GET /corpaction?date=2026-08-28` answered with the **same twelve buckets** as the undated form,
+that day's own rows (dividend 1, pubex 1, rups 1, warrant 1 — different from 2026-09-01's), and
+`today: "2026-08-28"`.
+
+Two things settled. The tool moves **projected → observed**: both wire forms it sends are now
+measured, and `from`/`to` are never sent at all. And `today` **echoes the date requested** rather
+than naming the server's current day — so comparing the two is a real detector for this family's
+characteristic failure, answering a different question convincingly. The code previously recorded
+this as unknown.
+
+### The two calendar spellings ARE the path kinds
+
+The open question was whether `tender`/`stock_reverse` name the same things as
+`tenderoffer`/`reversesplit`. They do, and the service says so itself:
+
+```
+GET /corpaction/tenderoffer   -> data.{ tender }
+GET /corpaction/reversesplit  -> data.{ stock_reverse }
+```
+
+It answers a request in the path vocabulary with a container named in the calendar vocabulary. That
+justifies the translation `corporate_actions` now applies. Note the `tenderoffer` payload is also a
+worked example of the **one-array** case: a single bucket beside no siblings, which is exactly the
+rows-under-a-key shape `rowsOf` handles — so `bucketsOf`'s threshold of two is confirmed correct
+rather than merely documented.
+
+### Still open
+
+- **P7f's absolute lag.** `top-stock` aggregates were measured *changing* continuously; how far
+  behind the exchange they are was never established. Recorded in `docs/LIVENESS.md` as a known
+  hole rather than left implicit.
+- **`broker_top` date range.** It takes the ten-member enum and has no `from`/`to`. Given
+  `brokerActivity` turned out to accept dates nobody had tried, this is the obvious next probe.
