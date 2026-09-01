@@ -316,7 +316,71 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Pinned for the same reason `decide` pins it: this job now runs
+      # `scripts/mcp-registry-version-state.mjs`, which uses global `fetch` and
+      # `AbortSignal.timeout`. The runner's default Node is not part of this repository's contract.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # ASK BEFORE PUBLISHING — the same question the npm half of this pipeline has always asked,
+      # and the half that was missing. Both workflows reach a `registry` job for the SAME version
+      # (see the concurrency note at the top of this file), so the second one to arrive re-published
+      # what the first had just published and was refused:
+      #
+      #   Error: publish failed: server returned status 400: {"errors":[{"message":"invalid version:
+      #   cannot publish duplicate version"}]}
+      #
+      # A red run reporting a failure that had already succeeded. `server.json` is read rather than
+      # `needs.decide.outputs.version` because `server.json` is the document `mcp-publisher` sends —
+      # asking about anything else would be asking about a version this step is not publishing.
+      # `test/distribution.test.ts` pins the two equal, so this is also the package version.
+      #
+      # UNDETERMINED DOES NOT SKIP. This is the deliberate opposite of the npm gate, because the
+      # costs are mirror images: there a wrong answer publishes something irreversible, here a wrong
+      # `present` silently omits a version from the registry — the "silent no-op" this workflow
+      # exists to forbid. A needless re-attempt costs one refused request, so anything short of a
+      # definite `present` publishes, and the duplicate tolerance below catches it.
+      - name: Is this version already in the MCP Registry?
+        id: mcp_registry
+        run: |
+          set -euo pipefail
+          published="$(node -p "require('./server.json').version")"
+          server_name="$(node -p "require('./server.json').name")"
+          # Validate BEFORE it reaches $GITHUB_OUTPUT, for the reason `decide` spells out above:
+          # that file is parsed as `key=value` lines, so a value carrying a newline defines a SECOND
+          # key of the writer's choosing — here `needed=false`, which would skip the publish and
+          # report success. The character class is what a version may contain and nothing more.
+          case "$published" in
+            "" | *[!0-9A-Za-z.+-]*)
+              echo "::error::server.json version is empty or has characters outside [0-9A-Za-z.+-]. Refusing to use it." >&2
+              exit 1 ;;
+          esac
+          echo "version=$published" >> "$GITHUB_OUTPUT"
+          # Both are passed explicitly rather than left to the script's own default: the script
+          # resolves `server.json` relative to ITSELF while this step reads it relative to the
+          # working directory, and the two would diverge the moment anyone set `working-directory:`
+          # on the job — leaving the annotation naming a version the query never asked about.
+          #
+          # `|| state=""` rather than letting `set -e` end the job: exit 2 means "could not
+          # determine", and the policy above turns that into a publish, not a failure.
+          state="$(node scripts/mcp-registry-version-state.mjs --name "$server_name" --version "$published")" || state=""
+          case "$state" in
+            present)
+              echo "needed=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::$published is already in the MCP Registry. Nothing to publish." ;;
+            absent)
+              echo "needed=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::could not determine whether $published is in the MCP Registry (reason above). Publishing anyway — a duplicate is refused harmlessly and tolerated." ;;
+          esac
+
+      # Downloaded only when there is something to publish. When the check above says the version is
+      # already there this job has nothing left to do, and spending a github.com round trip it can
+      # FAIL on would turn a no-op into a red run — which is the failure this change exists to close.
       - name: Install mcp-publisher
+        if: steps.mcp_registry.outputs.needed == 'true'
         run: |
           set -euo pipefail
           asset="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
@@ -336,7 +400,26 @@ jobs:
       # Publishing to the registry only makes sense once the npm package with the matching `mcpName`
       # is live, which is what `needs: publish` guarantees.
       - name: Publish server.json
+        if: steps.mcp_registry.outputs.needed == 'true'
+        env:
+          MCP_VERSION: ${{ steps.mcp_registry.outputs.version }}
         run: |
           set -euo pipefail
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+
+          # The step above closes the ordinary case. This closes the RACE, which checking harder
+          # cannot: the other workflow can publish in the gap between that query and this command.
+          # The registry's own refusal is the only authority on what is already there, so the ONE
+          # error that means "the end state you asked for already holds" is read as success.
+          # Everything else — a malformed server.json, a rejected OIDC login, an unreachable
+          # registry — still fails the job. The match is on the registry's exact wording rather than
+          # on the 400, which also covers server.json being wrong.
+          if ./mcp-publisher publish 2>&1 | tee /tmp/mcp-publish.log; then
+            exit 0
+          fi
+          if grep -q "cannot publish duplicate version" /tmp/mcp-publish.log; then
+            echo "::notice::$MCP_VERSION reached the MCP Registry from the other workflow while this job was running. Treating as published."
+            exit 0
+          fi
+          echo "::error::mcp-publisher failed for a reason other than a duplicate version. The log is above." >&2
+          exit 1
