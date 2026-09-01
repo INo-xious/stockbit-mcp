@@ -648,10 +648,33 @@ test("activity: the preset arithmetic is the one Stockbit itself used", () => {
     from: "2026-01-01",
     to: "2026-09-01",
   });
-  // Month arithmetic must not roll a short month forward: 31 March minus one month is 28 February
-  // in a common year, never 3 March.
   assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-03-31").from, "2026-02-01");
   assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-03-31").to, "2026-02-28");
+});
+
+test("activity: month arithmetic clamps instead of rolling into the next month", () => {
+  // `Date.UTC(2026, 1, 31)` is 3 March, not 31 February — the constructor rolls over. Used naively
+  // for a window START that silently loses days: LAST_1_MONTH from 31 March would begin on 3 March
+  // and drop the 1st and 2nd without saying so.
+  assert.equal(resolveActivityPeriod("LAST_1_MONTH", "2026-03-31").from, "2026-02-28");
+  assert.equal(resolveActivityPeriod("LAST_1_MONTH", "2026-05-31").from, "2026-04-30");
+  // A leap year clamps to the 29th, not the 28th.
+  assert.equal(resolveActivityPeriod("LAST_1_YEAR", "2025-02-28").from, "2024-02-28");
+  assert.equal(resolveActivityPeriod("LAST_1_MONTH", "2024-03-30").from, "2024-02-29");
+  // Ordinary days are untouched, and the year boundary is crossed correctly.
+  assert.equal(resolveActivityPeriod("LAST_3_MONTHS", "2026-01-15").from, "2025-10-15");
+  assert.equal(resolveActivityPeriod("LAST_1_YEAR", "2026-09-01").from, "2025-09-01");
+  assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-01-15").from, "2025-12-01");
+  assert.equal(resolveActivityPeriod("PREVIOUS_MONTH", "2026-01-15").to, "2025-12-31");
+  // Every window must be a real range, on every day of a year, in both directions.
+  for (const period of ["LAST_1_MONTH", "LAST_3_MONTHS", "LAST_6_MONTHS", "LAST_1_YEAR"] as const) {
+    for (let day = 0; day < 366; day++) {
+      const today = new Date(Date.UTC(2026, 0, 1 + day)).toISOString().slice(0, 10);
+      const range = resolveActivityPeriod(period, today);
+      assert.ok(range.from < range.to, `${period} on ${today} produced ${range.from}..${range.to}`);
+      assert.match(range.from, /^\d{4}-\d{2}-\d{2}$/, `${period} on ${today}`);
+    }
+  }
 });
 
 test("activity: an explicit range wins over a preset, and half a range is refused", () => {

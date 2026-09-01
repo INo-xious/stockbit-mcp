@@ -706,10 +706,27 @@ export const ACTIVITY_PERIODS = [
 
 export type ActivityPeriod = (typeof ACTIVITY_PERIODS)[number];
 
-/** Calendar arithmetic on a `YYYY-MM-DD`, done in UTC so the host's zone cannot move a day. */
-function shiftDate(iso: string, { days = 0, months = 0, years = 0 }): string {
+/** Days before or after a `YYYY-MM-DD`, in UTC so the host's zone cannot move a day. */
+function shiftDays(iso: string, days: number): string {
   const [y, m, d] = iso.split("-").map(Number);
-  return new Date(Date.UTC(y + years, m - 1 + months, d + days)).toISOString().slice(0, 10);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/**
+ * Months before a `YYYY-MM-DD`, CLAMPED to the target month's last day.
+ *
+ * `Date.UTC(2026, 1, 31)` is not 31 February, it is 3 March — the constructor rolls over. Used
+ * naively for a window START that silently loses the first days of the month: "one month before
+ * 31 March" would begin on 3 March and quietly drop the 1st and 2nd. Clamping to 28 February is
+ * both the conventional reading and the one that cannot lose a session.
+ */
+function shiftMonths(iso: string, months: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  // Day 0 of the following month is the last day of the target one.
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(d, lastDay));
+  return target.toISOString().slice(0, 10);
 }
 
 /** Resolve a preset window against a WIB "today". Exported so the arithmetic is testable offline. */
@@ -719,24 +736,24 @@ export function resolveActivityPeriod(period: ActivityPeriod, today: string): Da
       return { from: today, to: today };
     case "LAST_7_DAYS":
       // today-6, inclusive of both ends, which is the seven days Stockbit itself returned.
-      return { from: shiftDate(today, { days: -6 }), to: today };
+      return { from: shiftDays(today, -6), to: today };
     case "LAST_1_MONTH":
-      return { from: shiftDate(today, { months: -1 }), to: today };
+      return { from: shiftMonths(today, -1), to: today };
     case "LAST_3_MONTHS":
-      return { from: shiftDate(today, { months: -3 }), to: today };
+      return { from: shiftMonths(today, -3), to: today };
     case "LAST_6_MONTHS":
-      return { from: shiftDate(today, { months: -6 }), to: today };
+      return { from: shiftMonths(today, -6), to: today };
     case "LAST_1_YEAR":
-      return { from: shiftDate(today, { years: -1 }), to: today };
+      return { from: shiftMonths(today, -12), to: today };
     case "PREVIOUS_DAY": {
       // The previous CALENDAR day, which on a Monday is a Sunday and carries no trades. Named for
       // what it does rather than "the previous session": finding that needs a holiday table.
-      const yesterday = shiftDate(today, { days: -1 });
+      const yesterday = shiftDays(today, -1);
       return { from: yesterday, to: yesterday };
     }
     case "PREVIOUS_MONTH": {
       const firstOfThis = `${today.slice(0, 7)}-01`;
-      const lastOfPrev = shiftDate(firstOfThis, { days: -1 });
+      const lastOfPrev = shiftDays(firstOfThis, -1);
       return { from: `${lastOfPrev.slice(0, 7)}-01`, to: lastOfPrev };
     }
     case "THIS_MONTH":
