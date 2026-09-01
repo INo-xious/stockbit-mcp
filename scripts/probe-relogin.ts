@@ -51,7 +51,7 @@
  * Four harvested credentials in a row were once rejected on first use while login, doctor and status
  * all reported healthy. The retry is the proof, not the outcome word.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fileDir, getStore } from "../src/auth/store.js";
 import { accessCachePath } from "../src/auth/accesscache.js";
@@ -184,13 +184,34 @@ function stage(): void {
   );
 }
 
+/**
+ * Put a backup back, without ever leaving the store missing.
+ *
+ * The obvious implementation — remove the store, then copy the backup over it — has a window in
+ * which the credential exists in exactly one place, and if the copy fails inside that window it
+ * exists in none. This is a recovery tool used precisely when things have gone wrong, so it moves
+ * the current directory ASIDE, copies the backup into place, and only then discards what it moved.
+ * A failure at any point leaves either the original or the backup on disk under a name that is
+ * printed.
+ */
 function restore(from?: string): void {
   const source = from ?? newestBackup();
   if (!source) fail("No backup found. Pass one explicitly.");
   if (!existsSync(source)) fail(`No such backup: ${source}`);
-  rmSync(fileDir(), { recursive: true, force: true });
-  cpSync(source, fileDir(), { recursive: true });
-  process.stdout.write(`Restored ${source} -> ${fileDir()}\n\nState now:\n`);
+
+  const dir = fileDir();
+  const aside = `${dir}.replaced-${Date.now()}`;
+  const hadOne = existsSync(dir);
+  if (hadOne) renameSync(dir, aside);
+  try {
+    cpSync(source, dir, { recursive: true });
+  } catch (err) {
+    if (hadOne) renameSync(aside, dir);
+    fail(`Restore failed, and the previous store was put back: ${String(err)}`);
+  }
+  if (hadOne) rmSync(aside, { recursive: true, force: true });
+
+  process.stdout.write(`Restored ${source} -> ${dir}\n\nState now:\n`);
   describe();
   process.stdout.write("\nProve it with a real call before trusting it — a restored file is not a working session.\n");
 }
