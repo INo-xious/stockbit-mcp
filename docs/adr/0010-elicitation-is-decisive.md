@@ -200,7 +200,7 @@ An order on a client that supports elicitation now always produces a dialog, whe
 model that sent `confirm: true` produced none. That is the intended cost, and the remember box is
 the release valve for it.
 
-`trading_forget` is a 139th tool. It is **not** in the `core` profile: `core` is capped at 40 tools
-to fit under Cursor's ceiling, it deliberately registers no order writes, and a profile that cannot
-place an order can never create a grant to forget. It arrives with the `trading` family, alongside
+`trading_forget` is a 139th tool. It is **not** in the `core` profile: `core` is capped (at 41 —
+originally 40, to sit under Cursor's ceiling), it deliberately registers no order writes, and a
+profile that cannot place an order can never create a grant to forget. It arrives with the `trading` family, alongside
 the tools that can create one.

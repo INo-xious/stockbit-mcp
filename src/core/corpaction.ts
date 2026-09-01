@@ -158,11 +158,52 @@ export interface ActionPage extends RowSet {
  * The action kind is a path segment validated against `CORPACTION_TYPES` by the transport, because
  * an unknown kind comes back 200-with-nothing rather than 404 and would read as a quiet calendar.
  */
+/**
+ * The two calendar spellings that name a kind the path vocabulary spells differently.
+ *
+ * NOT a guess, and it was deliberately absent until it could stop being one. `calendar_today` tags
+ * its rows with the bucket key exactly as the response spelled it, and two of the twelve — `tender`
+ * and `stock_reverse` — are not members of `CORPACTION_TYPES`, so passing one straight back into
+ * `corporate_actions` was refused as an unknown kind. Correct, but a dead end for anyone reading a
+ * kind off the calendar.
+ *
+ * Settled live on 2026-09-01, by asking the path endpoint and reading what it called its own rows:
+ *
+ *     GET /corpaction/tenderoffer    -> data.{ tender }
+ *     GET /corpaction/reversesplit   -> data.{ stock_reverse }
+ *
+ * The service answers a `tenderoffer` request with a container named `tender`, and a `reversesplit`
+ * request with one named `stock_reverse`. That is Stockbit equating the two vocabularies itself,
+ * which is the evidence this mapping was waiting for. It translates one direction only — calendar
+ * spelling to path spelling — because that is the direction a caller travels.
+ */
+const CALENDAR_TYPE_ALIASES: Readonly<Record<string, CorpactionType>> = {
+  tender: "tenderoffer",
+  stock_reverse: "reversesplit",
+};
+
+/**
+ * Accept a calendar bucket key where a path kind is wanted. Anything else passes through.
+ *
+ * `hasOwn`, not a bare lookup: a plain object inherits from `Object.prototype`, so
+ * `ALIASES["constructor"]` is a FUNCTION and `ALIASES["__proto__"]` is an object, neither of which
+ * is the `string` this returns. Nothing reaches here with such a value today — the tool schema is a
+ * zod enum and the transport validates the path segment — but this is the same defect `fdb530f`
+ * fixed on the coordinate aliases, and it is cheaper to not reintroduce it than to re-find it.
+ */
+export function resolveCorpactionType(value: string): string {
+  return Object.hasOwn(CALENDAR_TYPE_ALIASES, value) ? CALENDAR_TYPE_ALIASES[value] : value;
+}
+
+/** The alias spellings, for the tool schema that has to accept them. */
+export const CALENDAR_TYPE_ALIAS_KEYS = Object.keys(CALENDAR_TYPE_ALIASES) as readonly string[];
+
 export async function getCorpactions(
-  actionType: CorpactionType,
+  requestedType: string,
   symbol?: string,
   limit?: number,
 ): Promise<ActionPage> {
+  const actionType = resolveCorpactionType(requestedType) as CorpactionType;
   const sym = symbol === undefined ? undefined : normalizeSymbol(symbol);
   const rows = count("limit", limit, 1);
   // Every argument that changes the answer is in the key. A key of `corpaction:${actionType}` would
@@ -490,9 +531,11 @@ export async function getDividendCalendar(symbol?: string, limit?: number): Prom
  * plain string rather than a `CorpactionType` for a measured reason: two of the twelve buckets seen
  * on 2026-09-01 are not the spellings the `/corpaction/{actionType}` path takes. The calendar says
  * `stock_reverse` and `tender` where `CORPACTION_TYPES` says `reversesplit` and `tenderoffer`.
- * Passing one of those two straight into `corporate_actions` is therefore refused as an unknown
- * kind — which is the right outcome, because nothing here has verified that the two vocabularies
- * name the same thing, and rewriting `tender` to `tenderoffer` would be that claim made silently.
+ *
+ * Passing one of those two into `corporate_actions` now works — see `CALENDAR_TYPE_ALIASES`, added
+ * once the equivalence had been measured instead of assumed. The translation lives there, at the
+ * point of use; this field keeps saying what the wire actually said, which is the reason it is a
+ * plain string and stays one.
  */
 export interface CalendarRow extends Record<string, unknown> {
   corpactionType: string;
@@ -514,11 +557,16 @@ export interface CalendarDay extends RowSet {
    * Where `date` came from — the request, or the response's own `today`. Absent exactly when `date`
    * is null, so it is never a claim about a value that is not there.
    *
-   * Whether `today` echoes the date that was ASKED for or names the server's current day is not
-   * known: the only live call was undated. So it is read as a fallback and never as a check on
-   * whether a dated request was honoured — a check that fired on every legitimate past-date request
-   * would teach a reader to ignore it. `meta.today` carries the raw value beside the requested date
-   * either way, so anyone who needs to compare the two still can.
+   * `today` ECHOES the date that was asked for — measured 2026-09-01, `date=2026-08-28` came back
+   * with `today: "2026-08-28"` and that day's own rows, not the server's current day. So comparing
+   * `meta.today` against the date you requested is a real detector for this endpoint's characteristic
+   * failure: answering a different question convincingly. They disagreeing means the parameter was
+   * not honoured.
+   *
+   * It is still read only as a FALLBACK for `date`, never as an automatic check. A dated request
+   * already knows its own date, and a check that reported on every legitimate past-date call would
+   * teach a reader to ignore it. `meta.today` carries the raw value beside the requested date, so
+   * anyone who wants the comparison can make it.
    */
   dateFrom?: "request" | "data.today";
   /**
@@ -530,6 +578,20 @@ export interface CalendarDay extends RowSet {
    * altogether means the response was not the bucket shape, so no row carries `corpactionType`.
    */
   buckets?: Record<string, number>;
+  /**
+   * Rows whose own dates are in an order that cannot have happened — the same check
+   * `corporate_actions` and `dividend_calendar` carry, and for the same reason.
+   *
+   * It belongs here because the buckets include the very kinds the check covers: `rups` rows carry
+   * an eligibility date against a meeting date, `dividend` rows a cum/ex/record/payment chain. The
+   * day calendar was returning those rows without the sanity check its siblings apply to the same
+   * fields.
+   *
+   * `row` indexes `rows` as returned, which on the bucket shape is every bucket flattened in wire
+   * order. Absent when nothing was out of order — which is NOT the same as "the dates were checked
+   * and cleared", since most rows carry neither side of any pair.
+   */
+  suspectDates?: SuspectDate[];
 }
 
 /**
@@ -624,10 +686,15 @@ export async function getCalendarDay(date?: string): Promise<CalendarDay> {
     const served = isRecord(data) ? serverToday(data.today) : null;
     const from: CalendarDay["dateFrom"] =
       day !== undefined ? "request" : served !== null ? "data.today" : undefined;
+    // The same date-order check `getCorpactions` and `getDividendCalendar` run. These buckets carry
+    // the rups and dividend kinds it covers, so leaving it off here meant the one view that shows
+    // every kind at once was the one view that never questioned their dates.
+    const suspect = suspectDates(set.rows);
     return {
       date: day ?? served,
       ...(from ? { dateFrom: from } : {}),
       ...set,
+      ...(suspect.length > 0 ? { suspectDates: suspect } : {}),
     };
   });
 }

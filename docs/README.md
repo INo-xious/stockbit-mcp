@@ -8,6 +8,7 @@ Start at the [README](../README.md). This is everything else.
 |---|---|
 | [**User guide**](FEATURES.md) | Every feature, what it returns, and what to ask for. The long version of the README's tour. |
 | [**Tool reference**](TOOLS.md) | All 138 tools, generated from the running server — family, evidence, arguments. Never stale: a test fails if it is. |
+| [**Liveness**](LIVENESS.md) | How fresh each reading is, and why nothing here answers "what just traded". |
 | [**Trading**](trading.md) | Paper mode, the live switches, the ticket protocol, the outcome table. |
 | [**Chart drawing**](chartbit-drawing.md) | Reading and drawing on your real Stockbit chart. |
 | [**Testing the login**](TESTING-LOGIN.md) | What the browser capture does, and what to do when it will not. |

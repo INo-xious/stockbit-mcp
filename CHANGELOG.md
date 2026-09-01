@@ -12,6 +12,99 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Added
 
+- **`broker_activity` can choose its window.** Pass `period` for a preset or `from`+`to` for an
+  exact range. The earlier finding that this endpoint answers 400 to `period` was correct and is
+  unchanged — the name is still never sent — but it stopped one probe short: `from`/`to` **bind**.
+  `from=2026-08-17&to=2026-08-21` echoed those exact dates back in `data.from`/`data.to` and
+  returned 1034 buy rows against the default day's 868. A preset is resolved into a date pair here
+  and the dates go on the wire.
+
+  The arithmetic is not invented. `broker_summary` resolves the same names server-side and echoes
+  the result, and it answered `LAST_7_DAYS` → 2026-08-26..2026-09-01 and `LAST_3_MONTHS` →
+  2026-06-01..2026-09-01 — the same dates this produces. `YEAR_TO_DATE` is the one difference: it
+  starts on the first *trading* day (2026-01-02) where this starts on January 1st. That cannot move
+  a figure, which was measured rather than argued — a Saturday start and the following Monday
+  returned byte-identical rows.
+
+- **`corporate_actions` accepts the calendar's spellings.** `tender` and `stock_reverse`, the two
+  bucket keys `calendar_today` tags rows with that are not in the path vocabulary, are now
+  translated to `tenderoffer` and `reversesplit`. The mapping was deliberately withheld until it
+  stopped being a guess: `/corpaction/tenderoffer` returns its rows under a container named
+  `tender`, and `/corpaction/reversesplit` under one named `stock_reverse` — the service equating
+  the two vocabularies itself.
+
+- **`market_movers` ships in the default profile**, and `CORE_CAP` rises to 41. `top_movers` reads a
+  nine-symbol hotlist, so a default surface that could rank nine stocks but not the market was
+  missing the more useful of the two.
+
+  This costs the property `core` was built for, and the docs now say so rather than promising the
+  opposite: `core` was exactly Cursor's 40-tool ceiling, and at 41 a Cursor user is one over. Cursor
+  drops the overflow **without saying which tool it dropped**, so anyone on that client should name
+  a narrower list.
+
+- **`docs/LIVENESS.md`** — one place stating how fresh each reading is, and that **nothing here
+  answers "what just traded"**. The measurements already existed; what was missing was a conclusion,
+  and without one three tool descriptions had drifted into disagreeing. `running_trade` sent readers
+  to `broker_flow_intraday`, which serves the *previous* session until the ~18:00 WIB broker
+  release; `top_stocks`, the one route measured to be live, said nothing about liveness at all.
+
+### Fixed
+
+- **Automatic login recovery cannot fire for the failure it was written for, and ADR-0011 now says
+  so.** Measured 2026-09-01, on the third attempt and the first to stage all three preconditions at
+  once — a dead stored credential, an aged-out browser access token so `ensureFresh` level three
+  declines, and a live browser refresh token so the relogin gate passes.
+
+  The quote came back 401 in 1.8 s with no browser. The reason is structural and one layer below
+  where the previous two attempts looked: `attemptAutoRelogin` is called only from `forceRefresh`'s
+  catch, and `forceRefresh` runs only on a 401 **response** to a request. `getJson` resolves the
+  credential before the request, so a dead refresh token throws in `ensureFresh`, no request is
+  made, no 401 response exists, and recovery is never reached.
+
+  So it can fire only when the stored token still mints an access token the API then refuses —
+  never in the ordinary revoked-session case. Recorded, not rewired: moving the hook changes the
+  auth failure path and wants its own decision record. `scripts/probe-relogin.ts` is the harness
+  that staged it, and the first thing in this repo able to reach that state at all.
+
+- **`broker_activity` reported "traded nothing" for a broker that traded 1704 stock-sides.**
+  `data.broker_activity_transaction` is an **object** holding `brokers_buy` and `brokers_sell`, not
+  an array — so the container lookup, which tests `Array.isArray`, matched nothing and the tool
+  returned `count: 0` with `rowsFrom: null` while 868 buy rows and 836 sell rows sat in the payload.
+  Naming the container in `ROW_CONTAINERS` could not have fixed it, because the value is not an
+  array.
+
+  A shape-aware reader now runs ahead of the generic one, the way `bucketsOf` does on the day
+  calendar, and tags every row with the side it came from. Both sides send **positive** figures, so
+  `side` is the only thing carrying direction and is required on every row; summing `value` across
+  sides gives turnover, not net flow.
+
+  The fixture is why this survived a green suite — it made the container an array, agreeing with
+  what the reader expected rather than with the wire. It is now the measured shape.
+
+- **The day calendar runs the date-order check its siblings already ran.** `getCalendarDay`'s
+  buckets carry the `rups` and `dividend` kinds `suspectDates` covers, so the one view that shows
+  every kind at once was the one that never questioned their dates.
+
+### Changed
+
+- **`calendar_today` is now `observed`.** It stayed `projected` while only its no-argument form had
+  been measured. `GET /corpaction?date=2026-08-28` has now answered with the same twelve buckets and
+  that day's own rows, so both wire forms it sends are measured. The same call settled a question
+  the code had recorded as unknown: `today` **echoes the date requested** rather than naming the
+  server's current day, which makes comparing them a real detector for this family's habit of
+  answering a different question convincingly.
+
+- **`broker_activity` is now `observed`** — rows came back and every field it projects (`symbol`,
+  `side`, `date`, `value`, `lot`, `avgPrice`, `freq`, `investorType`) was read out of a real row.
+
+- **A Telegram bot token fixture is no longer a real-looking one.** `test/redact.test.ts` held the
+  sample token from Telegram's own Bot API documentation, which is real-looking enough that a reader
+  has to stop and work out whose it is. Its two sibling fixtures were already obviously synthetic;
+  this one now is too. No coverage changes — the test needs a string matching the shape, not a
+  plausible one.
+
+### Added
+
 - **`market_movers` reaches every view Stockbit's own Movers dialog shows.** `mover_type` is now
   sent, as a **closed** vocabulary of the eight members the server was seen to echo back on
   2026-09-01: `topGainer`, `topLoser`, `topValue`, `topVolume`, `topFrequency`, `netForeignBuy`,

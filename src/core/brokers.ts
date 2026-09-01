@@ -37,6 +37,8 @@ import { getJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
+import { isSettledRange, normalizeDateRange, type DateRange, type DateRangeInput } from "./dates.js";
+import { wibTodayIso } from "./sessionclock.js";
 import {
   getBrokerSummary,
   type BrokerSummaryOptions,
@@ -575,14 +577,252 @@ function normalizeCodeFilter(input: unknown): string[] {
 
 /* --------------------------------- activity --------------------------------- */
 
+/**
+ * Which container name means which side. Recognising a name is how the SIDE is known; it is not how
+ * the ROWS are found — see `activityRows`, which finds them structurally.
+ */
+const ACTIVITY_SIDE_KEYS: Readonly<Record<string, BrokerActivitySide>> = {
+  brokers_buy: "buy",
+  brokers_sell: "sell",
+};
+
+/**
+ * The rows of a broker-activity response, from BOTH sides.
+ *
+ * ## Why this route needs its own reader
+ *
+ * `readRows` finds a container by looking for an ARRAY. This route does not have one: measured
+ * 2026-09-01, `data.broker_activity_transaction` is an OBJECT holding `brokers_buy` and
+ * `brokers_sell`, each an array. So the array search fell through to `dataKeys.find`, found nothing
+ * either, and returned `rows: []` with `rowsFrom: null` — for a response carrying 868 buy rows and
+ * 836 sell rows. Naming `broker_activity_transaction` in `ROW_CONTAINERS` could never have fixed
+ * that, because the finder tests `Array.isArray` and the value is an object.
+ *
+ * That is the same defect `bucketsOf` was written for on the day calendar, and it is answered the
+ * same way: a shape-aware reader that runs AHEAD of the generic one on the single route that needs
+ * it, tagging every row with the container it came from.
+ *
+ * ## Why the side is a field and not a sign
+ *
+ * Both sides send POSITIVE values. A sell row is not a negative buy row, and nothing inside a row
+ * says which half it came from — so dropping the container name would make the two indistinguishable
+ * and a net figure computed from them meaningless. `side` is therefore required on every row.
+ *
+ * Returns `null` when the payload is not this shape, so the caller can fall back to `readRows` and
+ * an unrecognised response still reports honestly rather than throwing.
+ */
+function activityRows(
+  data: unknown,
+): { rows: Array<{ row: Row; side?: BrokerActivitySide }>; from: string } | null {
+  if (!isRecordLike(data)) return null;
+  const container = (data as Row).broker_activity_transaction;
+  if (!isRecordLike(container)) return null;
+
+  // STRUCTURAL, like `bucketsOf`: every array-of-records inside the container contributes its rows,
+  // whether or not this module knows the name. Filtering to the two names it does know would make a
+  // renamed half — or a third one — vanish with no signal at all, since `dataKeys` lists `data`'s
+  // top-level keys and would still show only the container. That silent under-count is the exact
+  // defect this route was just fixed for, and hard-coding the names would reintroduce it one level
+  // down.
+  const present = Object.entries(container as Row).filter(
+    (entry): entry is [string, Row[]] => Array.isArray(entry[1]) && entry[1].every((v) => isRecordLike(v)),
+  );
+  if (present.length === 0) return null;
+
+  const rows: Array<{ row: Row; side?: BrokerActivitySide }> = [];
+  for (const [key, value] of present) {
+    // A name this module does not know yields rows with NO side, rather than a guessed one.
+    const side = Object.hasOwn(ACTIVITY_SIDE_KEYS, key) ? ACTIVITY_SIDE_KEYS[key] : undefined;
+    for (const row of parseOr(RowArray, value, `broker activity ${key} rows`)) {
+      rows.push(side === undefined ? { row } : { row, side });
+    }
+  }
+  // Names every container that contributed, even an empty one, so "this broker only bought" is
+  // distinguishable from "the sell half was not in the payload".
+  return { rows, from: `data.broker_activity_transaction.{${present.map(([key]) => key).join(",")}}` };
+}
+
+function isRecordLike(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A number off the broker-ACTIVITY wire, which is not the same wire as the rest of this module.
+ *
+ * `asWireNumber` refuses a JSON number on purpose, and says why: every figure measured on
+ * `brokerTop` is a numeric STRING, so a bare number there is a shape change worth seeing as absent.
+ * That reasoning is sound and is left alone — but it does not describe this route. Measured
+ * 2026-09-01, `broker_activity` sends `value: 86170933300`, `lot: 4264563`,
+ * `avg_price: 202.06275132997214` and `freq: 4848` as real JSON numbers, so reading them with
+ * `asWireNumber` returned `undefined` for every one and the rows came back with a symbol and
+ * nothing else.
+ *
+ * So this accepts a finite JSON number, and the same unambiguous numeric string `asWireNumber`
+ * takes, and still refuses a separated one ("1,234" / "1.234,56") for the reason that one gives:
+ * the two Indonesian conventions disagree about which separator is the decimal.
+ */
+function asActivityNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  return asWireNumber(value);
+}
+
+/** `figure`, for the one route whose figures arrive as JSON numbers. */
+function activityFigure(row: Row, key: string): { value?: number; key?: string } {
+  const value = asActivityNumber(row[key]);
+  return value === undefined ? {} : { value, key };
+}
+
+/**
+ * Preset windows for `broker_activity`, resolved HERE into `from`/`to` and never sent as a name.
+ *
+ * ## Why these are resolved locally
+ *
+ * Measured 2026-09-01: this endpoint answers **400** to `period` on every one of the ten
+ * `BROKER_PERIODS` members and to eight other spellings, while `tb_period`, `periode`, `range` and
+ * `time_period` answer 200 and are ignored — so the service silently drops keys it does not know,
+ * and the 400 is a recognised field refusing a value. There is no spelling left to find, and that
+ * was where the previous investigation stopped.
+ *
+ * What it never tried is the form this route actually takes. Measured the same way on 2026-09-01,
+ * `from`/`to` **bind**: `from=2026-08-17&to=2026-08-21` came back with `data.from`/`data.to` echoing
+ * those exact dates, 1034 buy rows instead of the default 868, and rows whose own `date` fields sat
+ * inside the window. A second window moved it again. So the window is choosable after all — by date
+ * pair rather than by name — and a caller who wants "the last week" can have it.
+ *
+ * ## Why a local calendar window is honest here
+ *
+ * These are THIS SERVER's definitions, not Stockbit's, and the difference was measured rather than
+ * waved at. Asking `broker_summary` — which resolves the same names server-side and echoes the
+ * result — gave `LAST_7_DAYS` → 2026-08-26..2026-09-01 and `LAST_3_MONTHS` → 2026-06-01..2026-09-01,
+ * which the arithmetic below reproduces exactly. `YEAR_TO_DATE` it resolved to 2026-01-**02**, the
+ * first trading day, where this resolves to January 1st.
+ *
+ * That one-day difference cannot change a figure, and that is measured too: `from=2026-08-15`
+ * (a Saturday) and `from=2026-08-17` (the Monday) returned byte-identical rows. Padding a window
+ * with days the exchange was shut adds no trades. Computing the first TRADING day instead would
+ * need a holiday table, which this project refuses to hard-code for the reason `sessionclock.ts`
+ * gives — it goes stale and then lies with confidence.
+ *
+ * Either way the caller never has to trust the arithmetic: the resolved window goes onto the wire
+ * and the server echoes it back into `from`/`to` on the result.
+ */
+export const ACTIVITY_PERIODS = [
+  "LAST_1_DAY",
+  "LAST_7_DAYS",
+  "LAST_1_MONTH",
+  "LAST_3_MONTHS",
+  "LAST_6_MONTHS",
+  "LAST_1_YEAR",
+  "PREVIOUS_DAY",
+  "PREVIOUS_MONTH",
+  "THIS_MONTH",
+  "YEAR_TO_DATE",
+] as const;
+
+export type ActivityPeriod = (typeof ACTIVITY_PERIODS)[number];
+
+/** Days before or after a `YYYY-MM-DD`, in UTC so the host's zone cannot move a day. */
+function shiftDays(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/**
+ * Months before a `YYYY-MM-DD`, CLAMPED to the target month's last day.
+ *
+ * `Date.UTC(2026, 1, 31)` is not 31 February, it is 3 March — the constructor rolls over. Used
+ * naively for a window START that silently loses the first days of the month: "one month before
+ * 31 March" would begin on 3 March and quietly drop the 1st and 2nd. Clamping to 28 February is
+ * both the conventional reading and the one that cannot lose a session.
+ */
+function shiftMonths(iso: string, months: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  // Day 0 of the following month is the last day of the target one.
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(d, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+
+/** Resolve a preset window against a WIB "today". Exported so the arithmetic is testable offline. */
+export function resolveActivityPeriod(period: ActivityPeriod, today: string): DateRange {
+  switch (period) {
+    case "LAST_1_DAY":
+      return { from: today, to: today };
+    case "LAST_7_DAYS":
+      // today-6, inclusive of both ends, which is the seven days Stockbit itself returned.
+      return { from: shiftDays(today, -6), to: today };
+    case "LAST_1_MONTH":
+      return { from: shiftMonths(today, -1), to: today };
+    case "LAST_3_MONTHS":
+      return { from: shiftMonths(today, -3), to: today };
+    case "LAST_6_MONTHS":
+      return { from: shiftMonths(today, -6), to: today };
+    case "LAST_1_YEAR":
+      return { from: shiftMonths(today, -12), to: today };
+    case "PREVIOUS_DAY": {
+      // The previous CALENDAR day, which on a Monday is a Sunday and carries no trades. Named for
+      // what it does rather than "the previous session": finding that needs a holiday table.
+      const yesterday = shiftDays(today, -1);
+      return { from: yesterday, to: yesterday };
+    }
+    case "PREVIOUS_MONTH": {
+      const firstOfThis = `${today.slice(0, 7)}-01`;
+      const lastOfPrev = shiftDays(firstOfThis, -1);
+      return { from: `${lastOfPrev.slice(0, 7)}-01`, to: lastOfPrev };
+    }
+    case "THIS_MONTH":
+      return { from: `${today.slice(0, 7)}-01`, to: today };
+    case "YEAR_TO_DATE":
+      return { from: `${today.slice(0, 4)}-01-01`, to: today };
+  }
+}
+
+/** Which half of the response a row came out of. Never inferred from a sign — see `activityRows`. */
+export type BrokerActivitySide = "buy" | "sell";
+
+/** Which wire key each of this route's figures was read from. */
+export interface BrokerActivityReadFrom extends ReadFrom {
+  date?: string;
+  value?: string;
+  lot?: string;
+  avgPrice?: string;
+  freq?: string;
+  investorType?: string;
+}
+
 export interface BrokerActivityRow {
   /** The traded ticker, when a symbol-shaped value sat under a key this module recognises. */
   symbol?: string;
-  readFrom: ReadFrom;
   /**
-   * The whole row. The buy/sell/net figures live in here under names that have not been observed,
-   * so they are deliberately not renamed: a projected `netValueIdr` read out of the wrong key would
-   * be a confident number pointing the wrong way.
+   * `buy` or `sell`, from the CONTAINER this row sat in — never from the sign of any figure.
+   *
+   * The response splits the two sides into `brokers_buy` and `brokers_sell` and sends both as
+   * POSITIVE numbers, so a sell row read without its container looks exactly like a buy. The
+   * container is the only thing that distinguishes them.
+   *
+   * **Absent** when the payload was not that two-sided shape and the generic reader was used
+   * instead. That is a real state — an unrecognised response still returns its rows — and the side
+   * is then genuinely unknown. It is left off rather than defaulted, because a row labelled `buy`
+   * on no evidence is worse than one that admits it does not know: the label would be summed.
+   */
+  side?: BrokerActivitySide;
+  /** The session this row is for, when the row carried one. Rows are per stock PER DAY. */
+  date?: string;
+  /** Traded value in rupiah on this side. Positive on both sides; read `side`. */
+  value?: number;
+  /** Traded volume in LOTS on this side. */
+  lot?: number;
+  /** The average price this side traded at, as the wire computed it. */
+  avgPrice?: number;
+  /** Transaction count on this side. */
+  freq?: number;
+  /** `BROKER_TYPE_LOCAL` / `BROKER_TYPE_FOREIGN` etc., exactly as spelled on the wire. */
+  investorType?: string;
+  readFrom: BrokerActivityReadFrom;
+  /**
+   * The whole row, unmodified — including `company_detail` and `nval_trend`, which are passed
+   * through rather than projected.
    */
   row: Row;
 }
@@ -607,11 +847,13 @@ export interface BrokerActivity {
   unmapped: Unmapped;
 }
 
-export interface BrokerActivityOptions {
+export interface BrokerActivityOptions extends DateRangeInput {
   brokerCode: unknown;
   /**
-   * Refused, always. Present in the options so the refusal can be explicit — see
-   * `buildActivityParams`. Dropping it silently would be worse.
+   * A preset window, resolved locally into `from`/`to` — see `ACTIVITY_PERIODS`. The NAME is never
+   * sent: this endpoint answers 400 to `period`, but it takes the dates the name resolves to.
+   *
+   * Ignored when an explicit `from`/`to` is given, the same precedence `brokerDistribution` uses.
    */
   period?: unknown;
   /** Boards to include. REPEATED on the wire, one `market_type` per value. */
@@ -638,42 +880,47 @@ type WireParams = Record<string, string | number | readonly string[] | undefined
  * this project invented would decide the boards on the caller's behalf, and on a route nobody has
  * probed it could equally well be a value the server rejects.
  *
- * ## `period` is REFUSED here, and never sent
+ * ## The window: `from`/`to`, never `period`
  *
- * Measured on 2026-09-01. This endpoint answers **400 `Your request is invalid`** to `period` —
- * to every one of the ten `BROKER_PERIODS` members, and to eight other spellings
- * (`TB_PERIOD_DAILY`, `_1D`, `_ONE_DAY`, `_WEEKLY`, `_MONTHLY`, `DAILY`, `1D`, `daily`). With no
- * `period` at all it answers **200 with rows**.
+ * The NAME `period` is refused by the endpoint and is never put on the wire. Measured 2026-09-01,
+ * it answers **400 `Your request is invalid`** to every one of the ten `BROKER_PERIODS` members and
+ * to eight other spellings (`TB_PERIOD_DAILY`, `_1D`, `_ONE_DAY`, `_WEEKLY`, `_MONTHLY`, `DAILY`,
+ * `1D`, `daily`), while `tb_period`, `periode`, `range` and `time_period` answer 200 and are
+ * ignored — so the service silently drops keys it does not know, and a 400 means `period` is a
+ * recognised field refusing a value. No spelling of the NAME will ever work.
  *
- * Two controls make that a fact about `period` rather than about the call. `brokerDistribution`
- * accepts `TB_PERIOD_LAST_1_DAY` on the same vocabulary, so the member is not the problem; and
- * `tb_period`, `periode`, `range` and `time_period` all answer 200 and are ignored, so this service
- * SILENTLY DROPS keys it does not know. A 400 therefore means `period` is a recognised field
- * refusing a value, not an unknown parameter — there is no spelling left to find.
+ * The DATES do work. Measured the same day: `from=2026-08-17&to=2026-08-21` came back with
+ * `data.from`/`data.to` echoing exactly those dates, 1034 buy rows against the default 868, and
+ * rows whose own `date` fields sat inside the window; a second window moved it again. So this route
+ * has a fully working time filter that the earlier investigation missed by only ever varying the
+ * `period` key and its values. `period` is now ACCEPTED here and resolved into a date pair by
+ * `resolveActivityPeriod` — the caller gets the window they asked for, and the server echoes back
+ * which one it served.
  *
- * So it is refused, loudly, rather than dropped on the way to the wire. A dropped filter is worse
- * than one that errors: the caller reads rows for a window they never asked for and has no way to
- * see it. `BROKER_PERIODS` is untouched — `brokerDistribution` and `brokerTop` still use it.
+ * `date_from`/`start_date` and friends are accepted from callers and normalised away by
+ * `normalizeDateRange`: measured 2026-09-01, `date_from`/`date_to` are among the keys this service
+ * silently ignores, so sending them would return today's rows under a caller's belief that they had
+ * asked for a window.
  *
- * The window is not lost by refusing: this endpoint reports its own in `data.from` / `data.to`,
- * which `getBrokerActivity` now carries onto the result.
+ * A half-specified range is rejected by `normalizeDateRange` even though this endpoint tolerates one
+ * (a lone `from` came back as `from`..today, honestly echoed). One date-range contract across the
+ * broker family is worth more than one route's leniency.
  *
  * Exported so the shape can be asserted without a network round-trip.
  */
 export function buildActivityParams(opts: BrokerActivityOptions): WireParams {
-  if (opts.period !== undefined) {
-    throw new StockbitError(
-      "invalid_param",
-      "broker activity has no period filter: this endpoint answers 400 to every value of `period`, " +
-        "including the ones its sibling broker_distribution accepts. Its window is fixed by the " +
-        "server and reported back in `from`/`to` on the result. Omit `period` and read those; use " +
-        "broker_distribution when you need to choose a window.",
-    );
-  }
+  const explicit = normalizeDateRange(opts);
+  const range =
+    explicit ??
+    (opts.period === undefined
+      ? undefined
+      : resolveActivityPeriod(member(ACTIVITY_PERIODS, opts.period, "period"), wibTodayIso()));
   const markets = tokenList(BROKER_MARKET_TYPES, opts.marketTypes, "market_type");
   const investors = tokenList(BROKER_INVESTOR_TYPES, opts.investorTypes, "investor_type");
   return {
     broker_code: normalizeBrokerCode(opts.brokerCode),
+    from: range?.from,
+    to: range?.to,
     market_type: markets?.map((m) => `MARKET_TYPE_${m}`),
     investor_type: investors?.map((i) => `INVESTOR_TYPE_${i}`),
     sort_by: opts.sortBy === undefined ? undefined : `SORT_BY_${enumToken(opts.sortBy, "sort_by")}`,
@@ -706,12 +953,66 @@ export async function getBrokerActivity(opts: BrokerActivityOptions): Promise<Br
   const params = buildActivityParams(opts);
   const request = sent(params);
 
-  return cached(`brokers:activity:${JSON.stringify(request)}`, CACHE.brokerSummaryTtlMs, async () => {
+  // A window that ended before today can never change, so it caches the way `broker_summary`'s
+  // does. This only became available when the route gained `from`/`to`: with a server-chosen
+  // window there was no range to settle, and everything took the 60 s TTL.
+  const from = typeof params.from === "string" ? params.from : undefined;
+  const to = typeof params.to === "string" ? params.to : undefined;
+  const ttl =
+    from !== undefined && to !== undefined && isSettledRange({ from, to })
+      ? CACHE.brokerSummarySettledTtlMs
+      : CACHE.brokerSummaryTtlMs;
+
+  return cached(`brokers:activity:${JSON.stringify(request)}`, ttl, async () => {
     const body = await getJson("brokerActivity", { params });
-    const { rows, from, dataKeys, dataObject } = readRows(body, "broker activity");
-    const mapped = rows.map((row) => {
+    // The two-sided reader FIRST, and the generic one only if it declines — the order `bucketsOf`
+    // takes ahead of `rowsOf` on the day calendar, and the order this comment claimed while the
+    // code did the opposite. `readRows` ran unconditionally, and it throws on any top-level array
+    // of non-objects beside the container: a `warnings: ["stale"]` key would abort a response the
+    // two-sided reader parses correctly. Only `dataKeys` was ever needed from it here, and that is
+    // read off the envelope directly.
+    const { data } = parseOr(Envelope, body, "broker activity");
+    const dataObject = isRecordLike(data) ? (data as Row) : null;
+    const dataKeys = dataObject ? Object.keys(dataObject) : [];
+
+    const sided = activityRows(dataObject);
+    const generic = sided ? null : readRows(body, "broker activity");
+    const rows = sided ? sided.rows.map((r) => r.row) : (generic?.rows ?? []);
+    const from = sided ? sided.from : (generic?.from ?? null);
+
+    // An unrecognised shape still yields rows, but their side is unknowable — so it is left absent
+    // rather than defaulted to one of the two answers.
+    const pairs: Array<{ row: Row; side?: BrokerActivitySide }> =
+      sided?.rows ?? rows.map((row) => ({ row }));
+
+    const mapped: BrokerActivityRow[] = pairs.map(({ row, side }) => {
       const symbol = pick(row, SYMBOL_KEYS, isSymbolish);
-      return { symbol: symbol.value, readFrom: { symbol: symbol.key }, row };
+      const value = activityFigure(row, "value");
+      const lot = activityFigure(row, "lot");
+      const avgPrice = activityFigure(row, "avg_price");
+      const freq = activityFigure(row, "freq");
+      const date = label(row, "date");
+      const investorType = label(row, "type");
+      return {
+        symbol: symbol.value,
+        ...(side === undefined ? {} : { side }),
+        ...(date.value === undefined ? {} : { date: date.value }),
+        ...(value.value === undefined ? {} : { value: value.value }),
+        ...(lot.value === undefined ? {} : { lot: lot.value }),
+        ...(avgPrice.value === undefined ? {} : { avgPrice: avgPrice.value }),
+        ...(freq.value === undefined ? {} : { freq: freq.value }),
+        ...(investorType.value === undefined ? {} : { investorType: investorType.value }),
+        readFrom: {
+          symbol: symbol.key,
+          ...(date.key === undefined ? {} : { date: date.key }),
+          ...(value.key === undefined ? {} : { value: value.key }),
+          ...(lot.key === undefined ? {} : { lot: lot.key }),
+          ...(avgPrice.key === undefined ? {} : { avgPrice: avgPrice.key }),
+          ...(freq.key === undefined ? {} : { freq: freq.key }),
+          ...(investorType.key === undefined ? {} : { investorType: investorType.key }),
+        },
+        row,
+      };
     });
     // Beside the rows, not inside them: `data.from` / `data.to` are the window the SERVER chose,
     // and since `period` is refused they are the only statement of which days these figures are.

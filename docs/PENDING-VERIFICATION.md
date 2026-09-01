@@ -532,7 +532,7 @@ rups: 1     stock_reverse: 0    stocksplit: 0    tender: 0    warrant: 9
 stock_dividend: 0    today: <string>
 ```
 
-`rowsOf` (`src/core/corpaction.ts:80`) takes the **first** key whose value is an array of records.
+`rowsOf` (`src/core/corpaction.ts`) takes the **first** key whose value is an array of records.
 `bonus` is first and empty, so it binds there and reports `rows: []` — while **19 real rows**
 (dividend 1, economic 8, rups 1, warrant 9) go unread into `meta`. Exactly the reported defect,
 reproduced from a capture.
@@ -579,6 +579,151 @@ reach `attemptAutoRelogin`, so it neither confirms nor refutes it. ADR-0011 stay
 the strength of this, and now says so with a reason rather than an absence.
 
 **To settle it:** expire the web session's ACCESS token while leaving its REFRESH token alive, then
-repeat the method above. `scripts/p7-recovery-probe.mjs` in the P7 worktree is the harness minus
-that one step.
+repeat the method above.
 
+`scripts/probe-relogin.ts` is that harness, with the step. (An earlier note here named a
+`scripts/p7-recovery-probe.mjs` "in the P7 worktree"; that file was never committed and does not
+exist.) It has three modes — `inspect` changes nothing and reports which of the three conditions
+hold, `stage` backs up the store directory first and then arranges all three, `restore` puts the
+backup back. Between them, drive the BUILT server with `STOCKBIT_AUTO_RELOGIN=1`.
+
+The step that had never been staged is condition 2, and the reason it is awkward is worth keeping:
+`saveWebSession` guards against going backwards by comparing the incoming ACCESS token's expiry
+against the stored one, and ageing out the access half is exactly a backwards write. Without
+`{ allowOlder: true }` the save is a silent no-op, so the stage appears to succeed and changes
+nothing.
+
+
+---
+
+## Probed live on 2026-09-01/02 (P8)
+
+Read-only GETs through the route table, via `scripts/probe-route.ts`.
+
+### D11 reopened — `broker_activity` HAS a window, and was dropping 1704 rows
+
+Two findings, and the second was hiding under the first.
+
+**The window.** The earlier D11 pass concluded "no period filter" and stopped. It was right about
+the `period` KEY — 400 on all ten members, 400 on eight other spellings, and unknown keys answering
+200-and-ignored, so no spelling of the name could ever work. But every probe in that table varied
+the `period` key or its value. Nobody tried the form its sibling on the same path prefix accepts,
+and which this route already **echoes back in every response**:
+
+| Call | Result |
+|---|---|
+| `brokerActivity` + no dates | 200, `data.from` = `data.to` = today |
+| `brokerActivity` + `from=2026-08-17&to=2026-08-21` | **200, echo moved to those exact dates**, 1034 buy rows vs 868 |
+| `brokerActivity` + `from=2026-07-06&to=2026-07-10` | 200, echo moved again, rows' own `date` inside the window |
+| `brokerActivity` + `date_from`/`date_to` | 200, **silently ignored** — fell back to today |
+| `brokerActivity` + `from` alone | 200, `from`..today, honestly echoed |
+
+So the window is choosable by date pair. `period` is now accepted and resolved locally into
+`from`/`to`; the name is still never sent.
+
+The local arithmetic was checked against Stockbit's own, by asking `broker_summary` — which resolves
+the same names server-side and echoes the result:
+
+| Period | Stockbit resolved to | This server |
+|---|---|---|
+| `LAST_7_DAYS` | 2026-08-26 .. 2026-09-01 | same |
+| `LAST_3_MONTHS` | 2026-06-01 .. 2026-09-01 | same |
+| `YEAR_TO_DATE` | 2026-01-**02** .. 2026-09-01 | 2026-01-**01** |
+
+The YTD difference is the first *trading* day versus the first calendar day. It cannot move a
+figure, and that was measured too: `from=2026-08-15` (a Saturday) and `from=2026-08-17` (the
+Monday) returned byte-identical rows. Computing the first trading day would need a holiday table,
+which this project refuses to hard-code.
+
+**The dropped rows.** `data.broker_activity_transaction` is an **object** holding `brokers_buy` and
+`brokers_sell`, not an array. The container lookup tests `Array.isArray`, so it matched nothing and
+the tool returned `count: 0, rowsFrom: null` for YP on a session where the wire carried **868 buy
+rows and 836 sell rows**. Naming the container in `ROW_CONTAINERS` — which the previous pass did —
+could never have fixed it.
+
+Both sides send POSITIVE figures, and the row shape is
+`{stock_code, broker_code, type, date, value, lot, avg_price, freq, company_detail, nval_trend}`
+with the four figures as **JSON numbers**, not the numeric strings `brokerTop` sends.
+
+`broker_activity` moves to **observed**.
+
+### `calendar_today` — the dated form is the same shape, and `today` echoes the request
+
+`GET /corpaction?date=2026-08-28` answered with the **same twelve buckets** as the undated form,
+that day's own rows (dividend 1, pubex 1, rups 1, warrant 1 — different from 2026-09-01's), and
+`today: "2026-08-28"`.
+
+Two things settled. The tool moves **projected → observed**: both wire forms it sends are now
+measured, and `from`/`to` are never sent at all. And `today` **echoes the date requested** rather
+than naming the server's current day — so comparing the two is a real detector for this family's
+characteristic failure, answering a different question convincingly. The code previously recorded
+this as unknown.
+
+### The two calendar spellings ARE the path kinds
+
+The open question was whether `tender`/`stock_reverse` name the same things as
+`tenderoffer`/`reversesplit`. They do, and the service says so itself:
+
+```
+GET /corpaction/tenderoffer   -> data.{ tender }
+GET /corpaction/reversesplit  -> data.{ stock_reverse }
+```
+
+It answers a request in the path vocabulary with a container named in the calendar vocabulary. That
+justifies the translation `corporate_actions` now applies. Note the `tenderoffer` payload is also a
+worked example of the **one-array** case: a single bucket beside no siblings, which is exactly the
+rows-under-a-key shape `rowsOf` handles — so `bucketsOf`'s threshold of two is confirmed correct
+rather than merely documented.
+
+### Still open
+
+- **P7f's absolute lag.** `top-stock` aggregates were measured *changing* continuously; how far
+  behind the exchange they are was never established. Recorded in `docs/LIVENESS.md` as a known
+  hole rather than left implicit.
+- **`broker_top` date range.** It takes the ten-member enum and has no `from`/`to`. Given
+  `brokerActivity` turned out to accept dates nobody had tried, this is the obvious next probe.
+
+### P7g item 3 — SETTLED, and the answer is that recovery cannot fire (P8, 2026-09-01)
+
+The third attempt, and the first to reach the state the previous two were blocked short of.
+`scripts/probe-relogin.ts stage` produced all three conditions at once for the first time:
+
+```
+storedRefresh: present            (a well-formed but upstream-dead JWT)
+accessHoursLeft: -1.0             -> browserAccessTokenUsable: false, so level three DECLINES
+refreshHoursLeft: 162.2           -> likelyValid: true, so the relogin gate PASSES
+readyToObserveRecovery: "yes — all three conditions hold"
+```
+
+Then the built server, `STOCKBIT_AUTO_RELOGIN=1`, no `STOCKBIT_NO_BROWSER`, asked for a quote.
+
+**Result: a 401 in 1.8 seconds. No browser opened. Recovery did not run.**
+
+Not for the previous reason. Level three declined exactly as intended, and Stockbit really did refuse
+the stored credential — condition 1 and condition 2 both did their job. The refusal is structural,
+and it is one layer lower than anyone had looked:
+
+- `attemptAutoRelogin` has exactly ONE call site: `src/auth/session.ts`, inside `forceRefresh`'s
+  `catch`.
+- `forceRefresh` has exactly TWO callers, both in `src/http/client.ts`, and both run only on a **401
+  response to an API request** — i.e. after a token was successfully obtained and then rejected.
+- But `getJson` calls `credentialFor(route, …)` → `ensureFresh(domain)` **before** the fetch. With a
+  dead stored refresh token and no usable browser access token, `ensureFresh` throws at level four.
+  The request is never made, so there is no 401 response, so the retry branch never runs, so
+  `forceRefresh` is never called, so `attemptAutoRelogin` is never reached.
+
+**So automatic recovery can only fire when the stored refresh token still works well enough to mint
+an access token that the API then refuses.** The ordinary "my session was revoked" case — the one
+ADR-0011 is written for — fails in `ensureFresh`, where there is no recovery hook at all.
+
+That is why three attempts have failed. The first two concluded "level three adopts the browser's
+token, so no 401 is produced", which was true and hid this. Disabling level three did not reveal a
+working recovery; it revealed that there was never a path to one.
+
+**Not fixed here.** Moving the hook is a change to the auth failure path, it needs its own decision
+record, and the point of this run was to measure rather than to redesign. What is now known, and was
+not before: the fix is not "stage the conditions better", and ADR-0011's ~3 s harvest figure remains
+unmeasured because nothing has yet reached the harvest.
+
+The store was backed up before staging, restored afterwards, and the restore was proved with a live
+call returning real broker rows — not merely with a file listing.

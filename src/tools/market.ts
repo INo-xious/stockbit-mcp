@@ -94,10 +94,11 @@ export function registerMarketTools(define: Definer): void {
       "the SESSION OPEN, at most 100 rows come back however large `limit` is, and `offset`/`page` " +
       "are accepted but move nothing. So on a busy ticker this tool can only ever show the first " +
       "100 prints of the day — the last trade before the close is NOT reachable through it at any " +
-      "argument. A limit above 100 is refused here rather than silently truncated. USE " +
-      "broker_flow_intraday for anything about the rest of the session: it covers 09:00 to 16:14 at " +
-      "one-minute resolution with per-broker value and volume, and it is the tool that answers the " +
-      "questions this one cannot.\n" +
+      "argument. A limit above 100 is refused here rather than silently truncated. For the rest of " +
+      "the session use broker_flow_intraday, which covers 09:00 to 16:14 at one-minute resolution " +
+      "with per-broker value and volume — but note it serves the PREVIOUS session until the ~18:00 " +
+      "WIB broker release, so it does not answer 'what just traded' either. NOTHING here does; " +
+      "docs/LIVENESS.md is the one place that says what each source is worth and why.\n" +
       "`order_by` is required upstream and is NOT a time ordering: 1 is chronological from the open " +
       "with real trade sizes, 2 and 3 both return lot-ascending rows that were every one a 1-lot " +
       "trade when measured. None of the three returns the most recent prints and none returns the " +
@@ -193,7 +194,9 @@ export function registerMarketTools(define: Definer): void {
       "This is the highest-resolution view of the session this server has, and unlike running_trade " +
       "it covers the WHOLE session rather than the first 100 prints. Only the top few brokers " +
       "appear (five on the reading above), so it ranks the session's main participants — it is not " +
-      "a complete broker list. For the full table use broker summary or broker distribution.\n" +
+      "a complete broker list. For the full table use broker summary or broker distribution. High " +
+      "resolution is NOT recency — see the publication caveat below, and docs/LIVENESS.md for what " +
+      "each source in this server is actually worth.\n" +
       "WHICH SESSION, AND WHEN IT IS PUBLISHED. The payload states its own window — `from`, `to` " +
       "and `date_session_info` — and that is the answer; read it rather than assuming today. " +
       "Measured 2026-09-01 at 18:40 WIB, all three read that same trading day. Broker-derived data " +
@@ -264,7 +267,14 @@ export function registerMarketTools(define: Definer): void {
 
   define.read(
     "top_stocks",
-    "The order-trade service's top-stock list.\n" +
+    "The order-trade service's top-stock list — and the FRESHEST source in this server.\n" +
+      "This route moves continuously during the session, which almost nothing else here does: over " +
+      "25 seconds one symbol moved +1.39B in value across +91 transactions. running_trade by " +
+      "contrast runs 8-10 minutes behind. So if you are chasing something happening NOW, this is " +
+      "the reading to take deltas of — `src/live/tape.ts` exists to do exactly that, and " +
+      "docs/LIVENESS.md explains what such a delta can and cannot tell you (it is an AVERAGE trade " +
+      "size, not a print). Its absolute lag against the exchange has never been measured, so " +
+      "'live' here means moving continuously, not at the exchange's own clock.\n" +
       "Same caveats as market_movers: a separate service from the hotlist tools, only `limit` is " +
       "sent, and which ranking the default view uses has not been observed — read it off the " +
       "payload. Empty is normal outside trading hours.\n" +

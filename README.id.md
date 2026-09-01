@@ -109,8 +109,9 @@ Di Windows, npx butuh shell:
 { "mcpServers": { "stockbit": { "command": "cmd", "args": ["/c", "npx", "-y", "stockbit-mcp"] } } }
 ```
 
-**Cursor / VS Code** — batas tool-nya 40 dan 128. Profil bawaan `core` berisi tepat 40 tool, jadi
-tidak perlu diatur apa-apa. Untuk membuka semua 138 tool:
+**Cursor / VS Code** — batas tool-nya 40 dan 128. Profil bawaan `core` berisi 41 tool, jadi di
+Cursor **sebutkan daftar yang lebih sempit**: Cursor membuang kelebihannya tanpa memberi tahu tool
+mana yang dibuang. Di VS Code tidak perlu diatur apa-apa. Untuk membuka semua 138 tool:
 
 ```json
 { "env": { "STOCKBIT_TOOLS": "all" } }

@@ -1,6 +1,19 @@
 # ADR-0011 — Automatic login recovery
 
-**Status.** Accepted and implemented — **never run against a live Stockbit session.**
+**Status.** Accepted and implemented — and, as wired, **it cannot fire for the failure it was
+written for.** Measured 2026-09-01 (P8), on the third attempt and the first to stage all three
+preconditions at once. See `docs/PENDING-VERIFICATION.md`, "P7g item 3 — SETTLED".
+
+The short version: `attemptAutoRelogin` hangs off `forceRefresh`, which only runs when an API
+request came back 401 — that is, when a token was successfully obtained and then refused. But
+`getJson` resolves the credential *before* the request, and a dead stored refresh token makes
+`ensureFresh` throw there. No request is made, so no 401 response exists, so recovery is never
+reached. It can therefore fire only when the stored refresh token still mints an access token that
+the API then rejects, and never in the ordinary "my session was revoked" case this record describes.
+
+The harvest itself, and the ~3 s figure below, are still **unmeasured** — nothing has reached them.
+Moving the hook is a change to the auth failure path and wants its own decision record; this note
+records what was measured rather than pre-empting that.
 **Supersedes nothing.** Extends [ADR-0007](0007-auth-tools-in-the-server.md) (auth tools in the
 server) and depends on [ADR-0009](0009-browser-is-the-source-of-truth.md) (the browser is the source
 of truth).

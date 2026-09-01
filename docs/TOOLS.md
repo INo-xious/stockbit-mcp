@@ -4,11 +4,11 @@
 
 **139 tools** (114 read, 25 write) in 17 families, 8 prompts.
 
-Unset, this server registers the **`core`** profile: **40 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
+Unset, this server registers the **`core`** profile: **41 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
 
 <details><summary>The <code>core</code> profile, by name</summary>
 
-`status`, `login`, `logout`, `broker_summary`, `broker_distribution`, `alert_create`, `alert_list`, `alert_delete`, `alert_check`, `technicals`, `price_chart`, `quote`, `top_movers`, `orderbook`, `keystats`, `ratios`, `financials`, `backtest`, `strategy_compare`, `patterns`, `timeframe_alignment`, `scan`, `price_bands`, `watchlist`, `screener`, `analyze`, `position_size`, `stream`, `news`, `seasonality`, `market_session`, `broker_activity`, `bandar_detector`, `portfolio`, `position`, `cash_balance`, `orders`, `trading_status`, `workflow_list`, `workflow_run`
+`status`, `login`, `logout`, `broker_summary`, `broker_distribution`, `alert_create`, `alert_list`, `alert_delete`, `alert_check`, `technicals`, `price_chart`, `quote`, `top_movers`, `orderbook`, `keystats`, `ratios`, `financials`, `backtest`, `strategy_compare`, `patterns`, `timeframe_alignment`, `scan`, `price_bands`, `watchlist`, `screener`, `analyze`, `position_size`, `stream`, `news`, `seasonality`, `market_movers`, `market_session`, `broker_activity`, `bandar_detector`, `portfolio`, `position`, `cash_balance`, `orders`, `trading_status`, `workflow_list`, `workflow_run`
 
 </details>
 
@@ -22,7 +22,7 @@ Every tool carries an **evidence** word — Observed, Read-back or Projected. Th
 |---|---|---|---|
 | [system](#system) | 3 | Is this working, and what do I run — plus logging in and out | Observed |
 | [market](#market) | 18 | Prices, depth, movers, bars, the session clock | Mixed |
-| [bandarmology](#bandarmology) | 6 | Who accumulated and who distributed. The data no other market API has | Mixed |
+| [bandarmology](#bandarmology) | 6 | Who accumulated and who distributed. The data no other market API has | Observed |
 | [analysis](#analysis) | 9 | Indicators, patterns, backtests, scans, charts, position sizing | Observed |
 | [company](#company) | 9 | Profile, ownership, management, peers, ratings | Mixed |
 | [fundamentals](#fundamentals) | 10 | Key statistics, ratios, financial statements, seasonality | Mixed |
@@ -67,7 +67,7 @@ Prices, depth, movers, bars, the session clock.
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
 | `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
 | `market_movers` | read | The market movers behind Stockbit's own Movers dialog — the market-wide ranking. | Observed | view, limit |
-| `top_stocks` | read | The order-trade service's top-stock list. | Projected | limit |
+| `top_stocks` | read | The order-trade service's top-stock list — and the FRESHEST source in this server. | Projected | limit |
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
 | `market_session` | read | Where the IDX trading day currently is: pre-opening, session 1, the midday break, session 2, post-closing, or shut. | Projected | — |
 | `prices_batch` | read | A price SERIES for ONE symbol. | Observed | symbols* |
@@ -82,7 +82,7 @@ Who accumulated and who distributed. The data no other market API has.
 | `broker_summary` | read | Broker summary for an IDX stock: which brokers net-bought/sold, in lots and IDR value, with foreign/local/govt classification. | Observed | symbol*, from, to, date_from, date_to, start_date, end_date, limit, transaction_type, market_board, investor_type, period, resolve_names |
 | `broker_distribution` | read | Broker-to-broker flow for an IDX stock, ALWAYS rendered as an SVG diagram laid out BUYER -> SELLER exactly like Stockbit's own Broker Distribution: top buyers… | Observed | symbol*, data_type, investor_type, market_board, period, from, to, date_from, date_to, start_date, end_date, theme, top_sources, top_targets, save_path, open_in_stockbit, browser |
 | `brokers` | read | The IDX broker directory: what every two-letter broker code stands for. | Observed | page, limit, codes |
-| `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Projected | broker_code*, period, market_types, investor_types, sort_by, page, limit |
+| `broker_activity` | read | Which STOCKS one broker traded, and how much of each. | Observed | broker_code*, period, from, to, date_from, date_to, start_date, end_date, market_types, investor_types, sort_by, page, limit |
 | `broker_top` | read | The market-wide broker league table: which brokers moved the most, across every stock rather than one. | Observed | period, sort_by, page, limit |
 | `bandar_detector` | read | A typed accumulation/distribution reading for one IDX stock, computed from the same broker summary broker_summary returns: net buy and net sell totals for the… | Observed | symbol*, top, from, to, date_from, date_to, start_date, end_date, period, limit, transaction_type, market_board, investor_type, resolve_names |
 
@@ -154,7 +154,7 @@ Dividends, splits, rights, the corporate calendar.
 |---|---|---|---|---|
 | `corporate_actions` | read | Corporate actions of ONE kind: dividends, rights issues, RUPS (shareholder meetings), bonus shares, splits, reverse splits, tender offers, warrants, public exp… | Observed | action_type*, symbol, limit |
 | `dividend_calendar` | read | Cash dividends AND stock dividends in one list, newest ex-date first. | Observed | symbol, limit |
-| `calendar_today` | read | Every corporate action happening across the whole market on ONE date, or day by day over a short range. | Projected | date, from, to |
+| `calendar_today` | read | Every corporate action happening across the whole market on ONE date, or day by day over a short range. | Observed | date, from, to |
 | `corporate_action_status` | read | UMA (unusual market activity) and IDX special-notation status for several symbols in ONE request. | Observed | symbols* |
 | `stock_conversion` | read | Warrant and rights conversion records for one issuer: the exercises that turned derivative instruments into ordinary shares, which is share-count dilution that… | Projected | symbol*, page, limit |
 | `ipo_pipeline` | read | Upcoming and recent IPOs, with whatever offering terms the row carries. | Observed | limit |

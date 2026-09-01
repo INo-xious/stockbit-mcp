@@ -48,7 +48,13 @@ export function registerCorpactionTools(define: Definer): void {
       "neither side of any pair.\n" +
       "For dividends prefer `dividend_calendar`, which also covers stock dividends. ",
     {
-      action_type: z.enum(core.CORPACTION_TYPES).describe("Which action kind, e.g. dividend, rightissue, rups"),
+      action_type: z
+        .enum([...core.CORPACTION_TYPES, ...core.CALENDAR_TYPE_ALIAS_KEYS] as [string, ...string[]])
+        .describe(
+          "Which action kind, e.g. dividend, rightissue, rups. `tender` and `stock_reverse` — the " +
+            "two spellings calendar_today tags rows with — are accepted and translated to " +
+            "`tenderoffer` and `reversesplit`.",
+        ),
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the whole market"),
       limit: z.coerce.number().optional().describe("Max rows. Omitted entirely when not given"),
     },
@@ -114,9 +120,12 @@ export function registerCorpactionTools(define: Definer): void {
       "The response is BUCKETED, one key per action kind, and all of them are returned. Every row " +
       "carries `corpactionType` naming the bucket it came from — added by this tool, not by " +
       "Stockbit, and spelled exactly as the response spelled it. Two of those spellings are NOT the " +
-      "`action_type` vocabulary: the calendar says `stock_reverse` and `tender` where " +
-      "`corporate_actions` takes `reversesplit` and `tenderoffer`, and neither is translated here " +
-      "because nothing has verified they name the same thing.\n" +
+      "`action_type` vocabulary: the calendar says `stock_reverse` and `tender` where the path " +
+      "takes `reversesplit` and `tenderoffer`. Both spellings are now ACCEPTED by " +
+      "corporate_actions and translated, so a kind read off this calendar can be passed straight " +
+      "back. That equivalence was measured rather than assumed — asked on 2026-09-01, the " +
+      "`tenderoffer` kind returned its rows under a container named `tender` and `reversesplit` " +
+      "under one named `stock_reverse`, which is Stockbit equating the two vocabularies itself.\n" +
       "`buckets` lists every kind the response carried with its row count, zeros included. That is " +
       "the difference between a kind that came back EMPTY today and one that was not in the " +
       "response at all: the first is in `buckets` with 0, the second is missing from it. `rowsFrom` " +
@@ -136,10 +145,13 @@ export function registerCorpactionTools(define: Definer): void {
       "listed, all zero) is a genuinely quiet day. Reporting the first as the second is the exact " +
       "defect this tool was fixed for: it reported a market-wide day of 19 corporate actions as " +
       "none, because it bound to an empty bucket and never said it had failed to read the rest.\n" +
-      "The bucketed shape above was read off ONE live call, and that call sent no arguments. The " +
-      "`date` and `from`/`to` forms have not been measured, so if a dated call comes back as a " +
-      "flat list you will get rows with no `corpactionType` and no `buckets` — read `rowsFrom` " +
-      "rather than assuming the bucketed shape.\n" +
+      "THE DATE IS HONOURED, and you can check it yourself. Measured 2026-09-01, " +
+      "`date=2026-08-28` came back with the same twelve buckets and with `meta.today` reading " +
+      "`2026-08-28` — the date REQUESTED, not the server's current day, and with that day's own " +
+      "rows rather than today's. So `meta.today` disagreeing with the date you asked for is a " +
+      "direct signal the parameter was ignored, on a family whose whole hazard is answering a " +
+      "different question convincingly. `from`/`to` are a different matter: this endpoint ignores " +
+      "them, so a range is assembled here as one dated request per day.\n" +
       "An empty day is otherwise normal: weekends, holidays, and plenty of ordinary sessions have " +
       "no actions.",
     {
@@ -162,25 +174,22 @@ export function registerCorpactionTools(define: Definer): void {
           ? core.getCalendarRange({ from: a.from, to: a.to })
           : core.getCalendarDay(a.date as string | undefined);
       }),
-    // PROJECTED, deliberately, and it was `observed` for a few hours before this comment replaced
-    // that claim.
+    // OBSERVED, and the call this was waiting for has now been made.
     //
-    // What WAS measured, live on 2026-09-01: `GET /corpaction` with NO arguments answered from a
-    // real account, and the twelve bucket keys and the `today` string this tool names were read out
-    // of that response. That call is also what exposed the defect — the reader had been binding to
-    // the empty `bonus` bucket and reporting a market-wide day of 19 actions as none.
+    // The undated form was measured live on 2026-09-01 — twelve bucket keys and the `today` string,
+    // and that capture is what exposed the defect, the reader binding to the empty `bonus` bucket
+    // and reporting a market-wide day of 19 actions as none.
     //
-    // What was NOT measured is the rest of this tool's surface: `date`, and `from`/`to`, which
-    // `getCalendarRange` issues as one DATED request per day. Whether the dated form also returns
-    // buckets is unknown, and the code keeps a flat-shape branch whose output has neither
-    // `corpactionType` nor `buckets`.
+    // What was missing was the DATED form, and the previous comment here said so and stayed
+    // `projected` for it, on the `shareholding` precedent: one settled mode is not a settled tool.
+    // `GET /corpaction?date=2026-08-28` has now answered from a real account with the SAME twelve
+    // buckets, that day's own rows, and `today` echoing the requested date. So the dated form is
+    // measured, not assumed, and both forms this tool sends are the same shape.
     //
-    // This repo has already settled how to grade that. `shareholding` was fixed and verified on one
-    // mode and STAYED `projected` because its other three were unprobed — `docs/PENDING-
-    // VERIFICATION.md` says so in as many words. One call form out of three is the same situation,
-    // and `observed` here would tell a caller the shape was seen live for a request nobody has
-    // sent. One live `GET /corpaction?date=<a past trading day>` settles it.
-    { evidence: "projected" },
+    // `from`/`to` remain unsent — the endpoint ignores them and `getCalendarRange` issues one dated
+    // request per day, so there is no third wire form left unmeasured. The flat-shape branch stays
+    // as a fallback for a service that changes, not as a shape anyone has seen.
+    { evidence: "observed" },
   );
 
   define.read(

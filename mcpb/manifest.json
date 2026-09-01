@@ -44,7 +44,7 @@
     "tool_profile": {
       "type": "string",
       "title": "Tool profile",
-      "description": "core (40 tools, the default) or all (138), or a comma-separated list of families",
+      "description": "core (41 tools, the default) or all (138), or a comma-separated list of families",
       "default": "core",
       "required": false
     },

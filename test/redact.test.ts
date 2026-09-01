@@ -111,7 +111,11 @@ test("the bare-token rule does not disturb the underscored token names", () => {
 test("a Telegram bot token is redacted by shape, inside the URL that carries it", () => {
   // The Bot API puts the token in the PATH, so there is no key to match on and no word boundary
   // before the digits — the reason TELEGRAM_BOT_TOKEN_RE is deliberately unanchored on the left.
-  const bot = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+  // Synthetic, and deliberately so: the shape is what this test needs, and the value that used to
+  // sit here was the sample token out of Telegram's own Bot API documentation — real-looking enough
+  // that a reader had to stop and work out whose it was. Its two sibling fixtures
+  // (`telegram.test.ts`, `health.test.ts`) were already obviously fake; this one is now too.
+  const bot = "123456789:AAHnot_a_real_token_only_for_tests_00";
   const out = redact(`fetch failed: https://api.telegram.org/bot${bot}/sendMessage`);
   assert.ok(!out.includes(bot), `leaked: ${out}`);
   assert.ok(out.includes("[REDACTED]"));
