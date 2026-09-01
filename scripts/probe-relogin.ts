@@ -101,7 +101,23 @@ function fail(message: string): never {
 function deadButWellFormedJwt(): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
-  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ exp, sub: "probe" })}.not-a-real-signature`;
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ exp, sub: PROBE_SUBJECT })}.not-a-real-signature`;
+}
+
+/** The marker this script stamps into its own throwaway JWT, so it can recognise its own work. */
+const PROBE_SUBJECT = "stockbit-mcp-probe-relogin";
+
+/** Whether a stored credential is one THIS script wrote — decoded, never substring-matched. */
+function isProbeToken(token: string | null): boolean {
+  if (!token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { sub?: unknown };
+    return claims.sub === PROBE_SUBJECT;
+  } catch {
+    return false;
+  }
 }
 
 /** The credential cookie's decoded payload, or null if it is not there or not readable. */
@@ -203,9 +219,14 @@ function stage(): void {
   if (!session) fail("No web session on disk — nothing to age out. Log in first.");
 
   // Staging twice would make the DELIBERATELY BROKEN store the newest backup, which is what a bare
-  // `restore` puts back. The probe JWT names itself so this is detectable.
-  const current = getStore("main").get();
-  if (current && current.includes(Buffer.from('"sub":"probe"').toString("base64url").slice(0, 12))) {
+  // `restore` puts back. The probe JWT names itself, so this is detectable — by DECODING it.
+  //
+  // Substring-matching the encoded form does not work and was wrong here before this comment:
+  // base64 encodes in three-byte groups, so the encoding of `"sub":"probe"` appears inside the
+  // encoding of the whole payload only when the offset happens to align mod 3 — and the payload
+  // carries an `exp` timestamp whose width moves that alignment from run to run. It would have
+  // passed the guard most of the time and silently failed to protect anything.
+  if (isProbeToken(getStore("main").get())) {
     fail("The stored credential is already this script's probe token. Restore first, then stage again.");
   }
 
