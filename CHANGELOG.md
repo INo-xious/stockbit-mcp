@@ -50,6 +50,22 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- **Automatic login recovery cannot fire for the failure it was written for, and ADR-0011 now says
+  so.** Measured 2026-09-01, on the third attempt and the first to stage all three preconditions at
+  once — a dead stored credential, an aged-out browser access token so `ensureFresh` level three
+  declines, and a live browser refresh token so the relogin gate passes.
+
+  The quote came back 401 in 1.8 s with no browser. The reason is structural and one layer below
+  where the previous two attempts looked: `attemptAutoRelogin` is called only from `forceRefresh`'s
+  catch, and `forceRefresh` runs only on a 401 **response** to a request. `getJson` resolves the
+  credential before the request, so a dead refresh token throws in `ensureFresh`, no request is
+  made, no 401 response exists, and recovery is never reached.
+
+  So it can fire only when the stored token still mints an access token the API then refuses —
+  never in the ordinary revoked-session case. Recorded, not rewired: moving the hook changes the
+  auth failure path and wants its own decision record. `scripts/probe-relogin.ts` is the harness
+  that staged it, and the first thing in this repo able to reach that state at all.
+
 - **`broker_activity` reported "traded nothing" for a broker that traded 1704 stock-sides.**
   `data.broker_activity_transaction` is an **object** holding `brokers_buy` and `brokers_sell`, not
   an array — so the container lookup, which tests `Array.isArray`, matched nothing and the tool

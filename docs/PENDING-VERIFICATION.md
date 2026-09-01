@@ -682,3 +682,48 @@ rather than merely documented.
   hole rather than left implicit.
 - **`broker_top` date range.** It takes the ten-member enum and has no `from`/`to`. Given
   `brokerActivity` turned out to accept dates nobody had tried, this is the obvious next probe.
+
+### P7g item 3 — SETTLED, and the answer is that recovery cannot fire (P8, 2026-09-01)
+
+The third attempt, and the first to reach the state the previous two were blocked short of.
+`scripts/probe-relogin.ts stage` produced all three conditions at once for the first time:
+
+```
+storedRefresh: present            (a well-formed but upstream-dead JWT)
+accessHoursLeft: -1.0             -> browserAccessTokenUsable: false, so level three DECLINES
+refreshHoursLeft: 162.2           -> likelyValid: true, so the relogin gate PASSES
+readyToObserveRecovery: "yes — all three conditions hold"
+```
+
+Then the built server, `STOCKBIT_AUTO_RELOGIN=1`, no `STOCKBIT_NO_BROWSER`, asked for a quote.
+
+**Result: a 401 in 1.8 seconds. No browser opened. Recovery did not run.**
+
+Not for the previous reason. Level three declined exactly as intended, and Stockbit really did refuse
+the stored credential — condition 1 and condition 2 both did their job. The refusal is structural,
+and it is one layer lower than anyone had looked:
+
+- `attemptAutoRelogin` has exactly ONE call site: `src/auth/session.ts`, inside `forceRefresh`'s
+  `catch`.
+- `forceRefresh` has exactly TWO callers, both in `src/http/client.ts`, and both run only on a **401
+  response to an API request** — i.e. after a token was successfully obtained and then rejected.
+- But `getJson` calls `credentialFor(route, …)` → `ensureFresh(domain)` **before** the fetch. With a
+  dead stored refresh token and no usable browser access token, `ensureFresh` throws at level four.
+  The request is never made, so there is no 401 response, so the retry branch never runs, so
+  `forceRefresh` is never called, so `attemptAutoRelogin` is never reached.
+
+**So automatic recovery can only fire when the stored refresh token still works well enough to mint
+an access token that the API then refuses.** The ordinary "my session was revoked" case — the one
+ADR-0011 is written for — fails in `ensureFresh`, where there is no recovery hook at all.
+
+That is why three attempts have failed. The first two concluded "level three adopts the browser's
+token, so no 401 is produced", which was true and hid this. Disabling level three did not reveal a
+working recovery; it revealed that there was never a path to one.
+
+**Not fixed here.** Moving the hook is a change to the auth failure path, it needs its own decision
+record, and the point of this run was to measure rather than to redesign. What is now known, and was
+not before: the fix is not "stage the conditions better", and ADR-0011's ~3 s harvest figure remains
+unmeasured because nothing has yet reached the harvest.
+
+The store was backed up before staging, restored afterwards, and the restore was proved with a live
+call returning real broker rows — not merely with a file listing.
