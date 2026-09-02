@@ -64,6 +64,7 @@
     "smoke": "node scripts/smoke.mjs",
     "check:pack": "node scripts/check-pack.mjs",
     "docs:tools": "node --import tsx scripts/gen-tools-doc.ts",
+    "snapshot:surface": "node --import tsx scripts/gen-surface-snapshot.ts",
     "docs:images": "node --import tsx scripts/render-samples.ts",
     "docs:icon": "node scripts/gen-icon.mjs",
     "build:mcpb": "node scripts/build-mcpb.mjs",

@@ -24,6 +24,13 @@ npm run docs:tools    # regenerates docs/TOOLS.md — run it after touching ANY 
 The full gate before a commit is all six. CI runs them on three operating systems and two Node
 versions.
 
+Two more, run deliberately rather than every time:
+
+```bash
+npm run snapshot:surface                        # refreezes test/fixtures/surface.json after an INTENDED surface change
+node --import tsx scripts/measure-surface.ts     # what a model pays to look at this server
+```
+
 ## The map
 
 | Path | |
@@ -52,6 +59,12 @@ versions.
 
 - **Run `npm run docs:tools` after touching a tool.** `docs/TOOLS.md` is generated and a test fails
   if it is stale.
+- **Run `npm run snapshot:surface` after ADDING, REMOVING or RE-ARGUING a tool.**
+  `test/fixtures/surface.json` freezes six fields per tool — name, family, evidence, kind and the
+  two argument lists — so that moving a tool between files produces a reviewable diff instead of a
+  silent change of family or evidence. Regenerating it is a deliberate act: read the diff first.
+  It is a drift detector and nothing more — the claims that must not be derived from the code stay
+  hand-written in `test/tools.test.ts`.
 - **Add a new write tool's name to `WRITES` in `test/tools.test.ts`.** That list is deliberately
   hand-written; deriving it would make the test agree with the code.
 - **Never invent a number.** If a field could not be read, it is absent — not zero, not a default.

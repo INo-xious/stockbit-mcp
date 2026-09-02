@@ -1,0 +1,1751 @@
+[
+  {
+    "name": "account",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "alert_check",
+    "family": "alerts",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "dry_run"
+    ]
+  },
+  {
+    "name": "alert_create",
+    "family": "alerts",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol",
+      "name",
+      "left",
+      "op",
+      "right"
+    ],
+    "optional": [
+      "overlays",
+      "panels",
+      "cooldown_minutes",
+      "note"
+    ]
+  },
+  {
+    "name": "alert_delete",
+    "family": "alerts",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "id"
+    ],
+    "optional": [
+      "disable_only"
+    ]
+  },
+  {
+    "name": "alert_list",
+    "family": "alerts",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol"
+    ]
+  },
+  {
+    "name": "analyst_ratings",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "analyze",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "broker_period",
+      "pattern_window",
+      "include_sentiment"
+    ]
+  },
+  {
+    "name": "backtest",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "strategy",
+      "bars",
+      "from",
+      "to",
+      "overlays",
+      "panels",
+      "entry_left",
+      "entry_op",
+      "entry_right",
+      "exit_left",
+      "exit_op",
+      "exit_right",
+      "stop_loss_pct",
+      "take_profit_pct",
+      "max_hold_bars",
+      "initial_capital",
+      "commission_buy_pct",
+      "commission_sell_pct",
+      "slippage_pct",
+      "walk_forward",
+      "folds",
+      "include_trades",
+      "include_equity"
+    ]
+  },
+  {
+    "name": "bandar_detector",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "top",
+      "from",
+      "to",
+      "date_from",
+      "date_to",
+      "start_date",
+      "end_date",
+      "period",
+      "limit",
+      "transaction_type",
+      "market_board",
+      "investor_type",
+      "resolve_names"
+    ]
+  },
+  {
+    "name": "broker_activity",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "broker_code"
+    ],
+    "optional": [
+      "period",
+      "from",
+      "to",
+      "date_from",
+      "date_to",
+      "start_date",
+      "end_date",
+      "market_types",
+      "investor_types",
+      "sort_by",
+      "page",
+      "limit"
+    ]
+  },
+  {
+    "name": "broker_distribution",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "data_type",
+      "investor_type",
+      "market_board",
+      "period",
+      "from",
+      "to",
+      "date_from",
+      "date_to",
+      "start_date",
+      "end_date",
+      "theme",
+      "top_sources",
+      "top_targets",
+      "save_path",
+      "open_in_stockbit",
+      "browser"
+    ]
+  },
+  {
+    "name": "broker_flow_intraday",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "broker_summary",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "from",
+      "to",
+      "date_from",
+      "date_to",
+      "start_date",
+      "end_date",
+      "limit",
+      "transaction_type",
+      "market_board",
+      "investor_type",
+      "period",
+      "resolve_names"
+    ]
+  },
+  {
+    "name": "broker_top",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "period",
+      "sort_by",
+      "page",
+      "limit"
+    ]
+  },
+  {
+    "name": "brokers",
+    "family": "bandarmology",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "page",
+      "limit",
+      "codes"
+    ]
+  },
+  {
+    "name": "calendar_today",
+    "family": "corpaction",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "date",
+      "from",
+      "to"
+    ]
+  },
+  {
+    "name": "cash_balance",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "chart_series",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol",
+      "timeframe"
+    ],
+    "optional": [
+      "raw"
+    ]
+  },
+  {
+    "name": "chart_settings",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "chartbit_analyze",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "lookback",
+      "min_touches",
+      "draw",
+      "replace",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_clear",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "symbol",
+      "scope"
+    ],
+    "optional": [
+      "confirm",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_draw",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "symbol",
+      "annotations",
+      "anchor_date"
+    ],
+    "optional": [
+      "replace",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_drawings",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "layout_id",
+      "chart_id"
+    ]
+  },
+  {
+    "name": "chartbit_drawings_save",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "layout_id",
+      "chart_id",
+      "sources",
+      "confirm"
+    ],
+    "optional": [
+      "symbol",
+      "deleted_keys"
+    ]
+  },
+  {
+    "name": "chartbit_layout",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "layout_id"
+    ],
+    "optional": []
+  },
+  {
+    "name": "chartbit_layout_delete",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "layout_id",
+      "confirm"
+    ],
+    "optional": []
+  },
+  {
+    "name": "chartbit_layout_save",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "layout_id",
+      "confirm"
+    ],
+    "optional": [
+      "layout",
+      "allow_lossy"
+    ]
+  },
+  {
+    "name": "chartbit_layouts",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "chartbit_open",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "resolution",
+      "chart_type",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_save",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "layout_id",
+      "chart_id",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_screenshot",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_shapes",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "kind",
+      "ours_only",
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_study",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "symbol",
+      "study"
+    ],
+    "optional": [
+      "headless"
+    ]
+  },
+  {
+    "name": "chartbit_templates",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "classification",
+    "family": "company",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "scope"
+    ]
+  },
+  {
+    "name": "company_contact",
+    "family": "company",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "company_overview",
+    "family": "company",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "company_profile",
+    "family": "company",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "include_typed_info",
+      "include_fin_items",
+      "emitten_type"
+    ]
+  },
+  {
+    "name": "company_subsidiaries",
+    "family": "company",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "corporate_action_status",
+    "family": "corpaction",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbols"
+    ],
+    "optional": []
+  },
+  {
+    "name": "corporate_actions",
+    "family": "corpaction",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "action_type"
+    ],
+    "optional": [
+      "symbol",
+      "limit"
+    ]
+  },
+  {
+    "name": "dividend_calendar",
+    "family": "corpaction",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "limit"
+    ]
+  },
+  {
+    "name": "earnings",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "filter",
+      "search",
+      "quarter",
+      "year",
+      "sort_column",
+      "order",
+      "page"
+    ]
+  },
+  {
+    "name": "eipo_detail",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "emiten_code"
+    ],
+    "optional": []
+  },
+  {
+    "name": "eipo_list",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "eipo_my_order",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "emiten_code"
+    ],
+    "optional": []
+  },
+  {
+    "name": "eipo_order",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [
+      "ticket_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "eipo_order_preview",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "emiten_code",
+      "lots",
+      "price"
+    ],
+    "optional": []
+  },
+  {
+    "name": "eipo_price_groups",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "eipo_rdn_balance",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "eipo_status",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "emiten_code"
+    ],
+    "optional": []
+  },
+  {
+    "name": "eipo_unboxing",
+    "family": "eipo",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "emiten_code"
+    ],
+    "optional": []
+  },
+  {
+    "name": "entitlements",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "features",
+      "company"
+    ]
+  },
+  {
+    "name": "financials",
+    "family": "fundamentals",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "data_type",
+      "report_type",
+      "statement_type"
+    ]
+  },
+  {
+    "name": "fundachart",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "index_members",
+    "family": "company",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "index_code",
+      "limit"
+    ],
+    "optional": []
+  },
+  {
+    "name": "insider_ownership",
+    "family": "insider",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "insider"
+    ],
+    "optional": [
+      "symbol",
+      "page",
+      "source_type"
+    ]
+  },
+  {
+    "name": "insider_transactions",
+    "family": "insider",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "insider",
+      "date_start",
+      "date_end",
+      "page",
+      "limit",
+      "action_type",
+      "source_type"
+    ]
+  },
+  {
+    "name": "intraday_prices",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "interval"
+    ]
+  },
+  {
+    "name": "ipo_pipeline",
+    "family": "corpaction",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "limit"
+    ]
+  },
+  {
+    "name": "keystats",
+    "family": "fundamentals",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "login",
+    "family": "system",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "confirm"
+    ],
+    "optional": [
+      "force",
+      "fresh_profile",
+      "reap_orphans",
+      "switch_account"
+    ]
+  },
+  {
+    "name": "logout",
+    "family": "system",
+    "evidence": "observed",
+    "kind": "write",
+    "required": [
+      "confirm"
+    ],
+    "optional": [
+      "scope",
+      "remove_browser_profile"
+    ]
+  },
+  {
+    "name": "market_movers",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "view",
+      "limit"
+    ]
+  },
+  {
+    "name": "market_session",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "news",
+    "family": "stream",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "keyword",
+      "from_date",
+      "to_date",
+      "limit",
+      "last_stream_id"
+    ]
+  },
+  {
+    "name": "order_amend",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [
+      "ticket_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "order_buy",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [
+      "ticket_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "order_cancel",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [
+      "ticket_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "order_detail",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "order_id"
+    ],
+    "optional": []
+  },
+  {
+    "name": "order_history",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "kind",
+      "symbol",
+      "period",
+      "page",
+      "limit"
+    ]
+  },
+  {
+    "name": "order_preview",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "action"
+    ],
+    "optional": [
+      "symbol",
+      "price",
+      "lots",
+      "order_id"
+    ]
+  },
+  {
+    "name": "order_queue",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "sort_by",
+      "limit"
+    ]
+  },
+  {
+    "name": "order_sell",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [
+      "ticket_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "orderbook",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "orders",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol"
+    ]
+  },
+  {
+    "name": "ownership_composition",
+    "family": "insider",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "period_start",
+      "period_end"
+    ]
+  },
+  {
+    "name": "patterns",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "from",
+      "to",
+      "only",
+      "min_confidence",
+      "ignore_context",
+      "since"
+    ]
+  },
+  {
+    "name": "peer_comparison",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "include_raw",
+      "include_catalogues"
+    ]
+  },
+  {
+    "name": "pine_script",
+    "family": "pine",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "kind",
+      "title",
+      "overlays",
+      "panels",
+      "include_levels",
+      "bars",
+      "from",
+      "to",
+      "signals",
+      "alerts",
+      "strategy_long_when",
+      "strategy_exit_when",
+      "stop_loss_pct",
+      "take_profit_pct",
+      "save_dir"
+    ]
+  },
+  {
+    "name": "portfolio",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "position",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "position_size",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "entry_price",
+      "stop_price"
+    ],
+    "optional": [
+      "risk_idr",
+      "account_idr",
+      "risk_pct",
+      "fee_buy_pct",
+      "fee_sell_pct",
+      "ara",
+      "arb",
+      "max_lots"
+    ]
+  },
+  {
+    "name": "price_bands",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "price_chart",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "from",
+      "to",
+      "overlays",
+      "panels",
+      "show_levels",
+      "show_volume",
+      "annotations",
+      "theme",
+      "save_path",
+      "open_in_stockbit",
+      "browser"
+    ]
+  },
+  {
+    "name": "price_market",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "date",
+      "boards"
+    ]
+  },
+  {
+    "name": "price_performance",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "prices_batch",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbols"
+    ],
+    "optional": []
+  },
+  {
+    "name": "quote",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "ratios",
+    "family": "fundamentals",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "research",
+    "family": "stream",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol"
+    ]
+  },
+  {
+    "name": "running_trade",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "action",
+      "limit",
+      "order_by",
+      "grouped"
+    ]
+  },
+  {
+    "name": "scan",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "left",
+      "op",
+      "right"
+    ],
+    "optional": [
+      "symbols",
+      "universe",
+      "watchlist_id",
+      "overlays",
+      "panels",
+      "report",
+      "max_symbols",
+      "max_seconds"
+    ]
+  },
+  {
+    "name": "screener",
+    "family": "account",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "template_id",
+      "type",
+      "limit",
+      "catalogue",
+      "presets",
+      "universe"
+    ]
+  },
+  {
+    "name": "screener_delete",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "template_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "screener_favorite",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "template_id",
+      "favorite"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "screener_favorites",
+    "family": "screener",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "screener_finitems",
+    "family": "screener",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "screener_run",
+    "family": "screener",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "rules"
+    ],
+    "optional": [
+      "watchlist_id",
+      "limit"
+    ]
+  },
+  {
+    "name": "screener_save",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "name",
+      "rules"
+    ],
+    "optional": [
+      "watchlist_id",
+      "confirm"
+    ]
+  },
+  {
+    "name": "seasonality",
+    "family": "fundamentals",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "year",
+      "back_year"
+    ]
+  },
+  {
+    "name": "sector_companies",
+    "family": "company",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "sector_id"
+    ],
+    "optional": []
+  },
+  {
+    "name": "sectors",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "sentiment_stream",
+    "family": "fundamentals",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "limit"
+    ]
+  },
+  {
+    "name": "shareholders",
+    "family": "company",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "value_year",
+      "shareholder_type"
+    ]
+  },
+  {
+    "name": "shareholding",
+    "family": "insider",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "mode"
+    ],
+    "optional": [
+      "symbol",
+      "insider_id",
+      "root_id",
+      "root_type",
+      "max_depth",
+      "max_edge_per_node",
+      "report_date"
+    ]
+  },
+  {
+    "name": "status",
+    "family": "system",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "live"
+    ]
+  },
+  {
+    "name": "stock_conversion",
+    "family": "corpaction",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "page",
+      "limit"
+    ]
+  },
+  {
+    "name": "stock_tradable",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbols"
+    ],
+    "optional": []
+  },
+  {
+    "name": "stockbit_web",
+    "family": "chartbit",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "view",
+      "check_only",
+      "force",
+      "browser"
+    ]
+  },
+  {
+    "name": "strategy_compare",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "from",
+      "to",
+      "strategies",
+      "stop_loss_pct",
+      "take_profit_pct",
+      "initial_capital"
+    ]
+  },
+  {
+    "name": "stream",
+    "family": "stream",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "category",
+      "report_type",
+      "keyword",
+      "from_date",
+      "to_date",
+      "limit",
+      "last_stream_id",
+      "last_reply",
+      "watchlist_ids"
+    ]
+  },
+  {
+    "name": "stream_pinned",
+    "family": "stream",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": []
+  },
+  {
+    "name": "stream_post_detail",
+    "family": "stream",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "post_id"
+    ],
+    "optional": []
+  },
+  {
+    "name": "stream_trending",
+    "family": "stream",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "date",
+      "limit",
+      "last_stream_id"
+    ]
+  },
+  {
+    "name": "stream_user",
+    "family": "stream",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "username"
+    ],
+    "optional": [
+      "limit",
+      "last_stream_id"
+    ]
+  },
+  {
+    "name": "symbol_search",
+    "family": "company",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "keyword"
+    ],
+    "optional": [
+      "variant",
+      "page",
+      "type",
+      "insider_category"
+    ]
+  },
+  {
+    "name": "technicals",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars",
+      "from",
+      "to"
+    ]
+  },
+  {
+    "name": "timeframe_alignment",
+    "family": "analysis",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "symbol"
+    ],
+    "optional": [
+      "bars"
+    ]
+  },
+  {
+    "name": "top_movers",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "type"
+    ],
+    "optional": [
+      "limit"
+    ]
+  },
+  {
+    "name": "top_stocks",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "limit"
+    ]
+  },
+  {
+    "name": "trade_book",
+    "family": "market",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "symbol",
+      "mode",
+      "data_modes",
+      "group_by",
+      "limit",
+      "chart"
+    ]
+  },
+  {
+    "name": "trade_performance",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "series"
+    ]
+  },
+  {
+    "name": "trading_forget",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "write",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "trading_info",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "trading_status",
+    "family": "trading",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "trending",
+    "family": "market",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "underwriters",
+    "family": "corpaction",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "underwriter_code",
+      "sort_by"
+    ]
+  },
+  {
+    "name": "watchlist",
+    "family": "account",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": [
+      "id",
+      "limit"
+    ]
+  },
+  {
+    "name": "watchlist_add",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "watchlist_id",
+      "symbol"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "watchlist_create",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "name"
+    ],
+    "optional": [
+      "description",
+      "confirm"
+    ]
+  },
+  {
+    "name": "watchlist_delete",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "watchlist_id"
+    ],
+    "optional": [
+      "confirm",
+      "confirm_delete_members"
+    ]
+  },
+  {
+    "name": "watchlist_favorite",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "watchlist_id"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "watchlist_remove",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "watchlist_id",
+      "symbol"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "watchlist_rename",
+    "family": "account",
+    "evidence": "read-back",
+    "kind": "write",
+    "required": [
+      "watchlist_id",
+      "name"
+    ],
+    "optional": [
+      "confirm"
+    ]
+  },
+  {
+    "name": "watchlist_search",
+    "family": "screener",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "keyword"
+    ],
+    "optional": []
+  },
+  {
+    "name": "watchlist_symbols",
+    "family": "screener",
+    "evidence": "projected",
+    "kind": "read",
+    "required": [
+      "watchlist_id"
+    ],
+    "optional": []
+  },
+  {
+    "name": "workflow_list",
+    "family": "workflows",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [],
+    "optional": []
+  },
+  {
+    "name": "workflow_run",
+    "family": "workflows",
+    "evidence": "observed",
+    "kind": "read",
+    "required": [
+      "name"
+    ],
+    "optional": [
+      "input"
+    ]
+  }
+]
