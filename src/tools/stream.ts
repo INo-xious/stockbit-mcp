@@ -23,14 +23,66 @@ const EMPTY_NOTE =
   "An empty `items` with a non-null `source` is a genuine zero — a quiet symbol or a narrow " +
   "keyword — and not a reason to retry.";
 
-/** Repeated because the row shape is projected, not measured. */
+/**
+ * Repeated because the row shape is projected, not measured.
+ *
+ * It used to end "; every row carries its wire object as `raw`", which was true of both tools that
+ * use it. `include_raw` made it false for the page tools and left it true for `stream_post_detail`,
+ * so the clause moved out to `RAW_NOTE` rather than being reworded into something vague enough to
+ * cover both. The `PENDING VERIFICATION` prefix is load-bearing: `NEVER_OBSERVED` in `_define.ts`
+ * cross-checks it against the declared evidence at registration.
+ */
 const PENDING_NOTE =
   "PENDING VERIFICATION: only the per-symbol stream has been observed live, so id/content/" +
-  "created_at/author are projected and may be absent; every row carries its wire object as `raw`.";
+  "created_at/author are projected and may be absent.";
+
+/**
+ * Repeated on every tool that returns a PAGE of rows, because the default changed.
+ *
+ * A page of thirty posts used to carry each one twice — the four projected fields, and then the
+ * whole wire object with its sixty-odd keys — which is most of a client's result window spent on
+ * fields nothing here reads. The wire object is still one argument away; the point is that asking
+ * for it is now a decision.
+ */
+const RAW_NOTE =
+  "Rows carry only the projected fields. Set include_raw=true to get each row's whole wire object " +
+  "as `raw` — every engagement counter, attachment, link and image this projection does not name " +
+  "lives there, and a page of them is large.";
 
 const NOT_DATA_NOTE =
   "This is community- and media-written Indonesian text, not market data. Use it for sentiment and " +
   "as a pointer to a source; never quote a price, a ratio or an earnings figure from a post.";
+
+/** A page whose rows are the projection alone. `StreamPost` IS `StreamItem` without `raw`. */
+type LeanStreamPage = Omit<stream.StreamPage, "items"> & { items: stream.StreamPost[] };
+
+/** The `include_raw` argument, identical on all five page tools. */
+const includeRaw = z
+  .boolean()
+  .optional()
+  .describe("Keep each row's whole wire object under `raw`. Default false — a page of them is large.");
+
+/**
+ * Drop `raw` from every row unless the caller asked for it.
+ *
+ * ## Why the TOOL and not the core reader
+ *
+ * `src/core/stream.ts` keeps building `raw` for every row, deliberately. It is the only honest
+ * record of what arrived on a family where five of six routes have never been observed live, and
+ * `stream_post_detail` returns it unconditionally. What changed is what a PAGE of rows costs a
+ * model by default — a tool-layer concern — so the projection stays whole and the tool decides.
+ *
+ * A copy, never a delete: `getSentimentStream` already strips this way at `src/core/stream.ts`, and
+ * these pages are not cached today but the readers around them are.
+ *
+ * `unrecognized` is untouched on purpose. It only appears when `source` is null, and it is the
+ * single thing that distinguishes "the stream is empty" from "we could not read the response" —
+ * `src/instructions.ts` tells the model to read exactly that difference.
+ */
+function withoutRaw(page: stream.StreamPage, wanted: unknown): stream.StreamPage | LeanStreamPage {
+  if (wanted === true) return page;
+  return { ...page, items: page.items.map(({ raw: _raw, ...post }) => post) };
+}
 
 export function registerStreamTools(define: Definer): void {
   define.read(
@@ -53,7 +105,9 @@ export function registerStreamTools(define: Definer): void {
       "stand alone; an inverted pair is rejected.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE,
+      EMPTY_NOTE +
+      "\n" +
+      RAW_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for the market-wide stream."),
       category: z.enum(stream.STREAM_CATEGORIES).optional().describe("Wire spelling, case-sensitive. Omitted = Stockbit's default feed."),
@@ -65,6 +119,7 @@ export function registerStreamTools(define: Definer): void {
       last_stream_id: z.string().optional().describe("Cursor: the `nextCursor` from the previous page."),
       last_reply: z.string().optional().describe("Second cursor Stockbit's client sends beside last_stream_id; its role is unverified, so leave it unset."),
       watchlist_ids: z.array(z.string()).optional().describe("Numeric watchlist ids, for the *_WATCHLIST categories."),
+      include_raw: includeRaw,
     },
     async (a) => {
       const query: stream.StreamQuery = {
@@ -79,8 +134,13 @@ export function registerStreamTools(define: Definer): void {
         watchlistIds: a.watchlist_ids as string[] | undefined,
       };
       const symbol = a.symbol as string | undefined;
-      return runTool(() =>
-        symbol === undefined || symbol === "" ? stream.getStream(query) : stream.getSymbolStream(symbol, query),
+      return runTool(async () =>
+        withoutRaw(
+          symbol === undefined || symbol === ""
+            ? await stream.getStream(query)
+            : await stream.getSymbolStream(symbol, query),
+          a.include_raw,
+        ),
       );
     },
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
@@ -98,11 +158,13 @@ export function registerStreamTools(define: Definer): void {
       NOT_DATA_NOTE +
       "\n" +
       "Headlines are Indonesian-language and mostly link out to the publisher; the link, image and " +
-      "publisher fields are not named by this projection, so read `raw` for them.\n" +
+      "publisher fields are not named by this projection; set include_raw=true and read `raw` for them.\n" +
       "from_date/to_date are YYYY-MM-DD and calendar-checked.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE,
+      EMPTY_NOTE +
+      "\n" +
+      RAW_NOTE,
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI. Omit for market-wide news."),
       keyword: z.string().optional().describe("Full-text search over headlines and body."),
@@ -110,17 +172,21 @@ export function registerStreamTools(define: Definer): void {
       to_date: z.string().optional().describe("YYYY-MM-DD, inclusive"),
       limit: z.coerce.number().optional().describe("Max rows. Omitted = Stockbit's own page size."),
       last_stream_id: z.string().optional().describe("Cursor: the `nextCursor` from the previous page."),
+      include_raw: includeRaw,
     },
     async (a) =>
-      runTool(() =>
-        stream.getNews({
-          symbol: a.symbol as string | undefined,
-          keyword: a.keyword as string | undefined,
-          fromDate: a.from_date as string | undefined,
-          toDate: a.to_date as string | undefined,
-          limit: a.limit as number | undefined,
-          lastStreamId: a.last_stream_id as string | undefined,
-        }),
+      runTool(async () =>
+        withoutRaw(
+          await stream.getNews({
+            symbol: a.symbol as string | undefined,
+            keyword: a.keyword as string | undefined,
+            fromDate: a.from_date as string | undefined,
+            toDate: a.to_date as string | undefined,
+            limit: a.limit as number | undefined,
+            lastStreamId: a.last_stream_id as string | undefined,
+          }),
+          a.include_raw,
+        ),
       ),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
     // field this tool names was read out of that response. Opts out of the family default.
@@ -139,19 +205,25 @@ export function registerStreamTools(define: Definer): void {
       "for a date with no session (a weekend, a holiday) is answered with an empty list, not an error.\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE,
+      EMPTY_NOTE +
+      "\n" +
+      RAW_NOTE,
     {
       date: z.string().optional().describe("YYYY-MM-DD. Omit for Stockbit's current day."),
       limit: z.coerce.number().optional().describe("Max rows."),
       last_stream_id: z.string().optional().describe("Cursor: the `nextCursor` from the previous page."),
+      include_raw: includeRaw,
     },
     async (a) =>
-      runTool(() =>
-        stream.getTrendingStream({
-          date: a.date as string | undefined,
-          limit: a.limit as number | undefined,
-          lastStreamId: a.last_stream_id as string | undefined,
-        }),
+      runTool(async () =>
+        withoutRaw(
+          await stream.getTrendingStream({
+            date: a.date as string | undefined,
+            limit: a.limit as number | undefined,
+            lastStreamId: a.last_stream_id as string | undefined,
+          }),
+          a.include_raw,
+        ),
       ),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
     // field this tool names was read out of that response. Opts out of the family default.
@@ -189,11 +261,14 @@ export function registerStreamTools(define: Definer): void {
       "\n" +
       EMPTY_NOTE +
       "\n" +
+      RAW_NOTE +
+      "\n" +
       PENDING_NOTE,
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
+      include_raw: includeRaw,
     },
-    async (a) => runTool(() => stream.getPinnedPosts(a.symbol as string)),
+    async (a) => runTool(async () => withoutRaw(await stream.getPinnedPosts(a.symbol as string), a.include_raw)),
   );
 
   define.read(
@@ -209,18 +284,24 @@ export function registerStreamTools(define: Definer): void {
       "\n" +
       CURSOR_NOTE +
       "\n" +
-      EMPTY_NOTE,
+      EMPTY_NOTE +
+      "\n" +
+      RAW_NOTE,
     {
       username: z.string().describe("Stockbit handle, e.g. some_user"),
       limit: z.coerce.number().optional().describe("Max rows."),
       last_stream_id: z.string().optional().describe("Cursor: the `nextCursor` from the previous page."),
+      include_raw: includeRaw,
     },
     async (a) =>
-      runTool(() =>
-        stream.getUserStream(a.username as string, {
-          limit: a.limit as number | undefined,
-          lastStreamId: a.last_stream_id as string | undefined,
-        }),
+      runTool(async () =>
+        withoutRaw(
+          await stream.getUserStream(a.username as string, {
+            limit: a.limit as number | undefined,
+            lastStreamId: a.last_stream_id as string | undefined,
+          }),
+          a.include_raw,
+        ),
       ),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
     // field this tool names was read out of that response. Opts out of the family default.

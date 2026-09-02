@@ -280,6 +280,7 @@
       "timeframe"
     ],
     "optional": [
+      "max_bars",
       "raw"
     ]
   },
@@ -841,7 +842,8 @@
       "from_date",
       "to_date",
       "limit",
-      "last_stream_id"
+      "last_stream_id",
+      "include_raw"
     ]
   },
   {
@@ -1441,7 +1443,8 @@
       "limit",
       "last_stream_id",
       "last_reply",
-      "watchlist_ids"
+      "watchlist_ids",
+      "include_raw"
     ]
   },
   {
@@ -1452,7 +1455,9 @@
     "required": [
       "symbol"
     ],
-    "optional": []
+    "optional": [
+      "include_raw"
+    ]
   },
   {
     "name": "stream_post_detail",
@@ -1473,7 +1478,8 @@
     "optional": [
       "date",
       "limit",
-      "last_stream_id"
+      "last_stream_id",
+      "include_raw"
     ]
   },
   {
@@ -1486,7 +1492,8 @@
     ],
     "optional": [
       "limit",
-      "last_stream_id"
+      "last_stream_id",
+      "include_raw"
     ]
   },
   {

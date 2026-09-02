@@ -1383,6 +1383,17 @@ export function registerTools(
 
         return {
           ...result,
+          // Not `warnings`. That list is sample-size and data-quality caveats about THIS run, and
+          // the description tells a model to read it before quoting any number — putting a
+          // housekeeping sentence in it would dilute a signal that is meant to stop a claim.
+          notes: [
+            a.include_trades === false
+              ? "The trade log was dropped (include_trades=false). Every metric here was still " +
+                "computed from all of the trades — nothing was excluded from the arithmetic, only " +
+                "from what you are reading."
+              : "The full trade log is included, and on a long backtest it is by far the largest " +
+                "part of this result. include_trades=false drops it while every metric stays.",
+          ],
           trades: a.include_trades === false ? undefined : result.trades,
           equity: a.include_equity === true ? result.equity : undefined,
           barsTruncated: series.truncated,

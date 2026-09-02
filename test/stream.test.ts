@@ -33,6 +33,9 @@ import {
   getUserStream,
 } from "../src/core/stream.ts";
 import { getResearchCategories, getResearchIndicator } from "../src/core/research.ts";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { makeDefiner, type ToolHandler } from "../src/tools/_define.ts";
+import { registerStreamTools } from "../src/tools/stream.ts";
 
 function farFutureJwt(): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -524,4 +527,119 @@ test("the user route's own spellings map, not just its content", async () => {
   assert.equal(item.createdAt, "2026-08-28 19:53:36");
   assert.equal(item.author, "Stockbit");
   assert.ok(item.content?.startsWith("EMAS"));
+});
+
+/* ------------------------------ the tool layer: include_raw ------------------------------ */
+
+/**
+ * The five page tools, reached the way `workflow_run` reaches them.
+ *
+ * Registered against the same `define.family("stream", { evidence: "projected" })` the real server
+ * uses, so a tool that opted out of that default is exercised with the options it really ships with.
+ * Everything above this line calls the core readers directly; `raw` is stripped in the TOOL, so a
+ * core-level test cannot see this change at all.
+ */
+function streamHandlers(): Map<string, ToolHandler> {
+  const handlers = new Map<string, ToolHandler>();
+  const server = { registerTool: () => ({ enable() {}, disable() {}, remove() {} }) } as unknown as McpServer;
+  registerStreamTools(makeDefiner(server, handlers).family("stream", { evidence: "projected" }));
+  return handlers;
+}
+
+/** Unwrap the JSON text block a tool result carries, the way `invokeTool` does. */
+async function call(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const handler = streamHandlers().get(name);
+  assert.ok(handler, `${name} is not registered as a read`);
+  const result = (await handler(args)) as { content: { type: string; text: string }[]; isError?: boolean };
+  const parsed = JSON.parse(result.content[0].text) as { success: boolean; data: Record<string, unknown> };
+  assert.equal(parsed.success, true, `${name} failed: ${result.content[0].text.slice(0, 200)}`);
+  return parsed.data;
+}
+
+const PAGE_TOOLS: [string, Record<string, unknown>][] = [
+  ["stream", { symbol: "BBRI" }],
+  ["news", { symbol: "BBRI" }],
+  ["stream_trending", {}],
+  ["stream_pinned", { symbol: "BBRI" }],
+  ["stream_user", { username: "budi.trader" }],
+];
+
+for (const [name, args] of PAGE_TOOLS) {
+  test(`${name} omits raw by default and returns it when asked`, async () => {
+    const lean = await call(name, args);
+    const items = lean.items as Record<string, unknown>[];
+    assert.ok(items.length > 0, "the fixture must actually return rows or this proves nothing");
+    for (const item of items) {
+      assert.ok(!("raw" in item), `${name} returned a row still carrying raw`);
+    }
+
+    const full = await call(name, { ...args, include_raw: true });
+    const fullItems = full.items as Record<string, unknown>[];
+    assert.equal(fullItems.length, items.length);
+    for (const item of fullItems) {
+      assert.ok("raw" in item, `${name} with include_raw=true must return the wire object`);
+    }
+  });
+}
+
+test("stripping raw leaves every projected field and the cursor untouched", async () => {
+  const lean = await call("stream", { symbol: "BBRI" });
+  const full = await call("stream", { symbol: "BBRI", include_raw: true });
+
+  assert.equal(lean.source, full.source);
+  assert.equal(lean.nextCursor, full.nextCursor, "nextCursor is taken from `id`, which is never stripped");
+  assert.notEqual(lean.nextCursor, null, "the premise: this fixture does produce a cursor");
+
+  const strip = (rows: Record<string, unknown>[]) => rows.map(({ raw: _raw, ...rest }) => rest);
+  assert.deepEqual(lean.items, strip(full.items as Record<string, unknown>[]), "raw is the ONLY difference");
+});
+
+test("a field the row did not carry stays ABSENT after the strip, never filled in", async () => {
+  // A strip written as a rebuild — `{ id: item.id, content: item.content, ... }` — would turn every
+  // unmapped field into an `undefined` key, which reads as "this post has no author" rather than
+  // "this route spells it something we have not mapped". The rest-destructure cannot do that.
+  bodies.set(P.bbri, { data: { stream: [{ stream_id: 9, content: "cuma isi" }] } });
+  const lean = await call("stream", { symbol: "BBRI" });
+  const row = (lean.items as Record<string, unknown>[])[0];
+  assert.deepEqual(Object.keys(row).sort(), ["content", "id"], "only what the wire actually carried");
+  assert.ok(!("author" in row), "absent is absent, not undefined");
+  assert.ok(!("createdAt" in row));
+});
+
+test("a row too broken to project survives the strip as an empty row, not as a dropped one", async () => {
+  // `projectItem` answers a non-object row with `{ raw: row }` and nothing else, because raw is the
+  // only honest thing to say about it. Stripping that leaves `{}` — thin, but it keeps the ROW, so
+  // `items.length` still says how many rows the page held. Losing it would under-report the page.
+  bodies.set(P.bbri, { data: { stream: ["not an object", { stream_id: 4 }] } });
+  const lean = await call("stream", { symbol: "BBRI" });
+  const rows = lean.items as Record<string, unknown>[];
+  assert.equal(rows.length, 2, "the unreadable row is still counted");
+  assert.deepEqual(rows[0], {});
+  assert.deepEqual(rows[1], { id: "4" });
+
+  const full = await call("stream", { symbol: "BBRI", include_raw: true });
+  assert.equal((full.items as Record<string, unknown>[])[0].raw, "not an object", "include_raw still shows it");
+});
+
+test("include_raw is only honoured for a literal true", async () => {
+  // `workflow_run` hands recipe inputs to handlers without the zod schema, so a recipe can deliver
+  // the STRING "false". `=== true` is what makes that harmless; `Boolean(x)` would not be.
+  for (const value of ["false", "true", 1, 0, null, undefined]) {
+    const data = await call("stream", { symbol: "BBRI", include_raw: value });
+    const items = data.items as Record<string, unknown>[];
+    assert.ok(!("raw" in items[0]), `include_raw=${JSON.stringify(value)} must not be read as yes`);
+  }
+});
+
+test("stream_post_detail still returns raw, and has no include_raw to turn it off", async () => {
+  // It returns ONE object, not a page, and `raw` is the whole `data` block. The shared PENDING_NOTE
+  // used to promise raw for both; splitting it is why this assertion exists.
+  const handlers = streamHandlers();
+  const result = (await handlers.get("stream_post_detail")!({ post_id: "15731234" })) as {
+    content: { text: string }[];
+  };
+  const parsed = JSON.parse(result.content[0].text) as { success: boolean; data: Record<string, unknown> };
+  assert.equal(parsed.success, true);
+  assert.ok("raw" in parsed.data, "the detail tool's raw is unconditional");
+  assert.ok("raw" in (parsed.data.post as Record<string, unknown>), "and so is its post's");
 });

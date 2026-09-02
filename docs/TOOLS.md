@@ -62,7 +62,7 @@ Prices, depth, movers, bars, the session clock.
 | `price_performance` | read | Multi-timeframe price performance (1D/1W/1M/…): close, high, low, and % change per timeframe. | Observed | symbol* |
 | `orderbook` | read | Full order-book depth ladder for a symbol. | Observed | symbol* |
 | `price_bands` | read | The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock. | Observed | symbol* |
-| `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, raw |
+| `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, max_bars, raw |
 | `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, order_by, grouped |
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
 | `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
@@ -166,12 +166,12 @@ Posts, news and research from Stockbit's own feed.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Observed | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids |
-| `news` | read | News posts, market-wide or for one symbol. | Observed | symbol, keyword, from_date, to_date, limit, last_stream_id |
-| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Observed | date, limit, last_stream_id |
+| `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Observed | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids, include_raw |
+| `news` | read | News posts, market-wide or for one symbol. | Observed | symbol, keyword, from_date, to_date, limit, last_stream_id, include_raw |
+| `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Observed | date, limit, last_stream_id, include_raw |
 | `stream_post_detail` | read | Read ONE post by id, with the whole payload the detail endpoint returns. | Projected | post_id* |
-| `stream_pinned` | read | The posts pinned to a symbol's page — what Stockbit or the company has chosen to keep at the top. | Projected | symbol* |
-| `stream_user` | read | One Stockbit user's posts, by username. | Observed | username*, limit, last_stream_id |
+| `stream_pinned` | read | The posts pinned to a symbol's page — what Stockbit or the company has chosen to keep at the top. | Projected | symbol*, include_raw |
+| `stream_user` | read | One Stockbit user's posts, by username. | Observed | username*, limit, last_stream_id, include_raw |
 | `research` | read | Stockbit's research metadata. | Projected | symbol |
 
 ## screener

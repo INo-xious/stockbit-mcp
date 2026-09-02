@@ -23,6 +23,7 @@ import {
   getPricesBatch,
   getRunningTrade,
   getRunningTradeChart,
+  capSeries,
   getSeriesBars,
   getTopStocks,
   getTradeBook,
@@ -907,4 +908,96 @@ test("the daily chart carries its close in `value`, and empty OHL is reported as
     series.warnings.some((w) => /open\/high\/low/.test(w)),
     "a flat series must say so even when the keys were present and empty",
   );
+});
+
+/* ------------------------------ chart_series max_bars ------------------------------ */
+
+/** A payload of `count` daily points, newest first, exactly as the daily route orders them. */
+function chartPoints(count: number): unknown {
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    // 2020-01-01 plus i days, walked backwards so the newest is first — the order the wire uses and
+    // the one `projectSeries` has to sort out of.
+    const day = new Date(Date.UTC(2020, 0, 1) + (count - 1 - i) * 86_400_000).toISOString().slice(0, 10);
+    rows.push({ date: day, open: "1000", high: "1100", low: "900", close: "1050", volume: "10" });
+  }
+  return { data: { chart: rows } };
+}
+
+test("barsTotal is the whole series and bars is what was returned", async () => {
+  responder = () => chartPoints(120);
+  const series = await getSeriesBars("BBRI", "1y");
+  assert.equal(series.bars.length, 120);
+  assert.equal(series.barsTotal, 120, "untrimmed, the two agree");
+
+  const capped = capSeries(series, 30);
+  assert.equal(capped.bars.length, 30);
+  assert.equal(capped.barsTotal, 120, "barsTotal must survive the trim — it is the only record of the real size");
+});
+
+test("capSeries keeps the LATEST bars, oldest first", async () => {
+  responder = () => chartPoints(10);
+  const series = await getSeriesBars("BBRI", "1y");
+  const dates = series.bars.map((b) => b.date);
+
+  const capped = capSeries(series, 3);
+  assert.deepEqual(capped.bars.map((b) => b.date), dates.slice(-3));
+  assert.deepEqual(
+    capped.bars.map((b) => b.date),
+    [...capped.bars.map((b) => b.date)].sort(),
+    "still ascending: every consumer of Bar reads forward",
+  );
+});
+
+test("from and to describe the bars RETURNED, and warnings names the window that was fetched", async () => {
+  responder = () => chartPoints(10);
+  const series = await getSeriesBars("BBRI", "1y");
+  const realFrom = series.from;
+
+  const capped = capSeries(series, 3);
+  assert.equal(capped.from, capped.bars[0].date);
+  assert.equal(capped.to, capped.bars[2].date);
+  assert.notEqual(capped.from, realFrom, "the premise: the trim really did move `from`");
+
+  const note = capped.warnings.find((w) => /max_bars/.test(w));
+  assert.ok(note, "a trim that says nothing is a silently narrowed answer");
+  assert.match(note, /LATEST 3 of 10/);
+  assert.ok(note.includes(realFrom as string), "the warning must carry the date the response really began");
+});
+
+test("capSeries does not mutate the cached series — two callers, two different caps", async () => {
+  // The trap this test exists for: `cached()` hands every caller the SAME object. A trim written as
+  // `series.bars = series.bars.slice(-n)` would rewrite the cached value for the next sixty
+  // seconds, so the second caller's `max_bars=100` would silently get the first caller's 5.
+  responder = () => chartPoints(50);
+  const first = await getSeriesBars("BBRI", "1y");
+  const small = capSeries(first, 5);
+  assert.equal(small.bars.length, 5);
+
+  const second = await getSeriesBars("BBRI", "1y");
+  assert.equal(requests, 1, "the premise: the second read came from the cache");
+  assert.equal(second.bars.length, 50, "the cached series must still be whole");
+  assert.equal(second.warnings.length, first.warnings.length, "and its warnings must not have grown");
+  assert.equal(capSeries(second, 40).bars.length, 40);
+});
+
+test("capSeries is a no-op when the series already fits, and returns the same object", async () => {
+  responder = () => chartPoints(10);
+  const series = await getSeriesBars("BBRI", "1y");
+  assert.equal(capSeries(series, 10), series, "equal to the length is not a trim");
+  assert.equal(capSeries(series, 999), series);
+  // Guards below 1 rather than trusting the schema: `capSeries` is exported and the zod bound lives
+  // in a different file.
+  assert.equal(capSeries(series, 0), series);
+  assert.equal(capSeries(series, Number.NaN), series);
+});
+
+test("max_bars is not part of the chart cache key", async () => {
+  // Two views of one identical upstream response ARE one request. Keying the cache on max_bars
+  // would look like a fix and would double the cost of asking the same question twice.
+  responder = () => chartPoints(20);
+  const whole = await getSeriesBars("BBRI", "1y");
+  capSeries(whole, 5);
+  capSeries(await getSeriesBars("BBRI", "1y"), 15);
+  assert.equal(requests, 1);
 });

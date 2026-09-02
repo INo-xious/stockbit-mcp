@@ -6,8 +6,24 @@
  * close, a stop checked against a future bar — breaks it, and nothing else does. One assertion
  * covering an entire class of bug is worth more than a dozen checking individual numbers.
  */
-import { test } from "node:test";
+// Isolate the token store before importing anything that reads it.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const STORE = mkdtempSync(join(tmpdir(), "stockbit-backtest-"));
+process.env.STOCKBIT_FORCE_FILE_STORE = "1";
+process.env.STOCKBIT_STORE_DIR = STORE;
+
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import type { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { getStore } from "../src/auth/store.ts";
+import { resetSession } from "../src/auth/session.ts";
+import { clearCache } from "../src/core/_util.ts";
+import { ROWS_PER_PAGE } from "../src/core/bars.ts";
+import { registerTools } from "../src/tools/register.ts";
+import { resolveToolProfile } from "../src/tools/_profile.ts";
 import {
   IDX_COSTS,
   backtest,
@@ -501,4 +517,127 @@ test("MAE and MFE record how painful a trade was to hold", () => {
   const result = backtest(bars, oneTradeSpec(), { costs: NO_COSTS });
   assert.ok(result.trades[0].maxAdversePct <= -20, `MAE was ${result.trades[0].maxAdversePct}`);
   assert.ok(result.trades[0].maxFavorablePct >= 2);
+});
+
+/* ------------------------------ the backtest TOOL, not the engine ------------------------------ */
+
+/**
+ * Everything above this line calls `backtest()` directly. These four call the registered TOOL.
+ *
+ * That gap is why they exist: the tool's own return object — `notes`, the `include_trades` switch,
+ * `barsTruncated`, `pagesFetched` — was covered by nothing at all. `docs/TOOLS.md` renders only
+ * arguments, the surface snapshot records only arguments, and every backtest test read the engine.
+ * A wrong sentence in `notes` would have shipped through a green gate.
+ */
+const REAL_FETCH = globalThis.fetch;
+type ToolEntry = { shape: z.ZodRawShape; handler: (a: Record<string, unknown>) => Promise<unknown> };
+const toolRegistry = new Map<string, ToolEntry>();
+
+/** 40 sessions that trend up then down, so a preset has something to trade. */
+const TOOL_BARS = Array.from({ length: 40 }, (_, i) => {
+  const close = 1000 + (i < 20 ? i * 20 : (40 - i) * 20);
+  return {
+    date: new Date(Date.UTC(2026, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
+    open: close,
+    high: close + 10,
+    low: close - 10,
+    close,
+    average: close,
+    volume: 5_000,
+    value: 1e9,
+    frequency: 300,
+  };
+}).reverse(); // newest first, the order the wire uses
+
+before(() => {
+  getStore().set("REFRESH");
+  resetSession();
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (u.includes("/login/refresh") || u.includes("/refresh")) {
+      const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+      return json({ data: { access_token: `${b64({ alg: "none" })}.${b64({ exp: 2000000000 })}.sig` } });
+    }
+    if (u.includes("/company-price-feed/historical/summary/")) {
+      const page = Number(new URL(u).searchParams.get("page") ?? "1");
+      const slice = TOOL_BARS.slice((page - 1) * ROWS_PER_PAGE, page * ROWS_PER_PAGE);
+      const more = TOOL_BARS.length > page * ROWS_PER_PAGE;
+      return json({ data: { result: slice, paginate: more ? { next_page: page + 1 } : {} } });
+    }
+    return json({ message: "unexpected" }, 404);
+  }) as typeof fetch;
+
+  const server = {
+    registerTool: (name: string, config: { inputSchema: z.ZodRawShape }, cb: ToolEntry["handler"]) => {
+      toolRegistry.set(name, { shape: config.inputSchema, handler: cb });
+    },
+  } as unknown as McpServer;
+  registerTools(server, { profile: resolveToolProfile("all").profile });
+});
+
+after(() => {
+  globalThis.fetch = REAL_FETCH;
+  getStore().clear();
+  resetSession();
+  clearCache();
+  rmSync(STORE, { recursive: true, force: true });
+});
+
+/** Run the registered tool and unwrap its JSON text block, the way `invokeTool` does. */
+async function runBacktestTool(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  clearCache();
+  const entry = toolRegistry.get("backtest");
+  assert.ok(entry, "backtest is not registered");
+  const result = (await entry.handler(args)) as { content: { text: string }[] };
+  const parsed = JSON.parse(result.content[0].text) as { success: boolean; data: Record<string, unknown> };
+  assert.equal(parsed.success, true, `backtest failed: ${result.content[0].text.slice(0, 300)}`);
+  return parsed.data;
+}
+
+test("the backtest tool includes the trade log by default and says so in notes", async () => {
+  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  assert.ok(Array.isArray(data.trades), "the log is present by default");
+  const notes = data.notes as string[];
+  assert.ok(Array.isArray(notes) && notes.length === 1);
+  assert.match(notes[0], /full trade log is included/);
+  assert.match(notes[0], /include_trades=false/, "a note about a switch must name the switch");
+});
+
+test("include_trades=false drops the log and the note changes to match", async () => {
+  const data = await runBacktestTool({
+    symbol: "BBRI",
+    strategy: PRESET_IDS[0],
+    bars: 40,
+    include_trades: false,
+  });
+  assert.ok(!("trades" in data), "an undefined key is absent from the JSON, not null");
+  const notes = data.notes as string[];
+  assert.match(notes[0], /dropped/, "the note must not still claim the log is included");
+  assert.doesNotMatch(notes[0], /full trade log is included/);
+});
+
+test("notes never dilutes warnings — they stay separate lists", async () => {
+  // `warnings` is sample-size and data-quality caveats about THIS run, and the tool's description
+  // tells a model to read it before quoting any number. A housekeeping sentence in there would
+  // weaken exactly the signal that is meant to stop a claim.
+  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  assert.ok(Array.isArray(data.warnings), "the engine's warnings survive the tool layer");
+  for (const w of data.warnings as string[]) {
+    assert.doesNotMatch(w, /include_trades/, "the trade-log note belongs in notes, not in warnings");
+  }
+});
+
+test("dropping the trade log does not change a single metric", async () => {
+  // The note claims the metrics are computed from all the trades either way. This is that claim.
+  const withLog = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  const without = await runBacktestTool({
+    symbol: "BBRI",
+    strategy: PRESET_IDS[0],
+    bars: 40,
+    include_trades: false,
+  });
+  assert.deepEqual(without.metrics, withLog.metrics);
+  assert.deepEqual(without.warnings, withLog.warnings);
 });

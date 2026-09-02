@@ -243,6 +243,15 @@ export interface ChartSeries {
   source: "charts";
   /** Oldest first, matching every consumer of `Bar`. */
   bars: Bar[];
+  /**
+   * How many bars the response held, before any cap.
+   *
+   * Equal to `bars.length` until `capSeries` trims the array, and the only thing that says a
+   * five-year request came back as five years. `from`/`to` cannot say it: they describe what was
+   * RETURNED, so after a trim they narrow silently.
+   */
+  barsTotal: number;
+  /** First and last date of the bars ACTUALLY RETURNED, not of the window that was fetched. */
   from?: string;
   to?: string;
   /** Where in the `data` block the point array was found. */
@@ -253,7 +262,7 @@ export interface ChartSeries {
   unmapped: PointField[];
   /** Keys on the first point that no field consumed. Candidates for `POINT_KEYS`. */
   extraKeys: string[];
-  /** Things to know before trusting the numbers. Empty when every field mapped. */
+  /** Things to know before trusting the numbers. Empty when every field mapped and nothing was cut. */
   warnings: string[];
   /** The first point exactly as it arrived. This shape has not been observed live. */
   sample: Record<string, unknown>;
@@ -395,6 +404,9 @@ function projectSeries(
     timeframe,
     source: "charts",
     bars,
+    // The true count, recorded once at projection. `capSeries` shortens `bars` and never touches
+    // this, so "how many did the response really hold" survives any later trim.
+    barsTotal: bars.length,
     from: bars[0]?.date,
     to: bars[bars.length - 1]?.date,
     dataPath: located.path,
@@ -403,6 +415,53 @@ function projectSeries(
     extraKeys: Object.keys(first).filter((k) => !consumed.has(k)),
     warnings,
     sample: first,
+  };
+}
+
+/**
+ * How many bars `chart_series` returns when the caller does not say.
+ *
+ * Five years of IDX sessions is roughly 1,200 bars, and that answer is about 274,000 characters —
+ * far past what several clients will show a model, so the model sees a payload cut off mid-array
+ * with no indication that anything was lost. 500 covers every indicator this server computes (the
+ * longest warm-up is a 200-period average) and a caller who genuinely wants the whole window can
+ * still ask for it.
+ */
+export const DEFAULT_CHART_MAX_BARS = 500;
+
+/**
+ * Keep the LATEST `maxBars` bars, oldest-first, and say what was cut.
+ *
+ * ## Why this is not inside `getSeriesBars`
+ *
+ * That function is memoised on `chartSeries:${symbol}:${timeframe}` alone — deliberately, because
+ * two different `max_bars` over the same window ARE one upstream request and must not become two.
+ * `cached()` hands every caller the same object by reference, so trimming has to happen out here
+ * and has to COPY: a `series.bars = ...` or a `series.warnings.push(...)` would rewrite the cached
+ * value for every other caller for the next sixty seconds. `src/core/screenerrun.ts` trims a cached
+ * result the same way and for the same reason.
+ *
+ * ## Why the latest
+ *
+ * A truncated price series is only useful from the recent end. Every indicator, pattern and
+ * backtest in this server reads forward from the oldest bar it was given and reports on the newest,
+ * so dropping the newest bars would answer a question about the past that nobody asked.
+ */
+export function capSeries(series: ChartSeries, maxBars: number): ChartSeries {
+  if (!Number.isFinite(maxBars) || maxBars < 1 || series.bars.length <= maxBars) return series;
+  const bars = series.bars.slice(-maxBars);
+  return {
+    ...series,
+    bars,
+    from: bars[0]?.date,
+    to: bars[bars.length - 1]?.date,
+    warnings: [
+      ...series.warnings,
+      `Only the LATEST ${bars.length} of ${series.barsTotal} bars are returned (max_bars=${maxBars}). ` +
+        `The response really began ${series.from ?? "at a date no bar carried"}; \`from\` above is the ` +
+        "first bar KEPT, not the start of the window that was fetched. Raise max_bars for more history, " +
+        "and do not read this as the symbol having no earlier data.",
+    ],
   };
 }
 

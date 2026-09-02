@@ -31,6 +31,13 @@ export function registerMarketTools(define: Definer): void {
       "This tool ERRORS instead of returning an empty series — including when the response parses " +
       "but holds no points. An empty result would be indistinguishable from a broken fast path, so " +
       "on an error fall back to the paged bars tools rather than concluding the symbol has no data.\n" +
+      `max_bars caps how many bars come back and defaults to ${core.DEFAULT_CHART_MAX_BARS}. The ` +
+      "LATEST that many are kept, still oldest-first, because every indicator here reports on the " +
+      "newest bar. `barsTotal` is how many the response actually held, so barsTotal > the length of " +
+      "`bars` means the window was longer than what you are reading — `from` is then the first bar " +
+      "KEPT, not the start of the fetched window, and `warnings` names the real start. A five-year " +
+      "window is roughly 1,200 bars and about 274,000 characters uncapped, which several clients " +
+      "will silently cut; raise max_bars deliberately rather than by default.\n" +
       "Check `unmapped` and `warnings` on the result before using the numbers. On the daily route " +
       "the close arrives as `value` and open/high/low/volume arrive EMPTY, so every candle is flat " +
       "and `warnings` says so: candlestick patterns and high/low indicators are meaningless on this " +
@@ -52,16 +59,29 @@ export function registerMarketTools(define: Definer): void {
       timeframe: z
         .enum(core.CHART_TIMEFRAMES)
         .describe("Calendar window, lowercase: 1w, 1m, 3m, ytd, 1y, 3y, 5y. Bars are daily regardless."),
+      max_bars: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          `Keep only the latest N bars (default ${core.DEFAULT_CHART_MAX_BARS}). \`barsTotal\` reports how many the response held.`,
+        ),
       raw: z
         .boolean()
         .optional()
         .describe("Return the unprojected chart payload instead of bars. Default false."),
     },
     async (a) =>
-      runTool(() =>
+      runTool(async () =>
         a.raw === true
           ? core.getChartRaw(a.symbol as string, a.timeframe as string)
-          : core.getSeriesBars(a.symbol as string, a.timeframe as string),
+          : // Capped HERE and not in the core reader: that one is memoised per symbol+timeframe, and
+            // `cached` hands back a shared reference. `capSeries` copies.
+            core.capSeries(
+              await core.getSeriesBars(a.symbol as string, a.timeframe as string),
+              (a.max_bars as number | undefined) ?? core.DEFAULT_CHART_MAX_BARS,
+            ),
       ),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every
     // field this tool names was read out of that response. Opts out of the family default.
