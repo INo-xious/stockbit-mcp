@@ -533,9 +533,20 @@ const REAL_FETCH = globalThis.fetch;
 type ToolEntry = { shape: z.ZodRawShape; handler: (a: Record<string, unknown>) => Promise<unknown> };
 const toolRegistry = new Map<string, ToolEntry>();
 
-/** 40 sessions that trend up then down, so a preset has something to trade. */
-const TOOL_BARS = Array.from({ length: 40 }, (_, i) => {
-  const close = 1000 + (i < 20 ? i * 20 : (40 - i) * 20);
+/**
+ * 260 sessions that oscillate, so `sma_cross` actually crosses.
+ *
+ * The first version of this fixture was 40 bars of one up-then-down move. `PRESET_IDS[0]` is
+ * `sma_cross`, whose 50-period average needs 50 bars of warm-up, so the strategy could never fire
+ * and every test below ran against a backtest the engine itself calls vacuous ("No bar in this
+ * window could satisfy the strategy's conditions"). All four still passed — including the one whose
+ * whole purpose is to check that dropping the trade log changes no metric, which cannot see a
+ * metric change when there are no trades and every metric is null.
+ *
+ * `assertTrades` below is the guard against that happening again silently.
+ */
+const TOOL_BARS = Array.from({ length: 260 }, (_, i) => {
+  const close = Math.round(1000 + 300 * Math.sin(i / 14));
   return {
     date: new Date(Date.UTC(2026, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
     open: close,
@@ -596,9 +607,20 @@ async function runBacktestTool(args: Record<string, unknown>): Promise<Record<st
   return parsed.data;
 }
 
+/** Every test here is meaningless against a backtest that never traded. Say so out loud. */
+function assertTrades(data: Record<string, unknown>): void {
+  const metrics = data.metrics as { trades?: number } | undefined;
+  assert.ok(
+    (metrics?.trades ?? 0) > 0,
+    `the fixture must produce trades or these tests prove nothing — warnings: ${JSON.stringify(data.warnings)}`,
+  );
+}
+
 test("the backtest tool includes the trade log by default and says so in notes", async () => {
-  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 260 });
+  assertTrades(data);
   assert.ok(Array.isArray(data.trades), "the log is present by default");
+  assert.ok((data.trades as unknown[]).length > 0, "and it is not empty");
   const notes = data.notes as string[];
   assert.ok(Array.isArray(notes) && notes.length === 1);
   assert.match(notes[0], /full trade log is included/);
@@ -609,9 +631,10 @@ test("include_trades=false drops the log and the note changes to match", async (
   const data = await runBacktestTool({
     symbol: "BBRI",
     strategy: PRESET_IDS[0],
-    bars: 40,
+    bars: 260,
     include_trades: false,
   });
+  assertTrades(data);
   assert.ok(!("trades" in data), "an undefined key is absent from the JSON, not null");
   const notes = data.notes as string[];
   assert.match(notes[0], /dropped/, "the note must not still claim the log is included");
@@ -622,7 +645,8 @@ test("notes never dilutes warnings — they stay separate lists", async () => {
   // `warnings` is sample-size and data-quality caveats about THIS run, and the tool's description
   // tells a model to read it before quoting any number. A housekeeping sentence in there would
   // weaken exactly the signal that is meant to stop a claim.
-  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  const data = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 260 });
+  assertTrades(data);
   assert.ok(Array.isArray(data.warnings), "the engine's warnings survive the tool layer");
   for (const w of data.warnings as string[]) {
     assert.doesNotMatch(w, /include_trades/, "the trade-log note belongs in notes, not in warnings");
@@ -631,13 +655,21 @@ test("notes never dilutes warnings — they stay separate lists", async () => {
 
 test("dropping the trade log does not change a single metric", async () => {
   // The note claims the metrics are computed from all the trades either way. This is that claim.
-  const withLog = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 40 });
+  const withLog = await runBacktestTool({ symbol: "BBRI", strategy: PRESET_IDS[0], bars: 260 });
   const without = await runBacktestTool({
     symbol: "BBRI",
     strategy: PRESET_IDS[0],
-    bars: 40,
+    bars: 260,
     include_trades: false,
   });
+  assertTrades(withLog);
+  assertTrades(without);
   assert.deepEqual(without.metrics, withLog.metrics);
   assert.deepEqual(without.warnings, withLog.warnings);
+  // The claim in the note is about the ARITHMETIC, so check a metric that only trades can produce.
+  assert.equal(
+    (without.metrics as { trades: number }).trades,
+    (withLog.metrics as { trades: number }).trades,
+    "the trade COUNT must not change with the log's visibility",
+  );
 });

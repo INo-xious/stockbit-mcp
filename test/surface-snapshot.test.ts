@@ -87,20 +87,46 @@ test("every registered tool is in the snapshot exactly once", () => {
   assert.equal(new Set(snapshot.map((t) => t.name)).size, snapshot.length, "a duplicate name would hide a tool");
 });
 
-test("required and optional together are the tool's whole argument list, in declaration order", () => {
-  // The split comes from `!schema.isOptional?.()`, so a shape entry that is not a zod schema would
-  // be silently classified REQUIRED. Checking against the source of truth catches that.
+test("required and optional say what the zod schemas actually say", () => {
+  // Hand-written, and that is the point. This test used to compare `entry.required` against
+  // `tool.inputs.filter((i) => i.required)` — which is the EXPRESSION `surfaceSnapshot()` uses to
+  // build it, so it compared the projection with itself and would have passed if `required` and
+  // `optional` were swapped for all 139 tools. Expectations a reader can check against the source
+  // by eye are the only ones worth having here.
   const byName = new Map(surfaceSnapshot().map((t) => [t.name, t]));
-  for (const tool of describeSurface().tools) {
-    const entry = byName.get(tool.name);
-    assert.ok(entry, `${tool.name} is missing from the snapshot`);
-    assert.deepEqual(
-      [...entry.required, ...entry.optional].sort(),
-      tool.inputs.map((i) => i.name).sort(),
-      `${tool.name}: the two lists do not add up to its arguments`,
-    );
-    assert.deepEqual(entry.required, tool.inputs.filter((i) => i.required).map((i) => i.name));
-    assert.deepEqual(entry.optional, tool.inputs.filter((i) => !i.required).map((i) => i.name));
+  const expected: Record<string, { required: string[]; optionalIncludes: string[] }> = {
+    // Two required, and max_bars/raw are the optional pair (src/tools/market.ts).
+    chart_series: { required: ["symbol", "timeframe"], optionalIncludes: ["max_bars", "raw"] },
+    // Everything optional: the market-wide stream takes no argument at all.
+    stream: { required: [], optionalIncludes: ["symbol", "limit", "include_raw"] },
+    // One required, one optional — the narrowest shape in the family.
+    stream_pinned: { required: ["symbol"], optionalIncludes: ["include_raw"] },
+    // A write, to prove the two lists are read for writes as well as reads.
+    watchlist_rename: { required: ["watchlist_id", "name"], optionalIncludes: [] },
+    // No arguments whatsoever.
+    market_session: { required: [], optionalIncludes: [] },
+    quote: { required: ["symbol"], optionalIncludes: [] },
+  };
+
+  for (const [name, want] of Object.entries(expected)) {
+    const entry = byName.get(name);
+    assert.ok(entry, `${name} is missing from the snapshot`);
+    assert.deepEqual(entry.required, want.required, `${name}: required arguments`);
+    for (const arg of want.optionalIncludes) {
+      assert.ok(entry.optional.includes(arg), `${name}: ${arg} should be optional`);
+      assert.ok(!entry.required.includes(arg), `${name}: ${arg} must not be required`);
+    }
+  }
+});
+
+test("no argument is both required and optional, and none is lost between the two lists", () => {
+  // Weaker than the test above and deliberately so: this one IS derived from the same source, so
+  // it can only catch a projection that drops or duplicates a name, never one that mislabels it.
+  for (const entry of surfaceSnapshot()) {
+    const overlap = entry.required.filter((n) => entry.optional.includes(n));
+    assert.deepEqual(overlap, [], `${entry.name}: an argument cannot be both`);
+    const all = [...entry.required, ...entry.optional];
+    assert.equal(new Set(all).size, all.length, `${entry.name}: a duplicated argument name`);
   }
 });
 

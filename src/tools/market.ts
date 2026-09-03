@@ -36,8 +36,9 @@ export function registerMarketTools(define: Definer): void {
       "newest bar. `barsTotal` is how many the response actually held, so barsTotal > the length of " +
       "`bars` means the window was longer than what you are reading — `from` is then the first bar " +
       "KEPT, not the start of the fetched window, and `warnings` names the real start. A five-year " +
-      "window is roughly 1,200 bars and about 274,000 characters uncapped, which several clients " +
-      "will silently cut; raise max_bars deliberately rather than by default.\n" +
+      "window is roughly 1,200 bars, which uncapped runs to several hundred thousand characters — " +
+      "more than some clients will show, and they cut it without saying so. Raise max_bars " +
+      "deliberately rather than by default.\n" +
       "Check `unmapped` and `warnings` on the result before using the numbers. On the daily route " +
       "the close arrives as `value` and open/high/low/volume arrive EMPTY, so every candle is flat " +
       "and `warnings` says so: candlestick patterns and high/low indicators are meaningless on this " +
@@ -78,9 +79,12 @@ export function registerMarketTools(define: Definer): void {
           ? core.getChartRaw(a.symbol as string, a.timeframe as string)
           : // Capped HERE and not in the core reader: that one is memoised per symbol+timeframe, and
             // `cached` hands back a shared reference. `capSeries` copies.
+            // `chartMaxBars`, not `?? DEFAULT`: a saved recipe reaches this handler with no zod
+            // schema applied, so max_bars arrives as the STRING "500" and would otherwise turn the
+            // cap OFF rather than on.
             core.capSeries(
               await core.getSeriesBars(a.symbol as string, a.timeframe as string),
-              (a.max_bars as number | undefined) ?? core.DEFAULT_CHART_MAX_BARS,
+              core.chartMaxBars(a.max_bars),
             ),
       ),
     // Settled by a live call on 2026-08-29: the route answered from a real account and every

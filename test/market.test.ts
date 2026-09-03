@@ -23,7 +23,9 @@ import {
   getPricesBatch,
   getRunningTrade,
   getRunningTradeChart,
+  DEFAULT_CHART_MAX_BARS,
   capSeries,
+  chartMaxBars,
   getSeriesBars,
   getTopStocks,
   getTradeBook,
@@ -969,16 +971,53 @@ test("capSeries does not mutate the cached series — two callers, two different
   // The trap this test exists for: `cached()` hands every caller the SAME object. A trim written as
   // `series.bars = series.bars.slice(-n)` would rewrite the cached value for the next sixty
   // seconds, so the second caller's `max_bars=100` would silently get the first caller's 5.
+  //
+  // Every expectation below is a LITERAL captured before the trim, never a field of the series
+  // being checked. `first` and `second` are the same object — that is the whole point — so
+  // `second.warnings.length === first.warnings.length` would have compared an array's length with
+  // itself and passed however badly capSeries behaved.
   responder = () => chartPoints(50);
   const first = await getSeriesBars("BBRI", "1y");
+  const warningsBefore = first.warnings.length;
+  const barsBefore = first.bars.length;
+  assert.equal(barsBefore, 50);
+
   const small = capSeries(first, 5);
   assert.equal(small.bars.length, 5);
 
   const second = await getSeriesBars("BBRI", "1y");
   assert.equal(requests, 1, "the premise: the second read came from the cache");
-  assert.equal(second.bars.length, 50, "the cached series must still be whole");
-  assert.equal(second.warnings.length, first.warnings.length, "and its warnings must not have grown");
+  assert.equal(second, first, "the premise: cached() really does hand back one shared object");
+  assert.equal(second.bars.length, barsBefore, "the cached series must still be whole");
+  assert.equal(second.warnings.length, warningsBefore, "and its warnings must not have grown");
+  assert.ok(
+    !second.warnings.some((w) => /max_bars/.test(w)),
+    "one caller's trim note must never appear on another caller's uncapped series",
+  );
   assert.equal(capSeries(second, 40).bars.length, 40);
+});
+
+test("chartMaxBars turns a recipe's string into a cap instead of turning the cap off", async () => {
+  // `workflow_run` calls handlers with NO zod schema, so a saved recipe delivers "500", not 500.
+  // `Number.isFinite("500")` is false, so passing the raw value through would have answered with
+  // the whole uncapped series — the cap failing silently, in the off direction, on the path a model
+  // is most likely to repeat.
+  assert.equal(chartMaxBars("500"), 500, "a numeric string is a cap, not a nonsense value");
+  assert.equal(chartMaxBars(500), 500);
+
+  // Anything unusable falls back to the DEFAULT, never to "no cap".
+  for (const bad of ["abc", "-1", "0", "", "1e999", null, undefined, true, {}, [], 0, -5, 2.5, Number.NaN]) {
+    assert.equal(chartMaxBars(bad), DEFAULT_CHART_MAX_BARS, `chartMaxBars(${JSON.stringify(bad)})`);
+  }
+
+  responder = () => chartPoints(60);
+  const series = await getSeriesBars("BBRI", "1y");
+  assert.equal(capSeries(series, chartMaxBars("25")).bars.length, 25, "and the string really does cap");
+  assert.equal(
+    capSeries(series, chartMaxBars("abc")).bars.length,
+    60,
+    "60 is under the default of 500, so an unusable value leaves this series whole — by the DEFAULT, not by no cap",
+  );
 });
 
 test("capSeries is a no-op when the series already fits, and returns the same object", async () => {

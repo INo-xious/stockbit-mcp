@@ -594,16 +594,52 @@ test("stripping raw leaves every projected field and the cursor untouched", asyn
   assert.deepEqual(lean.items, strip(full.items as Record<string, unknown>[]), "raw is the ONLY difference");
 });
 
-test("a field the row did not carry stays ABSENT after the strip, never filled in", async () => {
-  // A strip written as a rebuild — `{ id: item.id, content: item.content, ... }` — would turn every
-  // unmapped field into an `undefined` key, which reads as "this post has no author" rather than
-  // "this route spells it something we have not mapped". The rest-destructure cannot do that.
+test("a field the row did not carry is absent from the JSON a model reads", async () => {
+  // Scoped to what this can actually prove. An earlier version of this comment claimed it caught a
+  // strip rewritten as `{ id: item.id, content: item.content, ... }` — it does not: that produces
+  // `author: undefined`, and JSON.stringify drops undefined keys, so the text block is identical
+  // either way. What IS worth pinning is the end state a model sees: the four projected names never
+  // appear as null or empty strings just because the wire did not carry them.
   bodies.set(P.bbri, { data: { stream: [{ stream_id: 9, content: "cuma isi" }] } });
   const lean = await call("stream", { symbol: "BBRI" });
   const row = (lean.items as Record<string, unknown>[])[0];
   assert.deepEqual(Object.keys(row).sort(), ["content", "id"], "only what the wire actually carried");
-  assert.ok(!("author" in row), "absent is absent, not undefined");
+  assert.ok(!("author" in row), "an unmapped field is absent, never null and never an empty string");
   assert.ok(!("createdAt" in row));
+});
+
+test("include_raw=true after a default call still gets raw — the cached page was not stripped", async () => {
+  // These pages are memoised (`cached(requestKey("stream:symbol", ...))`), and `cached()` hands
+  // every caller the SAME object. A `delete item.raw` instead of a copy would strip the wire object
+  // out of the cached page, so this second call — which explicitly asked for raw — would be told,
+  // with no error at all, that it does not exist.
+  const lean = await call("stream", { symbol: "BBRI" });
+  assert.ok(!("raw" in (lean.items as Record<string, unknown>[])[0]), "the premise: the first call was lean");
+
+  const full = await call("stream", { symbol: "BBRI", include_raw: true });
+  const first = (full.items as Record<string, unknown>[])[0];
+  assert.ok("raw" in first, "the cached page must still carry raw for a later caller who asks");
+  assert.equal((first.raw as Record<string, unknown>).total_likes, 12, "and it must be the whole wire object");
+});
+
+test("unrecognized survives the strip — it is how `empty` and `unreadable` stay different", async () => {
+  // src/instructions.ts tells the model that a null `source` means NOT PARSED rather than none, and
+  // `unrecognized` is the payload it reads to find out what arrived instead. Stripping rows must
+  // never touch it, and must not invent it on a page that parsed.
+  bodies.set(P.bbri, { data: { unexpected: "a shape this code has not seen" } });
+  const odd = await call("stream", { symbol: "BBRI" });
+  assert.equal(odd.source, null);
+  assert.deepEqual(odd.items, []);
+  assert.ok("unrecognized" in odd, "the body must survive so a reader can see what came instead");
+  assert.deepEqual(odd.unrecognized, { unexpected: "a shape this code has not seen" });
+
+  // Back to the ordinary fixture: the override and the cache both have to go, or this second call
+  // re-reads the same unreadable body and proves nothing.
+  bodies.delete(P.bbri);
+  clearCache();
+  const normal = await call("stream", { symbol: "BBRI" });
+  assert.equal(normal.source, "data.stream", "the premise: this page parsed");
+  assert.ok(!("unrecognized" in normal), "and it must not be invented on a page that parsed");
 });
 
 test("a row too broken to project survives the strip as an empty row, not as a dropped one", async () => {

@@ -421,13 +421,38 @@ function projectSeries(
 /**
  * How many bars `chart_series` returns when the caller does not say.
  *
- * Five years of IDX sessions is roughly 1,200 bars, and that answer is about 274,000 characters —
- * far past what several clients will show a model, so the model sees a payload cut off mid-array
- * with no indication that anything was lost. 500 covers every indicator this server computes (the
- * longest warm-up is a 200-period average) and a caller who genuinely wants the whole window can
- * still ask for it.
+ * Five years of IDX sessions is roughly 1,200 bars. Measured on the daily-route bar shape, that
+ * answer is 466,576 characters as this server serialises it TODAY (`jsonResult` still pretty-prints)
+ * and 273,981 once Phase 1 makes results compact; capping at 500 makes those 187,113 and 110,006.
+ * Either way it is far past what several clients will show a model, and they truncate without
+ * saying so — the model then sees a payload cut off mid-array with no indication anything was lost.
+ *
+ * 500 covers every indicator this server computes (the longest warm-up is a 200-period average),
+ * and a caller who genuinely wants the whole window can still ask for it.
  */
 export const DEFAULT_CHART_MAX_BARS = 500;
+
+/**
+ * The cap a caller asked for, or the default when they did not ask usably.
+ *
+ * This exists because `workflow_run` calls tool handlers WITHOUT their zod schema
+ * (`src/tools/register.ts`, and `plan.md` Problem #9 is about exactly that), so a saved recipe
+ * delivers every input as a STRING. `Number.isFinite("500")` is false — it does not coerce — so a
+ * handler that passed the raw value through would answer `max_bars: "500"` with the whole uncapped
+ * series. That is the worst possible direction for this argument to fail in: silently, and only on
+ * the path a model is most likely to take twice.
+ *
+ * An unusable value falls back to the DEFAULT rather than to no cap. On the MCP path zod has
+ * already rejected it and this never runs; on the recipe path there is no validation to reject it
+ * with yet, and "the caller did not name a usable cap" and "the caller wants everything" are not
+ * the same request. Phase 11 makes the recipe path validate properly; until then this is what keeps
+ * the cap from being one typo away from off.
+ */
+export function chartMaxBars(requested: unknown): number {
+  const value = typeof requested === "string" ? Number(requested) : requested;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return DEFAULT_CHART_MAX_BARS;
+  return value;
+}
 
 /**
  * Keep the LATEST `maxBars` bars, oldest-first, and say what was cut.

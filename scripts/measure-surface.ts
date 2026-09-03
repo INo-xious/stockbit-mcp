@@ -13,8 +13,10 @@
  *
  * `tools/list` is measured as `JSON.stringify(tools)` over the array a real `Client` gets back over
  * an in-memory transport — every tool object exactly as the SDK sends it. That is deliberate and it
- * is the only honest shape: the SDK adds `execution` and `_meta` to every tool, and a projection
- * that drops them would report a surface 8K smaller than the one a client actually receives. The
+ * is the only honest shape: every tool carries an `execution` key the SDK adds and an `annotations`
+ * and `_meta` pair THIS repo attaches in `_define.ts`, and a projection that drops them would report
+ * a surface 8K smaller than the one a client actually receives. Only the SDK's part is out of this
+ * project's hands; the other two are ours and are simply not editable by a description diet. The
  * component totals (descriptions, input schemas, names) are printed beside it so a later phase can
  * see WHICH part it moved, but the headline is the whole array.
  *
@@ -101,10 +103,13 @@ function report(m: Measured): void {
   console.log(`  descriptions          ${int(m.descriptionChars).padStart(9)} chars  (avg ${int(Math.round(m.descriptionChars / n))}/tool)`);
   console.log(`  input schemas         ${int(m.schemaChars).padStart(9)} chars`);
   console.log(`  names                 ${int(m.nameChars).padStart(9)} chars`);
-  // The remainder is the SDK's own envelope — annotations, `execution`, `_meta`, JSON punctuation.
-  // Naming it stops a later phase from budgeting against a number it cannot move.
+  // The remainder: this repo's own `annotations` and `_meta`, the SDK's `execution`, and JSON
+  // punctuation. Only `execution` belongs to the SDK — but none of the three shrinks when a
+  // description does, and naming the total stops a later phase budgeting against what it cannot move.
   const envelope = m.listChars - m.descriptionChars - m.schemaChars - m.nameChars;
-  console.log(`  envelope + JSON        ${int(envelope).padStart(9)} chars  (annotations, execution, _meta, quoting — not editable by a description)`);
+  console.log(
+    `  envelope + JSON        ${int(envelope).padStart(9)} chars  (our annotations and _meta, the SDK's execution, and JSON quoting — none of it editable by a description)`,
+  );
 }
 
 /** The 15 that cost the most to look at. The description diet's target list. */
@@ -164,9 +169,10 @@ function chartPayload(bars: number): unknown {
       timeframe: "5y",
       source: "charts",
       bars: rows,
+      barsTotal: rows.length,
       from: rows[0]?.date,
       to: rows[rows.length - 1]?.date,
-      dataPath: "data.chart_points",
+      dataPath: "data.chart",
       mapped: {},
       unmapped: [],
       extraKeys: [],
@@ -201,7 +207,10 @@ largest(all);
 
 console.log("\n## one chart_series result, simulated — a FLOOR, not a typical value");
 console.log("  assumes: the daily-route bar (date + 5 four-digit prices + 8 nulls), empty warnings/sample,");
-console.log('  and a 17-char dataPath ("data.chart_points"). See chartPayload() for why each is the cheap case.');
+console.log('  and dataPath "data.chart" — the value test/market.test.ts asserts for this route.');
+console.log("  plan.md's baseline table (466,560 / 273,971) predates `barsTotal` and assumed a 17-char");
+console.log("  dataPath. At 1,250 bars that is +16 pretty and +10 compact — `barsTotal` costs 17 compact");
+console.log("  chars and the shorter, observed dataPath gives 7 back. Not drift.");
 reportChart(200);
 reportChart(1250);
 

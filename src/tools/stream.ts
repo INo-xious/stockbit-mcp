@@ -72,8 +72,14 @@ const includeRaw = z
  * `stream_post_detail` returns it unconditionally. What changed is what a PAGE of rows costs a
  * model by default — a tool-layer concern — so the projection stays whole and the tool decides.
  *
- * A copy, never a delete: `getSentimentStream` already strips this way at `src/core/stream.ts`, and
- * these pages are not cached today but the readers around them are.
+ * ## A copy, never a delete — and this one is not optional
+ *
+ * Every one of these five readers is memoised (`cached(requestKey("stream:…"), …)` in
+ * `src/core/stream.ts`), and `cached()` hands each caller the SAME object by reference. Deleting
+ * `raw` off the rows in place would strip it out of the cached page for every later caller inside
+ * the TTL — including one that passed `include_raw: true` and would then be told, with no error,
+ * that the wire object does not exist. `getSentimentStream` strips with the same rest-destructure
+ * for the same reason.
  *
  * `unrecognized` is untouched on purpose. It only appears when `source` is null, and it is the
  * single thing that distinguishes "the stream is empty" from "we could not read the response" —
