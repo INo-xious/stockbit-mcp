@@ -122,3 +122,56 @@ export function verifyBars(
 
   return { ok: true };
 }
+
+/**
+ * Check a news page falls inside the requested window.
+ *
+ * The stream endpoint takes `from_date`/`to_date`, and the same silent-200 hazard applies: a
+ * request whose dates were ignored comes back as the newest posts, not the asked-for ones. Each
+ * item's `createdAt` is the evidence, read from the body. An item without one is not a failure of
+ * the window check - the raw row is kept verbatim - but it cannot vouch for the window either, so
+ * a page where NO item carries a date is refused: nothing on it can be filed.
+ *
+ * An EMPTY page is a pass. Most symbols have no news on most days; "nothing was written about
+ * this name in this window" is a real observation the feature side encodes as its own indicator.
+ */
+export function verifyNewsWindow(
+  requested: DateWindow,
+  page: { items?: { createdAt?: string }[]; truncated?: boolean; pagesFetched?: number },
+): WindowVerdict {
+  const items = page.items ?? [];
+  if (items.length === 0) return { ok: true, note: "no news in the window" };
+
+  const dated = items.map((i) => i.createdAt?.slice(0, 10)).filter((d): d is string => !!d);
+  if (dated.length === 0) {
+    return {
+      ok: false,
+      reason: "no item on the page carries a date, so none can be filed under the requested window",
+      observed: `${items.length} item(s), 0 dated`,
+    };
+  }
+
+  const outside = dated.filter((d) => d < requested.from || d > requested.to);
+  if (outside.length) {
+    const newestOutside = [...outside].sort().at(-1);
+    return {
+      ok: false,
+      reason:
+        "the page carries posts outside the requested window - the signature of a request whose " +
+        "dates were ignored and answered with the newest posts instead. Nothing was stored.",
+      observed: `${outside.length} of ${dated.length} dated item(s) outside ${requested.from}..${requested.to}, e.g. ${newestOutside}`,
+    };
+  }
+
+  if (page.truncated) {
+    return {
+      ok: false,
+      reason:
+        "paging hit its ceiling before the window was exhausted, so this page set is incomplete at " +
+        "the old end. Storing it would look like quiet days rather than an incomplete pull.",
+      observed: `pagesFetched=${page.pagesFetched ?? "?"}, oldest ${[...dated].sort()[0]}`,
+    };
+  }
+
+  return { ok: true };
+}

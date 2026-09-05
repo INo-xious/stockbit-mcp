@@ -27,7 +27,7 @@ import { CliParseError, gateCommandLine } from "../src/cliargs.ts";
 import { BATCH_BIN, BATCH_COMMANDS } from "../src/batch/cli.ts";
 import { itemKey, plan, planSummary, sessionDates, type WorkItem } from "../src/batch/planner.ts";
 import { run, type RunnerDeps } from "../src/batch/runner.ts";
-import { verifyBars, verifyBrokerWindow } from "../src/batch/verify.ts";
+import { verifyBars, verifyBrokerWindow, verifyNewsWindow } from "../src/batch/verify.ts";
 
 const execFileAsync = promisify(execFile);
 after(() => rmSync(STORE, { recursive: true, force: true }));
@@ -40,6 +40,15 @@ test("bars plan one item per symbol — getBars pages the range itself", () => {
   assert.deepEqual(items.map((i) => i.symbol), ["BBCA", "ANTM"]);
   assert.equal(items[0].from, "2026-08-03");
   assert.equal(items[0].to, "2026-08-28");
+});
+
+test("news plan one item per symbol, like bars — the stream pages by cursor", () => {
+  const items = plan({ kind: "news", symbols: ["BBCA", "ANTM"], from: "2026-08-03", to: "2026-08-28" });
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((i) => i.kind), ["news", "news"]);
+  assert.equal(items[0].key, itemKey("news", "BBCA", "2026-08-03", "2026-08-28"));
+  // Distinct from the bars key for the same symbol and window, or a checkpoint could confuse them.
+  assert.notEqual(items[0].key, itemKey("bars", "BBCA", "2026-08-03", "2026-08-28"));
 });
 
 test("broker plan one item per symbol AND session — the 120k number", () => {
@@ -265,7 +274,7 @@ test("a success resets the consecutive-failure counter", async () => {
 
 /* ---------------------------------- the --help gate ---------------------------------- */
 
-const SUBCOMMANDS = ["plan", "bars", "broker", "probe", "status"];
+const SUBCOMMANDS = ["plan", "bars", "broker", "news", "probe", "status"];
 
 test("the table covers exactly the commands the bin dispatches", () => {
   assert.deepEqual(Object.keys(BATCH_COMMANDS).sort(), [...SUBCOMMANDS].sort());
@@ -311,4 +320,48 @@ test("`broker --help` returns immediately instead of starting an overnight drip"
   );
   assert.match(stdout, /broker/);
   assert.match(stdout, /--kill-file/);
+});
+
+
+/* ------------------------------------- news verification ------------------------------------- */
+
+test("a news page inside the window passes, and an empty page is a real observation", () => {
+  const window = { from: "2026-08-03", to: "2026-08-07" };
+  const ok = verifyNewsWindow(window, { items: [{ createdAt: "2026-08-04T09:15:00Z" }, { createdAt: "2026-08-07T16:00:00Z" }] });
+  assert.equal(ok.ok, true);
+  const empty = verifyNewsWindow(window, { items: [] });
+  assert.equal(empty.ok, true);
+  assert.match((empty as { note?: string }).note ?? "", /no news/);
+});
+
+test("a news page carrying posts outside the window is refused — the silent-200 signature", () => {
+  // Asked for a week in February, answered with this week: dates were ignored.
+  const verdict = verifyNewsWindow({ from: "2026-02-16", to: "2026-02-20" }, {
+    items: [{ createdAt: "2026-02-18T10:00:00Z" }, { createdAt: "2026-08-28T10:00:00Z" }],
+  });
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /outside the requested window/);
+    assert.match(verdict.observed, /1 of 2/);
+    assert.match(verdict.observed, /2026-08-28/);
+  }
+});
+
+test("a news page where nothing is dated cannot be filed, so it is refused", () => {
+  const verdict = verifyNewsWindow({ from: "2026-08-03", to: "2026-08-07" }, { items: [{}, {}] });
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) assert.match(verdict.reason, /no item .* carries a date/);
+});
+
+test("a news walk that hit the page cap is refused rather than stored as complete", () => {
+  const verdict = verifyNewsWindow({ from: "2026-01-01", to: "2026-08-28" }, {
+    items: [{ createdAt: "2026-08-01T00:00:00Z" }], truncated: true, pagesFetched: 10,
+  });
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) assert.match(verdict.reason, /page cap|ceiling/);
+});
+
+test("--kind news is accepted by the CLI gate", () => {
+  assert.doesNotThrow(() => gateCommandLine(BATCH_BIN, BATCH_COMMANDS, ["plan", "--kind", "news", "--from", "2026-08-03", "--to", "2026-08-07"]));
+  assert.ok(BATCH_COMMANDS.news, "the news command must be documented in --help");
 });

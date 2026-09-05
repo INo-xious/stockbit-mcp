@@ -42,7 +42,7 @@ const PACING_FLAGS = {
 export const BATCH_COMMANDS: CommandTable = {
   plan: {
     summary: "show what WOULD be fetched, and how much is already done — makes no requests",
-    valueFlags: { ...SELECTION_VALUE_FLAGS, ...OUTPUT_VALUE_FLAGS, "--kind": { placeholder: "bars|broker", help: "which backfill to plan" }, "--order": PACING_VALUE_FLAGS["--order"] },
+    valueFlags: { ...SELECTION_VALUE_FLAGS, ...OUTPUT_VALUE_FLAGS, "--kind": { placeholder: "bars|broker|news", help: "which backfill to plan" }, "--order": PACING_VALUE_FLAGS["--order"] },
     details: [
       "Always run this first. It is free, and it tells you the request count before you spend it.",
       "",
@@ -74,6 +74,20 @@ export const BATCH_COMMANDS: CommandTable = {
       "the most recent sessions rather than a few symbols covering everything.",
     ],
   },
+  news: {
+    summary: "per-symbol news headlines from the stream, one request per (symbol, window)",
+    flags: PACING_FLAGS,
+    valueFlags: { ...SELECTION_VALUE_FLAGS, ...OUTPUT_VALUE_FLAGS, ...PACING_VALUE_FLAGS },
+    details: [
+      "The stream filtered to its news category: HEADLINES with a publisher link, in Indonesian,",
+      "not article bodies. Stored verbatim under raw/news/<SYMBOL>/<window>.json so that stays",
+      "visible downstream. Follows the cursor up to a page cap; a capped walk is refused rather",
+      "than stored as though it were complete.",
+      "",
+      "Cheap: one page covers most symbols in most windows. The cost that matters is downstream -",
+      "each headline the ML extracts is one LLM call - and that cap lives in idx-ml, not here.",
+    ],
+  },
   probe: {
     summary: "a tiny live check (few symbols, few days) that also records test fixtures",
     valueFlags: { ...SELECTION_VALUE_FLAGS, "--out": OUTPUT_VALUE_FLAGS["--out"] },
@@ -81,7 +95,7 @@ export const BATCH_COMMANDS: CommandTable = {
   },
   status: {
     summary: "how far a backfill has got, read from its checkpoint — makes no requests",
-    valueFlags: { ...SELECTION_VALUE_FLAGS, ...OUTPUT_VALUE_FLAGS, "--kind": { placeholder: "bars|broker", help: "which backfill to report" } },
+    valueFlags: { ...SELECTION_VALUE_FLAGS, ...OUTPUT_VALUE_FLAGS, "--kind": { placeholder: "bars|broker|news", help: "which backfill to report" } },
   },
 };
 

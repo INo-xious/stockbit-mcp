@@ -39,6 +39,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { getBars, MAX_PAGES, ROWS_PER_PAGE } from "../src/core/bars.js";
 import { getBrokerSummary } from "../src/core/marketdetectors.js";
+import { getNews, type StreamItem } from "../src/core/stream.js";
 import { sessionClock } from "../src/core/sessionclock.js";
 import { RATE } from "../src/config.js";
 import { CliParseError, formatUsage, gateCommandLine, isHelpToken, isVersionToken } from "../src/cliargs.js";
@@ -46,7 +47,7 @@ import { VERSION } from "../src/version.js";
 import { BATCH_BIN, BATCH_COMMANDS, BATCH_EPILOGUE } from "../src/batch/cli.js";
 import { plan, planSummary, sessionDates, type BatchKind, type PlanOrder, type WorkItem } from "../src/batch/planner.js";
 import { run, type ProgressEvent } from "../src/batch/runner.js";
-import { verifyBars, verifyBrokerWindow, type WindowVerdict } from "../src/batch/verify.js";
+import { verifyBars, verifyBrokerWindow, verifyNewsWindow, type WindowVerdict } from "../src/batch/verify.js";
 
 const DEFAULT_RATE_MS = 1750;
 const DEFAULT_JITTER_MS = 500;
@@ -100,8 +101,8 @@ function requireDates(): { from: string; to: string } {
 
 function kindFlag(): BatchKind {
   const raw = value("kind");
-  if (raw !== "bars" && raw !== "broker") {
-    throw new Error(`--kind must be bars or broker, got ${JSON.stringify(raw ?? "(absent)")}`);
+  if (raw !== "bars" && raw !== "broker" && raw !== "news") {
+    throw new Error(`--kind must be bars, broker or news, got ${JSON.stringify(raw ?? "(absent)")}`);
   }
   return raw;
 }
@@ -148,17 +149,47 @@ function writeRaw(root: string, item: WorkItem, payload: unknown): void {
   writeFileSync(target, JSON.stringify(payload, null, 1), "utf8");
 }
 
+/**
+ * Pages of news for one symbol over one window, following the stream cursor.
+ *
+ * Capped at NEWS_MAX_PAGES so a symbol with an enormous archive cannot burn a night's request
+ * budget on one work item; `truncated` records that the cap, not the window, ended the walk, and
+ * the verifier refuses to store a truncated set as though it were complete.
+ */
+const NEWS_MAX_PAGES = 10;
+
+async function fetchNews(item: WorkItem): Promise<{ items: StreamItem[]; truncated: boolean; pagesFetched: number }> {
+  const items: StreamItem[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  while (pages < NEWS_MAX_PAGES) {
+    const page = await getNews({ symbol: item.symbol, fromDate: item.from, toDate: item.to, lastStreamId: cursor });
+    pages += 1;
+    items.push(...page.items);
+    if (!page.nextCursor || page.items.length === 0) return { items, truncated: false, pagesFetched: pages };
+    cursor = page.nextCursor;
+  }
+  return { items, truncated: true, pagesFetched: pages };
+}
+
 async function fetchItem(item: WorkItem): Promise<unknown> {
-  return item.kind === "bars"
-    ? await getBars({ symbol: item.symbol, from: item.from, to: item.to })
-    : await getBrokerSummary({ symbol: item.symbol, from: item.from, to: item.to });
+  switch (item.kind) {
+    case "bars": return await getBars({ symbol: item.symbol, from: item.from, to: item.to });
+    case "news": return await fetchNews(item);
+    default: return await getBrokerSummary({ symbol: item.symbol, from: item.from, to: item.to });
+  }
 }
 
 function verifyItem(item: WorkItem, payload: unknown): WindowVerdict {
   const window = { from: item.from, to: item.to };
-  return item.kind === "bars"
-    ? verifyBars(window, payload as { bars: { date: string }[]; truncated?: boolean; pagesFetched?: number })
-    : verifyBrokerWindow(window, payload as { from?: string; to?: string });
+  switch (item.kind) {
+    case "bars":
+      return verifyBars(window, payload as { bars: { date: string }[]; truncated?: boolean; pagesFetched?: number });
+    case "news":
+      return verifyNewsWindow(window, payload as { items?: { createdAt?: string }[]; truncated?: boolean; pagesFetched?: number });
+    default:
+      return verifyBrokerWindow(window, payload as { from?: string; to?: string });
+  }
 }
 
 function describeStop(reason: string): string {
@@ -254,6 +285,8 @@ async function fetchCommand(kind: BatchKind): Promise<void> {
  */
 function requestsPerItem(kind: BatchKind, from: string, to: string): number {
   if (kind === "broker") return 1;
+  // Most symbols have a page or less of news in any window; the cap bounds the outliers.
+  if (kind === "news") return Math.min(NEWS_MAX_PAGES, Math.max(1, Math.ceil(sessionDates(from, to).length / 20)));
   const sessions = sessionDates(from, to).length;
   return Math.min(MAX_PAGES, Math.max(1, Math.ceil(sessions / ROWS_PER_PAGE)));
 }
@@ -372,6 +405,7 @@ async function main(): Promise<void> {
     case "plan": return planCommand();
     case "bars": return await fetchCommand("bars");
     case "broker": return await fetchCommand("broker");
+    case "news": return await fetchCommand("news");
     case "probe": return await probeCommand();
     case "status": return statusCommand();
     default:

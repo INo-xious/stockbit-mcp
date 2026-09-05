@@ -25,8 +25,16 @@
 import { normalizeTradeDate } from "../core/dates.js";
 import { normalizeSymbol } from "../symbol.js";
 
-/** The two things this CLI backfills. */
-export type BatchKind = "bars" | "broker";
+/**
+ * The three things this CLI backfills.
+ *
+ * `news` (added 2026-09-05) is the stream filtered to the news category, per symbol. Like bars it
+ * is one work item per symbol per window: the endpoint takes a date range and pages by cursor, so
+ * the request count is symbols x pages, not symbols x sessions. What comes back is HEADLINES with a
+ * publisher link - not article bodies - and the raw payload is stored verbatim so that fact stays
+ * visible downstream rather than being flattened into a field that pretends otherwise.
+ */
+export type BatchKind = "bars" | "broker" | "news";
 
 export type PlanOrder = "recent-first" | "oldest-first" | "symbol-major";
 
@@ -104,10 +112,12 @@ export function plan(opts: PlanOptions): WorkItem[] {
   const order = opts.order ?? "recent-first";
   const items: WorkItem[] = [];
 
-  if (opts.kind === "bars") {
-    // One item per symbol: getBars pages the range internally.
+  if (opts.kind === "bars" || opts.kind === "news") {
+    // One item per symbol: getBars pages the range internally, and the news fetch follows the
+    // stream cursor the same way. A window is the unit of resumption for both.
+    const kind = opts.kind;
     for (const symbol of symbols) {
-      items.push({ kind: "bars", symbol, from, to, key: itemKey("bars", symbol, from, to) });
+      items.push({ kind, symbol, from, to, key: itemKey(kind, symbol, from, to) });
     }
   } else {
     const dates = sessionDates(from, to);
