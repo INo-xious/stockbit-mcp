@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Entry point: run the Stockbit MCP server over stdio.
+ * Entry point: run the Stockbit MCP server over stdio or optional local Streamable HTTP.
  *
  * The only thing this decides is which tools to register. `STOCKBIT_TOOLS` is parsed here rather
  * than inside the server so a bad value can **stop the process**: a typo that quietly fell back to
@@ -33,6 +33,7 @@ import { logStderr } from "../src/redact.js";
 import { CliParseError, gateBareCommandLine, type CommandSpec } from "../src/cliargs.js";
 import { VERSION } from "../src/version.js";
 import { armAutoRelogin } from "../src/auth/relogin.js";
+import { resolveMcpTransport, startHttpMcpServer } from "../src/mcp/http.js";
 
 const MCP_BIN = "stockbit-mcp";
 
@@ -44,7 +45,7 @@ const MCP_BIN = "stockbit-mcp";
  * `--help` sends the reader to the right place instead of implying flags that do not exist.
  */
 const MCP_SPEC: CommandSpec = {
-  summary: "Run the Stockbit MCP server over stdio.",
+  summary: "Run the Stockbit MCP server over stdio (default) or local Streamable HTTP.",
   flags: {
     "--version": "Print the installed version and exit.",
     "--help": "Print this usage and exit.",
@@ -52,6 +53,11 @@ const MCP_SPEC: CommandSpec = {
   details: [
     "Configured by environment, not by flags:",
     "  STOCKBIT_TOOLS   which tool families to register (default: core; `all` for every tool)",
+    "  STOCKBIT_MCP_TRANSPORT  stdio (default) or http (loopback-only)",
+    "  STOCKBIT_MCP_TOKEN      required random bearer token for HTTP (32–256 base64url characters)",
+    "  STOCKBIT_MCP_HOST       HTTP bind address (default: 127.0.0.1; loopback only)",
+    "  STOCKBIT_MCP_PORT       HTTP port (default: 8787)",
+    "  STOCKBIT_MCP_ALLOWED_ORIGINS  optional comma-separated browser origins for MCP Inspector",
     "",
     "Run `stockbit-auth login` first if this is a new machine.",
   ],
@@ -88,6 +94,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const { profile, isDefault } = resolved;
+  const transportConfig = resolveMcpTransport();
 
   // Arm automatic login recovery — HERE, and in no other entry point.
   //
@@ -100,6 +107,23 @@ async function main(): Promise<void> {
   // Arming grants nothing on its own: recovery also needs STOCKBIT_AUTO_RELOGIN set, no
   // STOCKBIT_NO_BROWSER, a provably live website session, and its one unspent attempt.
   armAutoRelogin();
+
+  if (transportConfig.transport === "http") {
+    const listener = await startHttpMcpServer(
+      () => createServer({ profile, profileIsDefault: isDefault }),
+      transportConfig.http,
+    );
+    logStderr(`stockbit-mcp: listening at ${listener.url} (tool profile: ${profile.label}; bearer authentication; single local Stockbit account).`);
+    let stopping = false;
+    const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
+      void listener.close().then(() => process.exit(0), () => process.exit(1));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    return;
+  }
 
   const server = createServer({ profile, profileIsDefault: isDefault });
   const transport = new StdioServerTransport();

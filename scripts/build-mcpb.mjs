@@ -5,9 +5,9 @@
  * entry point with whatever `node` it finds, so the archive has to carry its own `node_modules`.
  * That is why this stages a directory and installs into it rather than packing the repo.
  *
- *   node scripts/build-mcpb.mjs
+ *   npm run build:mcpb
  *
- * Requires `npm run build` to have produced `dist/` (it runs it if it has not).
+ * Always rebuilds `dist/` before staging to avoid packaging stale source changes.
  */
 import { execFileSync, execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -24,10 +24,8 @@ const stage = join(root, "mcpb", "build");
  * npm's entry script — so the normal route runs that with the Node already executing this file.
  * The basename is checked because under yarn or pnpm the variable points at THEIR CLI.
  *
- * The fallback covers this script being run directly, where the variable is absent, and is the one
- * path that needs a shell. It uses `execSync` with a fixed command string rather than
- * `execFileSync` with `shell: true`, which is DEP0190 on Node 24. Only `cwd` varies, and it is a
- * path this script created.
+ * When invoked directly, discover npm's CLI with a fixed command before passing paths as ordinary
+ * arguments. Repository paths may contain spaces or shell metacharacters.
  */
 function npm(args, cwd = root) {
   const options = { cwd, stdio: "inherit" };
@@ -36,7 +34,15 @@ function npm(args, cwd = root) {
     execFileSync(process.execPath, [cli, ...args], options);
     return;
   }
-  execSync(`npm ${args.join(" ")}`, options);
+  const discoveredCli = execSync("npm exec --offline -- node -p process.env.npm_execpath", {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+  }).trim();
+  if (!discoveredCli || basename(discoveredCli) !== "npm-cli.js" || !existsSync(discoveredCli)) {
+    throw new Error("Cannot locate npm's CLI. Run this build with npm run build:mcpb.");
+  }
+  execFileSync(process.execPath, [discoveredCli, ...args], options);
 }
 
 /** Anything that is not npm — plain executables, safe through `execFile` on every platform. */
@@ -54,10 +60,8 @@ if (manifest.version !== pkg.version) {
   process.exit(1);
 }
 
-if (!existsSync(join(root, "dist", "bin", "stockbit-mcp.js"))) {
-  console.log("dist/ is missing — building first.");
-  npm(["run", "build"]);
-}
+console.log("Building the current checkout…");
+npm(["run", "build"]);
 
 // The icon is committed, but it is also generated, so a fresh checkout that lost it still builds.
 if (!existsSync(join(root, "mcpb", "icon.png"))) {
@@ -71,7 +75,13 @@ cpSync(join(root, "dist"), join(stage, "dist"), { recursive: true });
 cpSync(join(root, "mcpb", "manifest.json"), join(stage, "manifest.json"));
 cpSync(join(root, "mcpb", "icon.png"), join(stage, "icon.png"));
 cpSync(join(root, "README.md"), join(stage, "README.md"));
+cpSync(join(root, "README.id.md"), join(stage, "README.id.md"));
+cpSync(join(root, "SECURITY.md"), join(stage, "SECURITY.md"));
 cpSync(join(root, "LICENSE"), join(stage, "LICENSE"));
+mkdirSync(join(stage, "docs"));
+for (const name of ["README.md", "CLIENTS.md", "TOOLS.md", "VERIFICATION.md"]) {
+  cpSync(join(root, "docs", name), join(stage, "docs", name));
+}
 
 // A trimmed package.json: the extension needs `type: module` and the runtime deps, and nothing
 // else. Carrying the scripts would let a lifecycle hook run on the user's machine at install.

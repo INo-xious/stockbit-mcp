@@ -51,9 +51,11 @@ import {
   forgetOurDrawings,
   loadOurDrawings,
   setOurDrawings,
+  selectOurDrawings,
   type OurDrawing,
 } from "./store.js";
 import { getChartDrawings } from "./api.js";
+import { invalidateCache } from "../core/_util.js";
 import { reconcileOurDrawings, type OurDrawingStatus } from "./reconcile.js";
 
 /** Chart types the widget accepts, by the name a caller would use. Values are TradingView's. */
@@ -402,9 +404,15 @@ export async function clearDrawings(options: {
   symbol: string;
   scope: "ours" | "all";
   confirm?: boolean;
+  shapeIds?: string[];
   headless?: boolean;
 }): Promise<ClearResult> {
   const symbol = normalizeSymbol(options.symbol);
+  if (options.shapeIds !== undefined && options.scope !== "ours") {
+    throw new StockbitError("invalid_param", "shape_ids can only be used with scope ours.");
+  }
+  // Reject unowned ids before opening the browser, and recheck under the driver lock below.
+  if (options.shapeIds !== undefined) selectOurDrawings(symbol, options.shapeIds);
 
   if (options.scope === "all" && options.confirm !== true) {
     throw new StockbitError(
@@ -433,7 +441,7 @@ export async function clearDrawings(options: {
       };
     }
 
-    const previous = loadOurDrawings(symbol);
+    const previous = selectOurDrawings(symbol, options.shapeIds);
     if (!previous.length) {
       return { symbol, scope: "ours" as const, removed: 0, alreadyGone: [], notes: session.notes };
     }
@@ -600,6 +608,8 @@ export async function saveChart(options: {
     );
     const ready = requireReady(result, "saving the chart");
 
+    // Verification must observe this save, not a cached response from before it.
+    invalidateCache("chartbit:");
     let verifiedDrawings: number | null = null;
     let verifyError: string | undefined;
     try {

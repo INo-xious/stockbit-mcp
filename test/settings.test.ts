@@ -66,11 +66,11 @@ test("enabling in the file enables the policy, and it is read at CALL time", () 
   clear();
   assert.equal(tradingPolicy({}).enabled, false);
   const settings = defaultSettings();
-  settings.trading.mode = "live";
+  settings.trading.mode = "paper";
   saveSettings(settings);
   // No restart, no cache to bust: `trading-disable` must take effect on the next order.
   assert.equal(tradingPolicy({}).enabled, true);
-  assert.equal(tradingPolicy({}).live, true);
+  assert.equal(tradingPolicy({}).live, false);
   settings.trading.mode = "off";
   saveSettings(settings);
   assert.equal(tradingPolicy({}).enabled, false);
@@ -102,42 +102,6 @@ test("paper never auto-confirms, however the file is written", () => {
   settings.trading.maxOrderValueIdr = 5_000_000;
   saveSettings(settings);
   assert.equal(tradingPolicy({}).autoConfirm, false);
-});
-
-test("the environment can only move DOWN the ladder", () => {
-  clear();
-  const settings = defaultSettings();
-  settings.trading.mode = "live";
-  saveSettings(settings);
-
-  // live -> paper
-  const lowered = tradingPolicy({ STOCKBIT_TRADING: "paper" });
-  assert.equal(lowered.mode, "paper");
-  assert.equal(lowered.source, "env-paper");
-  assert.match(lowered.reason, /No real order can be placed/);
-
-  // live -> off
-  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "off" }).mode, "off");
-
-  // paper -> live is NOT possible.
-  settings.trading.mode = "paper";
-  saveSettings(settings);
-  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "live" }).mode, "paper", "nothing in the env raises the mode");
-
-  // off -> paper is not possible either: the env cannot turn anything on.
-  settings.trading.mode = "off";
-  saveSettings(settings);
-  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "paper" }).mode, "off");
-});
-
-test("a v1 file is migrated: enabled:true meant real money, so it means live", () => {
-  writeRaw(JSON.stringify({ version: 1, trading: { enabled: true, maxLotsPerOrder: 100 } }));
-  const settings = loadSettings();
-  assert.equal(settings.trading.mode, "live");
-  assert.equal(settings.trading.maxLotsPerOrder, 100, "the rest of the block survives the migration");
-
-  writeRaw(JSON.stringify({ version: 1, trading: { enabled: false } }));
-  assert.equal(loadSettings().trading.mode, "off");
 });
 
 test("an unrecognised mode is off, because an ambiguous permission is no permission", () => {
@@ -185,32 +149,9 @@ test("a revocation that cannot be read is kept, because dropping it would keep a
   assert.equal(loadSettings().trading.confirmationsRevokedAt, iso);
 });
 
-test("elicitation: required and autoConfirm contradict, and the ASK wins", () => {
-  // Two switches that say opposite things about whether a person is asked. Resolved in favour of
-  // the one that produces a question, and reported through the channel that already exists for
-  // "you set this and it is not doing anything" rather than through a new field nobody reads.
-  const settings = defaultSettings();
-  settings.trading.mode = "live";
-  settings.trading.autoConfirm = true;
-  settings.trading.maxOrderValueIdr = 5_000_000;
-  settings.trading.elicitation = "required";
-  saveSettings(settings);
-
-  const policy = tradingPolicy({});
-  assert.equal(policy.enabled, true);
-  assert.equal(policy.autoConfirm, false, "the cap is fine; the contradiction is what disables it");
-  assert.equal(policy.elicitation, "required");
-  assert.match(policy.autoConfirmIgnored ?? "", /elicitation is `required`/);
-  assert.match(policy.autoConfirmIgnored ?? "", /The ask wins/);
-  assert.match(policy.autoConfirmIgnored ?? "", /confirm: true/);
-
-  // And the way out is named, so a user who actually wanted autoConfirm knows what to type.
-  assert.match(policy.autoConfirmIgnored ?? "", /--elicitation when-available/);
-});
-
 test("STOCKBIT_TRADING=off overrides an enabled file", () => {
   const settings = defaultSettings();
-  settings.trading.mode = "live";
+  settings.trading.mode = "paper";
   settings.trading.autoConfirm = true;
   settings.trading.maxOrderValueIdr = 1_000_000;
   saveSettings(settings);
@@ -235,33 +176,6 @@ test("no environment value can turn trading ON", () => {
       `STOCKBIT_TRADING=${value} must not enable trading`,
     );
   }
-});
-
-test("autoConfirm without a value cap is REFUSED, and says so", () => {
-  const settings = defaultSettings();
-  settings.trading.mode = "live";
-  settings.trading.autoConfirm = true;
-  settings.trading.maxOrderValueIdr = null;
-  saveSettings(settings);
-
-  const policy = tradingPolicy({});
-  assert.equal(policy.enabled, true);
-  assert.equal(policy.autoConfirm, false, "autoConfirm must not be honoured without a cap");
-  assert.match(policy.autoConfirmIgnored ?? "", /maxOrderValueIdr/);
-  assert.match(policy.autoConfirmIgnored ?? "", /confirm: true/);
-});
-
-test("autoConfirm WITH a cap is honoured, and the cap travels with it", () => {
-  const settings = defaultSettings();
-  settings.trading.mode = "live";
-  settings.trading.autoConfirm = true;
-  settings.trading.maxOrderValueIdr = 5_000_000;
-  saveSettings(settings);
-
-  const policy = tradingPolicy({});
-  assert.equal(policy.autoConfirm, true);
-  assert.equal(policy.maxOrderValueIdr, 5_000_000);
-  assert.equal(policy.autoConfirmIgnored, undefined);
 });
 
 test("a corrupt file is default-off AND says the file could not be read", () => {
@@ -313,7 +227,7 @@ test("allowed symbols are upper-cased, so a lower-case entry still restricts", (
 test("the file is written atomically and owner-only", () => {
   clear();
   const settings = defaultSettings();
-  settings.trading.mode = "live";
+  settings.trading.mode = "paper";
   saveSettings(settings);
   const dir = process.env.STOCKBIT_STORE_DIR!;
   assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp")), [], "a temp file survived the write");
@@ -343,4 +257,29 @@ test("nothing that serves a model can write this file", () => {
     if (/\bsaveSettings\b/.test(readFileSync(file, "utf8"))) offenders.push(rel);
   }
   assert.deepEqual(offenders, [], "these modules can rewrite the trading policy they are governed by");
+});
+
+test("legacy live permissions and environment values can never enable real execution", () => {
+  for (const trading of [{ mode: "live" }, { enabled: true }, { mode: "live", autoConfirm: true }]) {
+    writeRaw(JSON.stringify({ version: 2, trading }));
+    assert.equal(loadSettings().version, 3);
+    for (const value of ["live", "paper", "true", "1", "", "off"]) {
+      const policy = tradingPolicy({ STOCKBIT_TRADING: value });
+      assert.equal(policy.mode, "off");
+      assert.equal(policy.live, false);
+      assert.equal(policy.enabled, false);
+      assert.equal(policy.autoConfirm, false);
+    }
+  }
+});
+
+test("environment can disable paper simulation but cannot enable it", () => {
+  const settings = defaultSettings();
+  settings.trading.mode = "paper";
+  saveSettings(settings);
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "off" }).mode, "off");
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "live" }).mode, "paper");
+  settings.trading.mode = "off";
+  saveSettings(settings);
+  assert.equal(tradingPolicy({ STOCKBIT_TRADING: "paper" }).mode, "off");
 });

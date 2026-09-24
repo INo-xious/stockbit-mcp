@@ -54,8 +54,8 @@ function requireId(id: string, field = "watchlist id"): string {
 function requireName(name: string): string {
   const trimmed = String(name ?? "").trim();
   if (!trimmed) throw new StockbitError("invalid_param", "A watchlist needs a name.");
-  if (trimmed.length > 100) {
-    throw new StockbitError("invalid_param", `That name is ${trimmed.length} characters; the limit here is 100.`);
+  if (trimmed.length > 25) {
+    throw new StockbitError("invalid_param", `That name is ${trimmed.length} characters; Stockbit's limit is 25.`);
   }
   return trimmed;
 }
@@ -267,24 +267,24 @@ export async function removeFromWatchlist(options: {
 }
 
 /**
- * Make a watchlist the favourite — the one Stockbit opens on, and the one this server's tools use
- * when no id is given.
- *
- * That second consequence is the reason this is confirmed rather than treated as a preference:
- * changing it silently repoints every later "the user's watchlist" at a different set of symbols.
+ * Set one list's favorite flag. Stockbit permits multiple favorites; this does not replace other
+ * favorites or select the currently open list. Public frontend setWatchlistFavorite(id, flag)
+ * sends is_favorite explicitly. Omitting that body was observed to unfavorite on 2026-09-24.
  */
 export async function favoriteWatchlist(options: {
   watchlistId: string;
+  favorite?: boolean;
   confirm: boolean;
-}): Promise<AccountResult<{ id: string }>> {
+}): Promise<AccountResult<{ id: string; favorite: boolean }>> {
   const id = requireId(options.watchlistId);
-  requireConfirm(options.confirm, `make watchlist ${id} the favourite`);
+  const favorite = options.favorite ?? true;
+  requireConfirm(options.confirm, `${favorite ? "favorite" : "unfavorite"} watchlist ${id}`);
 
   return verifiedWrite({
     action: "watchlist_favorite",
     target: id,
     lockKey: "watchlist",
-    write: () => putJson("watchlistFavorite", { segments: { watchlistId: id } }),
+    write: () => putJson("watchlistFavorite", { segments: { watchlistId: id }, body: { is_favorite: favorite } }),
     invalidate,
     verify: async () => {
       const lists = await getWatchlists();
@@ -292,7 +292,7 @@ export async function favoriteWatchlist(options: {
       // `is_favorite` is a field the index endpoint has actually been observed to carry, so this is
       // a real read-back rather than a hopeful one. A list that comes back without the flag set
       // reports `not-visible` — the write was accepted and did not take.
-      return { verified: found?.isFavorite === true, detail: { id } };
+      return { verified: found !== undefined && found.isFavorite === favorite, detail: { id, favorite } };
     },
   });
 }

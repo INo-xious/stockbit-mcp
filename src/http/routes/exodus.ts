@@ -107,7 +107,8 @@ export const EXODUS_ROUTES = {
   /** Market-wide stream. `category` picks news / ideas / reports / insider / …, `keyword` searches. */
   streamAll: { host: "exodus", method: "GET", template: "/stream/v3", auth: "main" },
   streamSymbolPinned: { host: "exodus", method: "GET", template: "/stream/v3/symbol/:symbol/pinned", auth: "main" },
-  streamPost: { host: "exodus", method: "GET", template: "/stream/v3/post/:postId", auth: "main" },
+  // A read-shaped POST, with no body, matching the website's getStreamDetail. ADR-0014.
+  streamPost: { host: "exodus", method: "POST", template: "/stream/v3/post/:postId", auth: "main" },
   streamUser: { host: "exodus", method: "GET", template: "/stream/non-login/user/:username", auth: "main" },
   /**
    * Trending posts. A POST that READS — the date/cursor triple does not fit a URL, so Stockbit's own
@@ -293,7 +294,7 @@ export const EXODUS_ROUTES = {
     auth: "main",
   },
   screenerFavoriteAdd: { host: "exodus", method: "POST", template: "/screener/favorites", auth: "main" },
-  screenerFavoriteRemove: { host: "exodus", method: "DELETE", template: "/screener/favorites", auth: "main" },
+  screenerFavoriteRemove: { host: "exodus", method: "DELETE", template: "/screener/favorites/:templateId", auth: "main" },
   screenerFinItems: { host: "exodus", method: "GET", template: "/screener/finitem-watchlist", auth: "main" },
 
   /* ------------------------------- watchlist ------------------------------- */

@@ -895,9 +895,20 @@ export type UnderwriterSortBy = (typeof UNDERWRITER_SORT_BY)[number];
 
 /** The underwriter directory: every code, with whatever the row carries about the house. */
 export async function getUnderwriters(): Promise<RowSet> {
-  return cached("corpaction:underwriters", CACHE.keystatsTtlMs, () =>
-    fetchRows("underwriters", "underwriters"),
-  );
+  return cached("corpaction:underwriters", CACHE.keystatsTtlMs, async () => {
+    try {
+      return await fetchRows("underwriters", "underwriters");
+    } catch (error) {
+      if (error instanceof StockbitError && error.status === 404) {
+        throw new StockbitError("not_found",
+          "Stockbit's underwriter directory endpoint is unavailable (HTTP 404), so this server cannot list all houses. " +
+          "The individual IPO-performance endpoint still works: call underwriters with an underwriter_code " +
+          "read from Stockbit's IPO information (for example YP). This is not an empty directory or an expired login.",
+          { status: 404 });
+      }
+      throw error;
+    }
+  });
 }
 
 export interface UnderwriterPerformance extends RowSet {

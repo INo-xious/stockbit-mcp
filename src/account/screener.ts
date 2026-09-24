@@ -21,7 +21,7 @@ import { deleteJson, postJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
 import { invalidateCache } from "../core/_util.js";
 import { getScreenerTemplates } from "../core/screener.js";
-import { buildScreenBody, type ScreenRule, type ScreenScope } from "../core/screenerrun.js";
+import { buildScreenBody, type ScreenRule, type ScreenScope, type ScreenBody } from "../core/screenerrun.js";
 import { verifiedWrite, type AccountResult } from "./log.js";
 
 function invalidate(): void {
@@ -51,13 +51,7 @@ function requireTemplateId(id: string): string {
 }
 
 /** The saved-screen body: the ad-hoc one, with a name and the flag that makes it persist. */
-export interface SavedScreenBody {
-  save: "1";
-  name: string;
-  rules: Array<{ metric: string; operator: string; value: string }>;
-  scope?: string;
-  scopeID?: string;
-}
+export type SavedScreenBody = Omit<ScreenBody, "save"> & { save: "1" };
 
 /**
  * Build it.
@@ -77,13 +71,7 @@ export function buildSavedScreenBody(
     throw new StockbitError("invalid_param", `That name is ${trimmed.length} characters; the limit here is 100.`);
   }
   // The rule validation lives in one place. Reimplementing it here is how the two paths drift.
-  const { rules: built, scope: builtScope, scopeID } = buildScreenBody(rules, scope);
-  return {
-    save: "1",
-    name: trimmed,
-    rules: built,
-    ...(builtScope ? { scope: builtScope, scopeID } : {}),
-  };
+  return { ...buildScreenBody(rules, scope), save: "1", name: trimmed };
 }
 
 /**
@@ -123,8 +111,7 @@ export async function saveScreen(options: {
     verify: async () => {
       const after = await getScreenerTemplates();
       const fresh = after.find((template) => !beforeIds.has(template.id) && template.name === body.name);
-      const byName = after.find((template) => template.name === body.name);
-      return { verified: Boolean(fresh ?? byName), detail: { id: (fresh ?? byName)?.id, name: body.name } };
+      return { verified: Boolean(fresh), detail: { id: fresh?.id, name: body.name } };
     },
   });
 }
@@ -185,14 +172,17 @@ export async function favoriteScreen(options: {
     `${options.favorite ? "favourite" : "un-favourite"} saved screen ${id}`,
   );
 
+  const target = (await getScreenerTemplates()).find((template) => template.id === id);
+  if (!target) throw new StockbitError("not_found", "No saved screen with this id; nothing was sent.");
+
   return verifiedWrite({
     action: options.favorite ? "screener_favorite_add" : "screener_favorite_remove",
     target: id,
     lockKey: "screener",
     write: () =>
       options.favorite
-        ? postJson("screenerFavoriteAdd", { body: { template_id: id } })
-        : deleteJson("screenerFavoriteRemove", { body: { template_id: id } }),
+        ? postJson("screenerFavoriteAdd", { body: { screenerid: id, type: target.type } })
+        : deleteJson("screenerFavoriteRemove", { segments: { templateId: id }, params: { type: target.type } }),
     invalidate,
     verify: async () => {
       const found = (await getScreenerTemplates()).find((template) => template.id === id);

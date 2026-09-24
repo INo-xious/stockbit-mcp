@@ -18,7 +18,7 @@ export function registerScreenerTools(define: Definer): void {
     "screener_run",
     "Run an ad-hoc stock screen over Stockbit's IDX metric catalogue and get the matching stocks.\n" +
       "Creates NOTHING. The request carries Stockbit's own run-but-do-not-save flag, and no argument " +
-      "to this tool can change it — saving a screen is a separate tool that does not exist yet.\n" +
+      "to this tool can change it — saving uses the separate confirmation-gated screener_save tool.\n" +
       "Rules are combined with AND. There is NO OR: for \"A or B\", call this twice and union the " +
       "symbols yourself. A single call cannot express it, and pretending otherwise would return a " +
       "confident answer to a different question.\n" +
@@ -27,14 +27,13 @@ export function registerScreenerTools(define: Definer): void {
       "built on broker-level flow.\n" +
       "`watchlist_id` scopes the screen to that watchlist's members instead of the default universe, " +
       "which is how \"which of MY stocks is accumulating\" becomes one call. Scoping to an index " +
-      "(IDX30, LQ45…) is NOT supported: the scope spelling for an index has not been observed.\n" +
-      "`limit` trims the returned list after the fact; `count` stays the true number of matches and " +
-      "`truncated` says the list was cut.\n" +
-      "PENDING: apart from the save flag, this request shape has not been observed on the wire. The " +
-      "body that was sent comes back in `request`, and `matches: null` means the rows were not where " +
-      "they were looked for in the response — that is NOT \"no stock matched\" (which is `matches: []` " +
-      "with `count: 0`). When it is null the whole payload is attached as `raw` so the real shape can " +
-      "be reported.",
+      "(IDX30, LQ45…) is NOT supported by this tool.\n" +
+      "`page` selects a one-based upstream page. `totalMatches`, `pageSize` and `hasMore` describe " +
+      "upstream pagination. `limit` trims that page locally; `count` stays its number of projected " +
+      "matches and `truncated` says local trimming occurred.\n" +
+      "The unsaved request and data.calcs response were observed live. `matches: null` means the " +
+      "response list could not be located, not that no stocks matched. Missing pagination fields " +
+      "remain null. Watchlist scoping follows the public frontend; the live run covered the IHSG universe.",
     {
       rules: z
         .array(
@@ -50,15 +49,18 @@ export function registerScreenerTools(define: Definer): void {
         .string()
         .optional()
         .describe("Screen only this watchlist's members. Numeric id from the `watchlist` tool."),
-      limit: z.coerce.number().optional().describe("Trim the returned matches to this many"),
+      limit: z.coerce.number().int().positive().optional().describe("Trim this page's matches to this many"),
+      page: z.number().int().positive().optional().describe("One-based upstream page, default 1"),
     },
     async (a) =>
       runTool(() =>
         core.runScreen(a.rules as core.ScreenRule[], {
           scope: a.watchlist_id === undefined ? undefined : core.watchlistScope(a.watchlist_id as string),
           limit: a.limit as number | undefined,
+          page: a.page as number | undefined,
         }),
       ),
+    { evidence: "observed" },
   );
 
   define.read(
@@ -107,16 +109,19 @@ export function registerScreenerTools(define: Definer): void {
 
   define.read(
     "watchlist_search",
-    "Search Stockbit's company directory by keyword — the lookup behind the watchlist's add-a-stock " +
-      "box. Use it to turn a company name into an IDX ticker.\n" +
-      "An empty keyword is refused rather than sent, because the endpoint would answer it with either " +
-      "everything or nothing and both read like a real result.\n" +
-      "PENDING: this route has not been probed, so rows are returned unprojected — which key holds the " +
-      "ticker is not confirmed and naming one now would ship a field that is always empty. " +
+    "Search company suggestions for a specific watchlist's add-a-stock box. Pass watchlist_id from " +
+      "the watchlist tool: it is required upstream and determines membership flags in the results. " +
+      "This read does not add or remove stocks.\n" +
+      "An empty keyword is refused. page starts at 1; hasMore reports whether another page exists. " +
+      "Rows retain Stockbit's fields without guessing a ticker projection. " +
       "`rows: []` with `count: 0` means nothing matched the keyword; `rows: null` means the response " +
-      "held no list where one was looked for, and the raw body is attached.\n" +
-      "This searches ALL listed companies, not the user's watchlists.",
-    { keyword: z.string().describe("Company name or ticker fragment, e.g. \"bank rakyat\" or \"BBR\"") },
-    async (a) => runTool(() => core.searchCompanies(a.keyword as string)),
+      "held no list where one was looked for, and the raw body is attached.",
+    {
+      keyword: z.string().describe("Company name or ticker fragment, e.g. \"bank rakyat\" or \"BBR\""),
+      watchlist_id: z.string().describe("Numeric watchlist id from the watchlist tool"),
+      page: z.number().int().positive().optional().describe("One-based page, default 1"),
+    },
+    async (a) => runTool(() => core.searchCompanies(a.keyword as string, a.watchlist_id as string, a.page as number | undefined)),
+    { evidence: "observed" },
   );
 }

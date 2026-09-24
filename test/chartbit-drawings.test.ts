@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
-import { chartIdFromLayout, getChartDrawings } from "../src/chartbit/api.ts";
+import { chartIdFromLayout, getChartDrawings, listChartbitTemplates } from "../src/chartbit/api.ts";
 import { encodeDrawings, encodeLayoutContent } from "../src/chartbit/codec.ts";
 import { StockbitError } from "../src/http/errors.ts";
 
@@ -107,6 +107,7 @@ before(() => {
     if (u.includes("/chartbit/charts/")) {
       return json({ data: { content: layoutContent ?? encodeLayoutContent(ONE_CHART) } });
     }
+    if (/\/chartbit\/(settings|studies|drawings)(?:\?|$)/.test(u)) return json({data: []});
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
 });
@@ -195,7 +196,7 @@ test("a layout id is enough: the chart id is read out of the layout and sent", a
 });
 
 test("an explicit chart id is used as given and costs no extra request", async () => {
-  const result = await getChartDrawings({ layoutId: "8801", chartId: "3" });
+  const result = await getChartDrawings({ layoutId: "8801", chartId: "3", symbol: "BBRI" });
   assert.equal(lastUrl("/chartbit/chart-drawings").searchParams.get("chart_id"), "3");
   assert.ok(!seenUrls.some((u) => u.includes("/chartbit/charts/")), "the layout was not read");
   assert.equal(result.chartIdDerived, false);
@@ -251,4 +252,26 @@ test("an empty layout is a refusal, not a chart with no drawings", async () => {
   // chart has no drawings on it" are different answers, and the second one would be an invention.
   layoutContent = "";
   await assert.rejects(() => getChartDrawings({ layoutId: "8803" }), StockbitError);
+});
+
+
+test("drawings derive the required symbol from the selected layout chart", async () => {
+  layoutContent = encodeLayoutContent(REAL_NESTING);
+  const result = await getChartDrawings({ layoutId: "8810" });
+  assert.equal(result.symbol, "IHSG");
+  assert.equal(lastUrl("/chartbit/chart-drawings").searchParams.get("symbol"), "IHSG");
+});
+
+test("an explicit chart without a symbol cannot send an incomplete drawings request", async () => {
+  await assert.rejects(() => getChartDrawings({ chartId: "1" }), /requires symbol/);
+  assert.ok(!seenUrls.some(u => u.includes("chart-drawings")));
+});
+
+
+test("drawing template reads include the required line-tool type", async () => {
+  const result = await listChartbitTemplates("LineToolTrendLine");
+  assert.equal(lastUrl("/chartbit/drawings").searchParams.get("tool_name"), "LineToolTrendLine");
+  assert.equal(result.drawingTool, "LineToolTrendLine");
+  await listChartbitTemplates();
+  assert.equal(lastUrl("/chartbit/drawings").searchParams.get("tool_name"), "LineToolHorzLine");
 });

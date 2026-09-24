@@ -70,23 +70,11 @@ export function registerChartbitTools(define: Definer): void {
 
   define.read(
     "chartbit_drawings",
-    "What the user has actually DRAWN on a chart, as stored by Stockbit: each line tool with its " +
-      "type, its anchor points as {time, price}, and its text.\n" +
-      "This is analysis context. Levels the user drew by hand are a statement about what they think " +
-      "matters, and reading them before offering an opinion is the difference between advice and " +
-      "noise.\n" +
-      "PASS `layout_id`, from chartbit_layouts. Stockbit stores each chart's drawings against the " +
-      "CHART's id rather than the layout's, and this endpoint answers 400 to every call that does " +
-      "not carry one — with no arguments, with `{symbol}`, and with a valid layout_id and symbol " +
-      "together. You do not have to find that id: given layout_id it is decoded out of the layout " +
-      "itself, at the cost of one extra request, and comes back as `chartId` alongside " +
-      "`chartIdDerived: true`. Verified against a real account on 2026-09-01, which is also when " +
-      "the 400 stopped.\n" +
-      "A layout holding several charts is resolved by `symbol`, using the layout's own chart-to-" +
-      "symbol map. If that map names no chart for your symbol, or names more than one, you are " +
-      "asked for `chart_id` rather than given a guess — each chart has its own drawing store, so " +
-      "the wrong id returns another chart's lines and looks like it worked.\n" +
-      "Times are UNIX seconds. An empty list means nothing is saved for that chart.",
+    "Read the drawings saved on a Stockbit chart: tool type, anchor points and text. " +
+      "Stockbit requires both chart_id and symbol. Pass layout_id to derive them from the saved layout; " +
+      "if a layout has several charts, pass symbol or chart_id to identify the intended one. " +
+      "Missing or ambiguous metadata is refused rather than returning another chart's drawings. " +
+      "The live browser view may differ until chartbit_save persists changes. Times are UNIX seconds.",
     {
       symbol: z.string().optional().describe("IDX ticker, e.g. BBRI"),
       layout_id: z.string().optional().describe("Layout id from chartbit_layouts. Needed unless you pass chart_id."),
@@ -115,12 +103,11 @@ export function registerChartbitTools(define: Definer): void {
 
   define.read(
     "chartbit_templates",
-    "The saved chart, study and drawing templates on the account — the named presets the user has " +
-      "made in Stockbit's own chart UI.\n" +
-      "Read-only. Useful for knowing what the user has set up before suggesting they configure " +
-      "something they already have.",
-    {},
-    async () => runTool(() => api.listChartbitTemplates()),
+    "Read saved chart and study templates, plus drawing templates for one TradingView line-tool type. " +
+      "Drawing templates default to horizontal lines (LineToolHorzLine); the returned drawingTool " +
+      "names the requested type. Pass drawing_tool for another type, such as LineToolTrendLine.",
+    { drawing_tool: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,99}$/).optional().describe("TradingView line-tool type; default LineToolHorzLine") },
+    async (a) => runTool(() => api.listChartbitTemplates(a.drawing_tool)),
   );
 
   /* ---------------------------------- REST writes ---------------------------------- */
@@ -307,6 +294,7 @@ export function registerChartbitTools(define: Definer): void {
     "Remove drawings from the user's real chart.\n" +
       'scope "ours" removes only what this server drew, working from a local record of the entity ' +
       "ids it created — it cannot touch the user's own work, and needs no confirmation.\n" +
+      "Pass shape_ids with scope ours to remove only selected server-created drawings, leaving older analysis intact.\n" +
       'scope "all" removes EVERYTHING on the chart, including analysis the user drew by hand that ' +
       "this server has never seen and cannot restore. It requires `confirm: true`.\n" +
       "`alreadyGone` lists drawings this server had recorded that the chart no longer has — normally " +
@@ -314,6 +302,7 @@ export function registerChartbitTools(define: Definer): void {
     {
       symbol: z.string().describe("IDX ticker"),
       scope: z.enum(["ours", "all"]).describe('"ours" is safe; "all" deletes the user\'s own drawings too'),
+      shape_ids: z.array(z.string().min(1)).min(1).max(1000).optional().describe("Optional subset of server-created entity IDs from chartbit_draw or chartbit_shapes; scope ours only"),
       confirm: z.boolean().optional().describe('Required for scope "all"'),
       headless: z.boolean().optional(),
     },
@@ -322,6 +311,7 @@ export function registerChartbitTools(define: Definer): void {
         driver.clearDrawings({
           symbol: a.symbol as string,
           scope: a.scope as "ours" | "all",
+          shapeIds: a.shape_ids,
           confirm: a.confirm as boolean | undefined,
           headless: a.headless as boolean | undefined,
         }),

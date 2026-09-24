@@ -169,7 +169,7 @@ export interface StatusReport {
   auth: Record<StoreSlot, SlotStatus>;
   login: LoginStatus;
   trading: {
-    /** `off`, `paper` or `live` — the one field that answers "what happens if I place an order". */
+    /** `off` or `paper` — whether the local paper-order simulation is enabled. */
     mode: TradingMode;
     live: boolean;
     enabled: boolean;
@@ -182,7 +182,7 @@ export interface StatusReport {
     /** When the owner last revoked every standing "don't ask again", or null. */
     confirmationsRevokedAt: string | null;
     /**
-     * The live "don't ask again", if there is one in THIS process.
+     * The active paper-order "don't ask again" grant, if there is one in THIS process.
      *
      * The whole point of putting it on `status` is that "will I be asked?" is a question about
      * memory that no file can answer, and a user who ticked a box twenty minutes ago has no other
@@ -266,7 +266,7 @@ export interface CollectStatusOptions {
    * Tool NAMES this profile kept out, so `status` can explain a missing tool.
    *
    * Names, not families. A family with one skipped tool is not a family that is absent, and
-   * `STOCKBIT_TOOLS=core,order_preview,order_buy,…` registers every order tool while leaving
+   * `STOCKBIT_TOOLS=core,paper_order_preview,paper_order_buy,…` registers paper order tools while leaving
    * `order_history` and friends behind — which at family granularity read as "no order tools at
    * all" and hijacked `nextStep` away from the advice the user actually needed.
    */
@@ -495,14 +495,14 @@ function nextStepFor(
   }
   if (!auth.securities.stored) {
     return (
-      "Market data works. Portfolio, positions and order entry additionally need " +
+      "Market data works. Read-only portfolio, positions and order history additionally need " +
       "`stockbit-auth trading-login` in a terminal (optional) — or try paper trading first with " +
       "`stockbit-auth trading-enable --paper`."
     );
   }
   if (trading.mode === "off") {
     return (
-      "Everything reads. Order entry is off — try it on paper first with " +
+      "Everything reads. Local paper simulation is off — enable it with " +
       "`stockbit-auth trading-enable --paper`, which needs no PIN and no real money."
     );
   }
@@ -724,35 +724,10 @@ export async function collectStatus(options: CollectStatusOptions = {}): Promise
     });
   }
 
-  // The trap the default profile creates, and the reason it is worth a check of its own.
-  //
-  // `core` deliberately contains no order-entry tools. So a user who went to the trouble of running
-  // `trading-enable --live` at their own terminal — a deliberate, two-step, opt-in act — finds no
-  // order tool in the server and NOTHING anywhere saying why. Trading reports "on", the tools are
-  // simply absent, and the natural conclusion is that order entry is broken.
-  // By NAME, and with two different lists on purpose.
-  //
-  // `ORDER_ENTRY_CORE` is what "place an order" means, and is what TRIGGERS the warning — amend
-  // without preview and buy is not a coherent thing to warn about separately, and a profile that
-  // registers all four correctly produces no warning. But the sentence "it has no order-entry tools
-  // AT ALL" has to be measured against every order-entry tool including `order_amend`, or the
-  // report asserts something false about a registered, destructive write that changes a live order
-  // on the exchange.
-  //
-  // `eipo_order` is one of those tools and was missing from this list. It is a `destructiveHint`
-  // write that commits real money out of the RDN, it is gated on the same `policy.enabled`, and
-  // `instructions.ts` counts it as order entry — so under `STOCKBIT_TOOLS=eipo` this report said
-  // "no order-entry tools at all" on the same server whose instructions page said "PLACING AN ORDER
-  // IS TWO STEPS, ALWAYS: eipo_order_preview…". Whichever of the two the user believed, one of them
-  // was lying to them about a live money write.
+  // Report when local paper simulation is enabled but its tools were omitted from the profile.
   const missing = new Set(options.missingTools ?? []);
-  const ORDER_ENTRY_CORE = ["order_preview", "order_buy", "order_sell", "order_cancel"];
-  const ORDER_ENTRY_ALL = [
-    ...ORDER_ENTRY_CORE,
-    "order_amend",
-    "eipo_order_preview",
-    "eipo_order",
-  ];
+  const ORDER_ENTRY_CORE = ["paper_order_preview", "paper_order_buy", "paper_order_sell", "paper_order_cancel"];
+  const ORDER_ENTRY_ALL = [...ORDER_ENTRY_CORE, "paper_order_amend"];
   const absentOrderTools = ORDER_ENTRY_CORE.filter((name) => missing.has(name));
   const noOrderToolsAtAll = ORDER_ENTRY_ALL.every((name) => missing.has(name));
   const tradingToolsMissing = trading.enabled && absentOrderTools.length > 0;
@@ -1029,7 +1004,7 @@ export function formatStatus(report: StatusReport): string {
     slot("Market data", report.auth.main),
     slot("Trading", report.auth.securities),
     slot("e-IPO", report.auth.eipo),
-    `Order placing    ${report.trading.mode.toUpperCase()} — ${report.trading.reason}`,
+    `Paper simulation ${report.trading.mode.toUpperCase()} — ${report.trading.reason}`,
     // Both clocks on the line, because this is where the three-timezone confusion was read. WIB
     // leads — it is the clock that decides whether a price can move — and the UTC stamp beside it
     // is what every other timestamp in this server is in.

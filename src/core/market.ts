@@ -25,6 +25,7 @@
  */
 import { z } from "zod";
 import { getJson } from "../http/client.js";
+import { getOrderbook } from "./pricefeed.js";
 import { StockbitError } from "../http/errors.js";
 import { cached, parseOr, wireNumber } from "./_util.js";
 import { CACHE } from "../config.js";
@@ -214,7 +215,7 @@ export function normalizeChartTimeframe(input: string): ChartTimeframe {
  * real spelling can be read off it in one call.
  */
 const POINT_KEYS = {
-  date: ["date", "time", "timestamp", "datetime", "t"],
+  date: ["date", "time", "timestamp", "datetime", "t", "formatted_date"],
   open: ["open", "o"],
   high: ["high", "h"],
   low: ["low", "l"],
@@ -241,8 +242,12 @@ export interface ChartSeries {
   timeframe: ChartTimeframe;
   /** Which code path produced these bars. The paged walk in `src/core/bars.ts` is the other one. */
   source: "charts";
-  /** Oldest first, matching every consumer of `Bar`. */
+  /** Daily dates or full Jakarta timestamps, according to granularity; oldest first. */
   bars: Bar[];
+  granularity: "daily" | "intraday";
+  timezone: "Asia/Jakarta";
+  /** Number of sentinel/missing primary timestamps recovered from the explicit formatted_date. */
+  dateFallbackCount: number;
   from?: string;
   to?: string;
   /** Where in the `data` block the point array was found. */
@@ -309,6 +314,12 @@ function projectSeries(
     else mapped[field] = key;
   }
 
+  // On this chart route value is the price level. It cannot also mean traded IDR.
+  if (mapped.close === "value" && mapped.value === "value") {
+    delete mapped.value;
+    if (!unmapped.includes("value")) unmapped.push("value");
+  }
+
   const describe = (row: Record<string, unknown>): string => Object.keys(row).join(", ") || "<empty>";
   if (mapped.date === undefined || mapped.close === undefined) {
     throw new StockbitError(
@@ -323,8 +334,25 @@ function projectSeries(
     return key === undefined ? null : wireNumber(row[key]);
   };
 
+  // The 1w LINE response is hourly, even though the route ends in /daily. Its last
+  // live point uses date="0" and carries the real clock in formatted_date (observed 2026-09-24).
+  const intraday = located.rows.some((row) => typeof row.formatted_date === "string" &&
+    /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(row.formatted_date));
+  let dateFallbackCount = 0;
   const bars: Bar[] = located.rows.map((row, index) => {
-    const date = tradeDate(row[mapped.date as string]);
+    const primaryDate = tradeDate(row[mapped.date as string]);
+    const fallbackDate = tradeDate(row.formatted_date);
+    let date = primaryDate ?? fallbackDate;
+    if (primaryDate === null && fallbackDate !== null) dateFallbackCount++;
+    if (intraday) {
+      // Use the observed wall-clock timestamp without throwing away the hour. Collapsing it
+      // to a date would present 31 hourly observations as 31 daily candles.
+      const wall = row.formatted_date;
+      if (typeof wall !== "string" || !/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}$/.test(wall)) {
+        throw new StockbitError("schema_drift", `Intraday chart point ${index} has no usable formatted_date timestamp.`);
+      }
+      date = `${wall.replace(" ", "T")}+07:00`;
+    }
     const close = read(row, "close");
     if (date === null || close === null) {
       throw new StockbitError(
@@ -362,6 +390,8 @@ function projectSeries(
   bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   const warnings: string[] = [];
+  if (intraday) warnings.push("This is an intraday series, not daily bars. Dates preserve Stockbit's Jakarta wall-clock timestamps; do not interpret one point as one trading day.");
+  if (dateFallbackCount) warnings.push(`${dateFallbackCount} point(s) used formatted_date because the primary date was missing or a zero sentinel.`);
   // Absent is not the only way to be flat. /charts/:symbol/daily sends open/high/low/volume as
   // EMPTY STRINGS, so the keys are mapped, `unmapped` stays clean, and `wireNumber("")` returns null
   // — every bar silently took its close for all three and nothing said so. A field that reads null
@@ -390,15 +420,19 @@ function projectSeries(
   }
 
   const consumed = new Set(Object.values(mapped));
+  if (intraday || dateFallbackCount) consumed.add("formatted_date");
   return {
     symbol,
     timeframe,
     source: "charts",
+    granularity: intraday ? "intraday" : "daily",
+    timezone: "Asia/Jakarta",
+    dateFallbackCount,
     bars,
     from: bars[0]?.date,
     to: bars[bars.length - 1]?.date,
     dataPath: located.path,
-    mapped,
+    mapped: intraday ? { ...mapped, date: "formatted_date" } : mapped,
     unmapped,
     extraKeys: Object.keys(first).filter((k) => !consumed.has(k)),
     warnings,
@@ -1244,47 +1278,51 @@ export async function getPricesBatch(symbols: readonly string[]): Promise<Prices
 
 /* ================================ market prices ================================ */
 
-/** Board names are passed through uppercased and unprefixed; see `getMarketPrices`. */
-const BOARD_RE = /^[A-Z][A-Z0-9_]{1,19}$/;
+const MARKET_BOARD_LABELS: Readonly<Record<string, string>> = {
+  ALL: "All Market", "ALL MARKET": "All Market", REGULER: "Regular", REGULAR: "Regular", RG: "Regular",
+  NEGO: "Nego", NG: "Nego", CASH: "Cash", TUNAI: "Cash", TN: "Cash",
+};
 
 export interface MarketPricesOptions {
   symbol: string;
-  /** `YYYY-MM-DD`. Omitted means the current session. */
+  /** Unsupported by the current-session orderbook source; supplied dates are refused. */
   date?: string;
-  /** Market boards, e.g. REGULER, NEGO, TUNAI. Sent as repeated parameters. */
+  /** Case-insensitive board labels or RG/NG/TN aliases. Omit for all boards. */
   boards?: readonly string[];
 }
 
-/**
- * One symbol's prices broken down by market board, for a session.
- *
- * ## This endpoint cannot be called. It is not a vocabulary problem.
- *
- * Measured 2026-09-01: `/company-price-feed/prices/BBRI/market` answers **400
- * `Silahkan Periksa permintaan` with no query parameters at all** — a bare call, nothing to be
- * wrong about. It also refuses every board spelling tried (`REGULER`, `RG`, `regular`, `REGULAR`,
- * `TN`, `NG`, `CASH`, `ALL`, `MARKET_TYPE_REGULAR`, `MARKET_TYPE_ALL`, `BOARD_REGULAR`, `1`, `0`)
- * under every key tried (`market`, `board`, `market_type`, `type`).
- *
- * A bare call being refused is what settles it: if no arguments is also an error, then no argument
- * combination can be the fix. Earlier passes read the 400s as "the board vocabulary is unknown" and
- * kept probing spellings; the missing control was the empty request.
- *
- * **The workaround exists and returns the same information.** `orderbook`'s `market_data[]` already
- * carries the per-board split (All Market / Regular / Nego / Cash) for a symbol.
- *
- * This therefore refuses locally and names the alternative, rather than offering arguments for a
- * call that cannot succeed. A tool that cannot be called should say so — spending a round trip to
- * be told the request is invalid teaches the caller nothing this comment does not.
- */
-export async function getMarketPrices(opts: MarketPricesOptions): Promise<unknown> {
-  throw new StockbitError(
-    "upstream",
-    "price_market cannot be called: /company-price-feed/prices/:symbol/market answers 400 " +
-      '"Silahkan Periksa permintaan" with NO parameters at all, and with every board spelling and ' +
-      "parameter name tried (measured 2026-09-01). Since a bare request is also refused, no " +
-      "argument combination fixes it. Use orderbook instead — its market_data[] already returns " +
-      "the per-board split (All Market / Regular / Nego / Cash) for a symbol.",
-  );
+export interface MarketPrices {
+  symbol: string;
+  source: "orderbook.market_data";
+  retrievedAt: string;
+  marketData: Array<Record<string, unknown>>;
+  note: string;
 }
 
+/**
+ * Per-board market activity from the working orderbook route. Verified 2026-09-24.
+ * The old /prices/:symbol/market endpoint is not used. No historical date is invented.
+ */
+export async function getMarketPrices(opts: MarketPricesOptions): Promise<MarketPrices> {
+  const symbol = normalizeSymbol(opts.symbol);
+  if (opts.date !== undefined) {
+    throw new StockbitError("invalid_param", "price_market uses the current orderbook and cannot honor a date filter. Omit date; historical per-board data is unavailable from this source.");
+  }
+  const labels = opts.boards?.map((board) => {
+    const label = MARKET_BOARD_LABELS[String(board).trim().toUpperCase()];
+    if (!label) throw new StockbitError("invalid_param", `Unknown market board ${JSON.stringify(board)}. Use ALL, REGULAR (RG), NEGO (NG), or CASH (TN).`);
+    return label;
+  });
+  const book = await getOrderbook(symbol);
+  const rows = isRow(book) ? book.market_data : undefined;
+  if (!Array.isArray(rows) || !rows.every(isRow)) {
+    throw new StockbitError("schema_drift", `The orderbook for ${symbol} did not contain a market_data array.`);
+  }
+  return {
+    symbol,
+    source: "orderbook.market_data",
+    retrievedAt: new Date().toISOString(),
+    marketData: labels ? rows.filter((row) => labels.includes(String(row.label))) : rows,
+    note: "Per-board activity from Stockbit's current orderbook snapshot. No historical date filter was applied; fields are returned as received and are not a per-board last-price series.",
+  };
+}

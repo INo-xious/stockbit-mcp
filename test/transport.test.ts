@@ -59,7 +59,7 @@ test("the permitted request set on EXODUS is exactly this list", () => {
   assert.deepEqual(permittedRequests("exodus"), [
     "DELETE /chartbit/charts/:layoutId",
     "DELETE /chartbit/settings/:templateName",
-    "DELETE /screener/favorites",
+    "DELETE /screener/favorites/:templateId",
     "DELETE /screener/templates/:templateId",
     "DELETE /watchlist/:watchlistId",
     "DELETE /watchlist/:watchlistId/company/:companyId/item",
@@ -150,10 +150,13 @@ test("the permitted request set on EXODUS is exactly this list", () => {
     "GET /sekuritas/auth/token",
     "GET /stream/non-login/user/:username",
     "GET /stream/v3",
-    "GET /stream/v3/post/:postId",
     "GET /stream/v3/symbol/:symbol",
     "GET /stream/v3/symbol/:symbol/pinned",
     "GET /user-setting/configurations",
+    "GET /virtualtrading/config/formula",
+    "GET /virtualtrading/order",
+    "GET /virtualtrading/portfolio",
+    "GET /virtualtrading/portfolio/:symbol",
     "GET /watchlist",
     "GET /watchlist/:watchlistId",
     "GET /watchlist/:watchlistId/symbols",
@@ -166,7 +169,13 @@ test("the permitted request set on EXODUS is exactly this list", () => {
     "POST /screener/favorites",
     "POST /screener/templates",
     "POST /screener/templates",
+    "POST /stream/v3/post/:postId",
     "POST /stream/v3/trending",
+    "POST /virtualtrading/account/activate",
+    "POST /virtualtrading/amend",
+    "POST /virtualtrading/buy/:symbol",
+    "POST /virtualtrading/cancel",
+    "POST /virtualtrading/sell/:symbol",
     "POST /watchlist",
     "POST /watchlist/:watchlistId/company/item",
     "PUT /chartbit/charts/:layoutId",
@@ -178,10 +187,10 @@ test("the permitted request set on EXODUS is exactly this list", () => {
 
 test("the permitted request set on CARINA is exactly this list", () => {
   // The trading host: the unlock chain, and the account reads that describe money. Every row is a
-  // GET except the four that manage the session itself — the order writes are a separate increment
-  // and have to edit this list, and ORDER_WRITES below, to arrive.
+  // GET except the three that manage the session itself. Real-money writes are absent (ADR-0012).
   assert.deepEqual(permittedRequests("carina"), [
     "GET /account",
+    "GET /account/personal",
     "GET /balance/cash",
     "GET /balance/cash/info",
     "GET /formula/v2",
@@ -200,26 +209,20 @@ test("the permitted request set on CARINA is exactly this list", () => {
     "GET /trading/info",
     "GET /v2/sub-account/list",
     "POST /auth/logout",
-    "POST /auth/pin/validate",
     "POST /auth/refresh",
     "POST /auth/v2/login",
-    "POST /order/v2/amend",
-    "POST /order/v2/buy",
-    "POST /order/v2/cancel",
-    "POST /order/v2/sell",
   ]);
 });
 
-test("every carina route is a GET unless it is named as a session or an order route", () => {
+test("every carina route is a GET unless it is named as a session route", () => {
   // Two claims in one. A non-GET that is not on either list below would be a write arriving as an
   // ordinary row — the bulk-amend and bulk-cancel endpoints exist on this host and have no tool, no
   // argument for one, and therefore no route. And a route here carrying the MAIN token would be the
   // market-data credential sent to the brokerage, presented somewhere it was never issued for.
-  const session = new Set(["carinaAuthLogin", "carinaAuthLogout", "carinaAuthPinValidate", "carinaAuthRefresh"]);
-  const orders = new Set(["orderBuy", "orderSell", "orderAmend", "orderCancel"]);
+  const session = new Set(["carinaAuthLogin", "carinaAuthLogout", "carinaAuthRefresh"]);
   // The two token-exchange rows are the exception and are asserted by name: the login carries no
   // credential of ours because it is what mints one, and the refresh carries the refresh token in
-  // the BODY rather than a header. Both are spelled out so a third exception cannot arrive quietly.
+  // both BODY and bearer. Both are spelled out so a third exception cannot arrive quietly.
   assert.equal(ROUTES.carinaAuthLogin.auth, "none");
   assert.equal(ROUTES.carinaAuthRefresh.auth, "refreshSecurities");
 
@@ -228,14 +231,13 @@ test("every carina route is a GET unless it is named as a session or an order ro
     if (name !== "carinaAuthLogin" && name !== "carinaAuthRefresh") {
       assert.equal(route.auth, "securities", `${name} must carry the securities credential, not ${route.auth}`);
     }
-    if (session.has(name) || orders.has(name)) continue;
-    assert.equal(route.method, "GET", `${name} is a ${route.method} on carina and is on neither named list`);
+    if (session.has(name)) continue;
+    assert.equal(route.method, "GET", `${name} is a ${route.method} on carina and is not a session route`);
   }
 });
 
 test("the permitted request set on API-SEKURITAS is exactly this list", () => {
-  // The e-IPO host. Two token rows, seven reads, and two POSTs — one of which is Stockbit's own dry
-  // run and one of which commits money. Both are named in EIPO_WRITES below.
+  // The e-IPO host. Only token exchange/refresh and reads remain (ADR-0012).
   assert.deepEqual(permittedRequests("sekuritas"), [
     "GET /eipo/company/detail",
     "GET /eipo/company/unboxing",
@@ -245,8 +247,6 @@ test("the permitted request set on API-SEKURITAS is exactly this list", () => {
     "GET /eipo/social/company/list",
     "GET /eipo/status",
     "GET /partner/refresh_token",
-    "POST /eipo/order",
-    "POST /eipo/order/verify",
     "POST /partner/eipo/access_token",
   ]);
 });
@@ -265,7 +265,6 @@ const SESSION_WRITES = [
   // Mutate session state only. No account data is touched by any of these.
   "carinaAuthLogin",
   "carinaAuthLogout",
-  "carinaAuthPinValidate",
   "carinaAuthRefresh",
   "eipoAccessToken",
   "loginRefresh",
@@ -288,25 +287,8 @@ const CHARTBIT_WRITES = [
   "chartbitSettingsCreate",
 ];
 
-/**
- * ADR-0004. The four routes that move money.
- *
- * Four, and only these four. `/order/v2/amend/bulk`, `/order/v2/bulk-cancel` and the whole
- * day-trade family exist on this host and are deliberately absent: each would need its own argument
- * about what a confirmation means when one "yes" covers several orders, and none has been made.
- */
-const ORDER_WRITES = ["orderAmend", "orderBuy", "orderCancel", "orderSell"];
-
-/**
- * ADR-0004 as well, on the e-IPO host.
- *
- * `eipoOrderVerify` is a POST that changes nothing: it is Stockbit's own dry run, and the whole
- * reason `eipo_order_preview` can tell a user their subscription would be refused before committing
- * anything. It is listed as a write anyway, because the classification is by METHOD and not by
- * intent — a route that this project believes is harmless is exactly the kind of belief this
- * tripwire exists to make someone write down.
- */
-const EIPO_ORDER_WRITES = ["eipoOrderPlace", "eipoOrderVerify"];
+/** ADR-0013. Stockbit website simulation, restricted to exodus /virtualtrading. */
+const VIRTUAL_WRITES = ["virtualActivate", "virtualAmend", "virtualBuy", "virtualCancel", "virtualSell"];
 
 /**
  * ADR-0006. Watchlist and screener edits.
@@ -350,14 +332,15 @@ const READ_SHAPED_POSTS = [
   "screenerRun",
   // Trending posts. The date/cursor triple does not fit in a URL, so Stockbit's client posts it.
   "streamTrending",
+  // Post detail is read via an empty-body POST in the current website. ADR-0014.
+  "streamPost",
 ];
 
 test("every non-GET route belongs to exactly one named write class", () => {
   const declared = [
     ...SESSION_WRITES,
     ...CHARTBIT_WRITES,
-    ...ORDER_WRITES,
-    ...EIPO_ORDER_WRITES,
+    ...VIRTUAL_WRITES,
     ...ACCOUNT_WRITES,
     ...READ_SHAPED_POSTS,
   ].sort();
@@ -386,7 +369,6 @@ test("the session writes touch the session and nothing else", () => {
     "/login/refresh",
     "/auth/v2/login",
     "/auth/refresh",
-    "/auth/pin/validate",
     "/auth/logout",
     "/partner/eipo/access_token",
   ];
@@ -416,16 +398,15 @@ test("the chart writes touch only the user's chart", () => {
   assert.equal(buildUrl("chartbitDrawingsSave"), `${EXODUS}/chartbit/chart-drawings`);
 });
 
-test("the e-IPO writes touch only e-IPO, and only this account's own subscription", () => {
-  // The same property the chart writes have, on the other host: nothing in this class can reach the
-  // token exchange, the RDN balance as a write, or anything belonging to another offering.
-  for (const name of EIPO_ORDER_WRITES) {
+test("virtual writes are isolated from live brokerage and use only the main session", () => {
+  for (const name of VIRTUAL_WRITES) {
     const route = ROUTES[name as RouteName];
-    assert.ok(route.template.startsWith("/eipo/order"), `${name} (${route.template}) is outside e-IPO order entry`);
-    assert.equal(route.auth, "eipo", `${name} must carry the e-IPO credential, not ${route.auth}`);
+    assert.ok(route.template.startsWith("/virtualtrading/"), `${name} is outside virtual trading`);
+    assert.equal(route.host, "exodus");
+    assert.equal(route.auth, "main");
   }
-  assert.equal(buildUrl("eipoOrderPlace"), `${SEKURITAS}/eipo/order`);
-  assert.equal(buildUrl("eipoOrderVerify"), `${SEKURITAS}/eipo/order/verify`);
+  assert.equal(buildUrl("virtualBuy", { symbol: "BBCA" }), `${EXODUS}/virtualtrading/buy/BBCA`);
+  assert.equal(buildUrl("virtualSell", { symbol: "BBCA" }), `${EXODUS}/virtualtrading/sell/BBCA`);
 });
 
 test("the account writes touch only watchlists and the screener", () => {
@@ -463,6 +444,12 @@ test("the writes that would matter most are absent, by every verb", () => {
     ["POST", EXODUS, "/user-setting/configurations"],
     ["POST", CARINA, "/order/day-trade/v1/buy"],
     ["POST", CARINA, "/order/v2/bulk-cancel"],
+    ["POST", CARINA, "/order/v2/buy"],
+    ["POST", CARINA, "/order/v2/sell"],
+    ["POST", CARINA, "/order/v2/amend"],
+    ["POST", CARINA, "/order/v2/cancel"],
+    ["POST", SEKURITAS, "/eipo/order"],
+    ["POST", SEKURITAS, "/eipo/order/verify"],
     ["POST", SEKURITAS, "/smart-order/bracket-order/v1/order"],
     ["DELETE", SEKURITAS, "/smart-order/stop-order/v1/order/1"],
   ];
@@ -533,7 +520,7 @@ test("each route's token domain is the one its host's session actually holds", (
   assert.equal(domainOf("emittenInfo"), "main");
   assert.equal(domainOf("loginRefresh"), "main");
   assert.equal(domainOf("carinaAuthRefresh"), "securities");
-  assert.equal(domainOf("carinaAuthPinValidate"), "securities");
+  assert.equal(domainOf("accountPersonal"), "securities");
   assert.equal(domainOf("eipoRefreshToken"), "eipo");
   // The two token-exchange endpoints take no credential of OURS — they take a grant, in the body.
   assert.equal(domainOf("carinaAuthLogin"), null);
@@ -686,7 +673,7 @@ test("a write sends its body as JSON and still refuses redirects", async () => {
 
 /* --------------------------- credential placement --------------------------- */
 
-test("carina's refresh carries its token in the BODY and sends no bearer", async () => {
+test("carina's refresh carries the REFRESH token in both JSON body and bearer", async () => {
   // This is the one thing about the trading chain that differs from the main session, and getting
   // it wrong is a 401 with nothing in the message to suggest where to look.
   const realFetch = globalThis.fetch;
@@ -701,7 +688,7 @@ test("carina's refresh carries its token in the BODY and sends no bearer", async
     await authenticatedRequest("carinaAuthRefresh", { token: "RTOK" });
     assert.equal(seenUrl, `${CARINA}/auth/refresh`);
     assert.equal(seen?.body, JSON.stringify({ refresh_token: "RTOK" }));
-    assert.equal(new Headers(seen?.headers).get("authorization"), null, "no bearer on this route");
+    assert.equal(new Headers(seen?.headers).get("authorization"), "Bearer RTOK", "refresh bearer matches Stockbit's refresh client");
   } finally {
     globalThis.fetch = realFetch;
   }

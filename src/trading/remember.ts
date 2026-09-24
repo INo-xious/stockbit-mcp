@@ -46,7 +46,7 @@
  *
  * ## What a grant may cover, and why this module does not decide it
  *
- * Only a NEW buy or sell. Not an amend, not a cancel, not an e-IPO subscription. That bound is
+ * Only a NEW buy or sell. Not an amend or a cancel. That bound is
  * `ConfirmationRequest.waivable`, stated by the caller in `src/trading/confirmation.ts`, and it is
  * stated rather than inferred on purpose: an earlier draft inferred it here from `valueIdr === null`
  * on the reasoning that a cancel and an amend carry no gross value, and that was simply false of an
@@ -102,7 +102,6 @@ let grant: RememberGrant | null = null;
 function policyKey(policy: TradingPolicy): string {
   return JSON.stringify([
     policy.mode,
-    policy.autoConfirm,
     policy.maxOrderValueIdr,
     policy.maxLotsPerOrder,
     [...policy.allowedSymbols].sort(),

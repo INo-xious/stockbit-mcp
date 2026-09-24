@@ -4,7 +4,7 @@
   "display_name": "Stockbit MCP",
   "version": "1.3.1",
   "description": "IDX market data, bandarmology and your Stockbit account inside Claude Desktop. Unofficial.",
-  "long_description": "The read-only half is one click: install, then say \"log me into Stockbit\" and sign in in the browser window that opens. Portfolio and order entry additionally need `stockbit-auth trading-login` (which asks for the PIN) and `stockbit-auth trading-enable --paper|--live` in a terminal — by design, so that nothing reachable from an assistant can turn trading on or handle a PIN.",
+  "long_description": "Market data, analysis, chart drawing, read-only brokerage portfolios, local paper simulation and Stockbit website virtual trading. Real-money execution is removed. Sign in through your own browser. Brokerage portfolio access additionally needs a securities session, unlocked through the local terminal; no tool accepts a PIN.",
   "author": {
     "name": "Darren Wang",
     "url": "https://github.com/Garit32"
@@ -35,6 +35,7 @@
         "${__dirname}/dist/bin/stockbit-mcp.js"
       ],
       "env": {
+        "STOCKBIT_MCP_TRANSPORT": "stdio",
         "STOCKBIT_TOOLS": "${user_config.tool_profile}",
         "STOCKBIT_NO_BROWSER": "${user_config.no_browser}"
       }
@@ -44,7 +45,7 @@
     "tool_profile": {
       "type": "string",
       "title": "Tool profile",
-      "description": "core (41 tools, the default) or all (138), or a comma-separated list of families",
+      "description": "core (default), all, or comma-separated families such as core,chartbit,virtual",
       "default": "core",
       "required": false
     },

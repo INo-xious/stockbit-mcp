@@ -1,46 +1,8 @@
 /**
- * The one gate every commitment passes through. ADR-0004, amended by ADR-0010.
- *
- * ## What changed, and why it is the whole module
- *
- * The gate used to open like this:
- *
- * ```ts
- * let via = options.confirm === true ? "explicit" : null;
- * …
- * if (!via && options.elicit) { … }          // never reached when confirm was true
- * ```
- *
- * `confirm` is a boolean the *calling model* sets. Elicitation is the only channel in MCP that
- * reaches the *person*. Seeding the gate from the boolean and guarding the ask behind `!via` meant
- * a model could skip the human entirely by asserting that the human had already agreed — and the
- * audit log recorded `via: "explicit"` for both cases, so afterwards nothing could tell them apart.
- * The project's own SECURITY.md already classified that: "a path that satisfies a confirmation the
- * user did not give … is a vulnerability in this project, whatever else it looks like."
- *
- * So the ask now runs BEFORE the `confirm` check, not after it, and it is not behind any `via` test
- * at all. A human who has not been asked gets asked; a human who says no is obeyed whatever the
- * model said; and `confirm: true` on a client that CAN ask is no longer a way past the person.
- *
- * ADR-0004 said elicitation was "in addition to the caller's confirmation, never instead of it".
- * That sentence is superseded and the ADR carries an amendment saying so. Requiring the model's
- * boolean *as well* as a human's click adds nothing — the human already clicked — while training
- * every model to send `confirm: true` unconditionally, which is the only gate left on clients that
- * cannot elicit.
- *
- * ## Why one module rather than two
- *
- * This logic existed twice, in `src/trading/orders.ts` and `src/eipo/order.ts`, and had already
- * drifted: the e-IPO copy had a shorter cap-missing message, no guard for a commitment with no
- * value, and no "Do not set it on their behalf". Two copies of a security gate is one gate and one
- * near-miss. This is the gate; both call it.
- *
- * ## Everything here throws, and nothing here sends
- *
- * Every refusal is a `StockbitError("invalid_param")` — the caller's to fix, not the server's — and
- * it is raised before any caller has built a request body. The callers keep their own ticket
- * handling around this: a ticket is peeked before the gate and spent after it, so a refusal costs
- * the user nothing but a sentence.
+ * Local paper-simulation consent. Ask through MCP elicitation before considering
+ * the caller's confirm boolean; a declined dialog always refuses. ADR-0010/0012.
+ * No setting can automatically confirm an order. A person may explicitly grant
+ * a short-lived waiver for subsequent local simulations of equal or lower value.
  */
 import { StockbitError } from "../http/errors.js";
 import type { TradingPolicy } from "../settings.js";
@@ -58,8 +20,6 @@ export type ConfirmationSource =
   | "elicited"
   /** A human-granted, in-memory "don't ask again" covered it. See `remember.ts`. */
   | "remembered"
-  /** The account owner's capped `autoConfirm` policy, set at a terminal. */
-  | "auto-confirm"
   /** `confirm: true`, and the client advertises no way to ask a person. */
   | "explicit-unelicited"
   /** `confirm: true`, and the account owner turned asking off themselves. */
@@ -70,8 +30,7 @@ export type ElicitationOutcome =
   | "accepted"
   | "remembered"
   | "unavailable"
-  | "disabled-by-policy"
-  | "waived-by-auto-confirm";
+  | "disabled-by-policy";
 
 export interface ConfirmationRequest {
   /** The caller's boolean. Necessary on a client that cannot ask; never sufficient on one that can. */
@@ -83,7 +42,7 @@ export interface ConfirmationRequest {
   summary: string;
   /** `grossIdr` / `amountIdr`. Null when the commitment has no gross value, as a cancel does not. */
   valueIdr: number | null;
-  noun: "order" | "subscription";
+  noun: "order";
   /**
    * May a standing "don't ask again" cover this, and may this dialog create one?
    *
@@ -94,13 +53,8 @@ export interface ConfirmationRequest {
    * *buy*, which is exactly the class of thing this file exists to make impossible. A security bound
    * that depends on a field happening to be null elsewhere is not a bound.
    *
-   * Only a NEW buy or sell is waivable. Not a cancel or an amend: those change something already
-   * working, and "I approve orders up to X rupiah" is consent to committing that much money, not to
-   * moving or withdrawing an order already on the book — `order_amend`'s own description calls an
-   * amend "a real order decision and not an edit". Not an e-IPO subscription either: it is a
-   * different commitment with different consequences (the allotment may be smaller than the
-   * subscription, and it cannot be cancelled by selling), and the person who ticked a box on an
-   * exchange order was never shown any of that.
+   * Only a NEW local paper buy or sell is waivable. A cancel and an amend modify
+   * an existing paper order, so they always require their own confirmation.
    */
   waivable: boolean;
 }
@@ -130,46 +84,24 @@ function refuse(message: string): never {
   throw new StockbitError("invalid_param", message);
 }
 
-/**
- * The refusal for "nobody confirmed this".
- *
- * When `autoConfirm` was configured but is not in effect, that is the fact worth saying instead:
- * the user set a switch and it is doing nothing, and falling through to the generic sentence would
- * be correct and useless. Both wordings end at the same place — nothing was sent.
- */
-function noConfirmation(policy: TradingPolicy, noun: ConfirmationRequest["noun"]): never {
-  if (policy.autoConfirmIgnored) refuse(`${policy.autoConfirmIgnored} Nothing was sent.`);
+/** The calling model must relay the summary and obtain consent. */
+function noConfirmation(): never {
   refuse(
-    `Refusing to send ${noun === "order" ? "an order" : "an IPO subscription"} without confirmation. Show the ` +
-      "user the ticket's `summary`, in words, and pass confirm: true only after they agree to THAT " +
-      `${noun}. Do not set it on their behalf.`,
+    "Refusing to record a paper order without confirmation. Show the user the ticket's `summary`, " +
+    "in words, and pass confirm: true only after they agree to THAT order. Do not set it on their behalf.",
   );
 }
 
-/** The dialog an order or a subscription puts in front of a person. */
+/** The dialog always identifies the operation as a local simulation. */
 function promptFor(
   policy: TradingPolicy,
-  noun: ConfirmationRequest["noun"],
   waivable: boolean,
   valueIdr: number | null,
 ): { title: string; description: string; remember?: string } {
-  const base =
-    noun === "subscription"
-      ? {
-          title: "Commit this IPO subscription?",
-          description:
-            "Yes commits money out of your RDN account. The allotment may be smaller than the " +
-            "subscription, and it cannot be cancelled by selling.",
-        }
-      : policy.mode === "paper"
-        ? {
-            title: "Place this PAPER order?",
-            description: "Yes records it in a local ledger on this machine. No real money moves.",
-          }
-        : {
-            title: "Place this order?",
-            description: "Yes places it on the exchange with your own money. There is no undo.",
-          };
+  const base = {
+    title: "Place this PAPER order?",
+    description: "Yes records it in a local ledger on this machine. No real money moves.",
+  };
 
   // Never offered when the owner demanded the ask: a switch that says "always ask me" must not come
   // with a box that turns itself off. And never on a commitment a grant may not cover, because a box
@@ -177,7 +109,7 @@ function promptFor(
   //
   // `valueIdr === null` is part of that same rule and not a separate one: a grant is "each order up
   // to X rupiah", so with no X there is nothing to cap it at and `grantRemember` would refuse to
-  // record anything. Reachable on a waivable commitment — `order_preview action=buy` with no
+  // record anything. Reachable on a waivable commitment — `paper_order_preview action=buy` with no
   // `price` yields a null gross — so it has to be checked here rather than assumed away.
   if (policy.elicitation === "required" || !waivable || valueIdr === null) return base;
   return {
@@ -188,77 +120,32 @@ function promptFor(
   };
 }
 
-/**
- * Decide whether this commitment may proceed, asking a person whenever there is one to ask.
- *
- * The order of the branches below is the security property, so it is worth reading as an order
- * rather than as a set:
- *
- *  1. `autoConfirm` — the owner's deliberate, capped exception, set at a terminal. It is the only
- *     thing that skips the ask, and it is never in force in paper mode or without a value cap.
- *  2. A live "don't ask again" grant the human made for themselves, within its bounds.
- *  3. The owner having turned asking off entirely.
- *  4. **Ask the person.** Unconditional. Not behind `confirm`, not behind anything.
- *  5. Only then, with no person reachable, does `confirm: true` mean anything at all.
- */
+/** Ask first; caller confirmation is considered only when no human can be reached. */
 export async function resolveConfirmation(req: ConfirmationRequest): Promise<ConfirmationVerdict> {
   const { policy, noun, valueIdr } = req;
 
-  // 1. autoConfirm. `tradingPolicy()` already reports it as false when it is not in force — this
-  //    re-checks the cap anyway, because a single guard is enough right up until somebody edits the
-  //    other file, and this one is the one standing next to the money.
-  if (policy.autoConfirm && policy.elicitation !== "required") {
-    const cap = policy.maxOrderValueIdr;
-    if (cap === null) {
-      // Deliberately does NOT offer `confirm: true` as the way out. This branch refuses before
-      // `confirm` is read at all, so a caller following that advice retries with the boolean set,
-      // lands here again, and loops. The only exits are a cap or turning autoConfirm off.
-      refuse(
-        "autoConfirm is set but no maxOrderValueIdr is configured, so it is ignored and nothing was sent. " +
-          "confirm: true will not help — this is refused before confirm is looked at. Set a cap with " +
-          "`stockbit-auth trading-enable --max-order-value N`, or turn autoConfirm off.",
-      );
-    }
-    if (valueIdr !== null && valueIdr > cap) {
-      // **Reachable, and do not delete this branch.** `maxOrderValueIdr` is both caps — autoConfirm's
-      // and the preview's `value_within_cap` — so on the ordinary path a ticket over it has already
-      // failed its own checks and is refused before this module is reached. But the two caps are
-      // read at different MOMENTS: the check is computed at preview, this is read at the write. Lower
-      // the cap in between (`trading-enable --live --max-order-value …` with a ticket outstanding)
-      // and a ticket that passed its check arrives here over the new one. Falling through would then
-      // return `auto-confirm` and send an order the owner's current policy forbids, unasked.
-      //
-      // It refuses rather than asking, because the cap is not a confirmation the person can supply:
-      // an order over `maxOrderValueIdr` may not be placed at all, whoever agrees to it.
-      refuse(
-        `This ${noun} is ${idr(valueIdr)} and the per-order cap is now ${idr(cap)}, so it cannot be placed — ` +
-          "the cap changed after this ticket was priced. Nothing was sent, and confirming will not help: the " +
-          "cap is not a confirmation. Run order_preview again to see it checked against the current policy, " +
-          "or raise the cap with `stockbit-auth trading-enable --max-order-value N`.",
-      );
-    }
-    // A commitment with no gross value is not "over the cap" — it is outside what a value cap can
-    // speak to at all. So autoConfirm simply does not answer for it, and it falls through to the
-    // ask rather than being refused. Cancelling an order should not be harder than placing one.
-    if (valueIdr !== null) return { via: "auto-confirm", elicitation: "waived-by-auto-confirm", rememberRequested: false };
+  // Caps apply to every simulated order and are re-read after preview.
+  if (policy.maxOrderValueIdr !== null && valueIdr !== null && valueIdr > policy.maxOrderValueIdr) {
+    refuse(`This paper order is ${idr(valueIdr)} and the per-order cap is now ${idr(policy.maxOrderValueIdr)}. ` +
+      "The cap changed after this ticket was priced. Nothing was recorded. Run paper_order_preview again.");
   }
 
-  // 2. A grant the human made themselves, still inside its time, its value and its policy — and
+  // A grant the human made themselves, still inside its time, its value and its policy — and
   //    only on the kind of commitment they were actually shown. See `waivable`.
   if (req.waivable && policy.elicitation !== "required" && rememberCovers(policy, valueIdr)) {
     return { via: "remembered", elicitation: "remembered", rememberRequested: false };
   }
 
-  // 3. The owner turned the human channel off. `confirm` is then the only gate there is, and it has
+  // The owner turned the human channel off. `confirm` is then the only gate there is, and it has
   //    to actually be passed.
   if (policy.elicitation === "never") {
-    if (req.confirm !== true) noConfirmation(policy, noun);
+    if (req.confirm !== true) noConfirmation();
     return { via: "explicit-elicit-disabled", elicitation: "disabled-by-policy", rememberRequested: false };
   }
 
-  // 4. Ask. Always. This line is the fix.
+  // Ask. Always. This line is the fix.
   if (req.elicit) {
-    const prompt = promptFor(policy, noun, req.waivable, valueIdr);
+    const prompt = promptFor(policy, req.waivable, valueIdr);
     const answer = await req.elicit(req.summary, prompt);
     if (answer.answer === "declined") {
       refuse(`The user declined this ${noun} when asked directly. Nothing was sent.`);
@@ -273,18 +160,16 @@ export async function resolveConfirmation(req: ConfirmationRequest): Promise<Con
     // the no-person branch rather than being read as either a yes or a no.
   }
 
-  // 5. Nobody can be asked.
+  // Nobody can be asked.
   if (policy.elicitation === "required") {
     refuse(
-      `This account requires that a person is asked directly before ${
-        noun === "order" ? "an order" : "a subscription"
-      } is sent, and this client cannot ask — it advertises no MCP elicitation support. Nothing was sent. ` +
+      "This account requires that a person is asked directly before a paper order is recorded, and this client cannot ask — it advertises no MCP elicitation support. Nothing was sent. " +
         "Use a client that supports elicitation, or run `stockbit-auth trading-enable " +
-        "--elicitation when-available` at your own terminal to allow confirm: true where a person cannot be " +
+        "--paper --elicitation when-available` at your own terminal to allow confirm: true where a person cannot be " +
         "reached.",
     );
   }
-  if (req.confirm !== true) noConfirmation(policy, noun);
+  if (req.confirm !== true) noConfirmation();
   return { via: "explicit-unelicited", elicitation: "unavailable", rememberRequested: false };
 }
 
@@ -301,23 +186,18 @@ export function elicitationNote(outcome: ElicitationOutcome): string | null {
       return (
         "No human was asked directly: this client advertises no MCP elicitation support, so the only " +
         "confirmation behind this was the `confirm: true` the caller passed. Tell the user that. " +
-        "`stockbit-auth trading-enable --elicitation required` makes this refuse instead."
+        "`stockbit-auth trading-enable --paper --elicitation required` makes this refuse instead."
       );
     case "disabled-by-policy":
       return (
         "No human was asked directly: this account has `trading.elicitation` set to `never`, so " +
-        "`confirm: true` was the only gate. `stockbit-auth trading-enable --elicitation when-available` " +
+        "`confirm: true` was the only gate. `stockbit-auth trading-enable --paper --elicitation when-available` " +
         "turns asking back on."
       );
     case "remembered":
       return (
         "The user was not asked about this one: they ticked \"don't ask again\" on an earlier " +
         `${REMEMBER_TTL_MS / 60_000}-minute grant covering this value or less. \`trading_forget\` ends it.`
-      );
-    case "waived-by-auto-confirm":
-      return (
-        "No human was asked: the account owner turned on `autoConfirm` at a terminal, capped by " +
-        "`maxOrderValueIdr`, and this one was under the cap."
       );
     default:
       return null;

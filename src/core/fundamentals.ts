@@ -241,12 +241,12 @@ export interface Earnings {
  * Market-wide, not per-symbol — there is no symbol path segment here. `search` is the way to narrow
  * it to one issuer, and it is a text search rather than a ticker lookup.
  *
- * Every argument is optional and every omitted one is left off the query string entirely. That
- * matters more than it looks: sending `quarter=` empty is not the same request as not sending
- * `quarter`, and this endpoint's defaults are Stockbit's, not this module's.
+ * The API requires page, sort_column and order even for an unfiltered request.
+ * The website uses page 1, column 1, descending; verified against the API on 2026-09-24.
+ * Omitted calendar filters remain absent so Stockbit selects its reporting period.
  */
 export async function getEarnings(opts: EarningsOptions = {}): Promise<Earnings> {
-  const query: Record<string, string | number> = {};
+  const query: Record<string, string | number> = { page: 1, sort_column: 1, order: "desc" };
   if (opts.filter !== undefined) query.filter = textArg("filter", opts.filter);
   if (opts.search !== undefined) query.search = textArg("search", opts.search);
   if (opts.quarter !== undefined) query.quarter = intArg("quarter", opts.quarter, 1, 4);

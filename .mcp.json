@@ -1,8 +1,14 @@
 {
   "mcpServers": {
     "stockbit": {
-      "command": "npx",
-      "args": ["-y", "stockbit-mcp@^1"]
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/bin/stockbit-mcp.js"
+      ],
+      "env": {
+        "STOCKBIT_MCP_TRANSPORT": "stdio",
+        "STOCKBIT_TOOLS": "core,chartbit,virtual"
+      }
     }
   }
 }

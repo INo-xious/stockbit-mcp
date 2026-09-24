@@ -5,10 +5,10 @@ Notes for an AI assistant working on this repository. Human contributors want
 
 ## What this is
 
-An MCP server over Stockbit's private JSON API — the Indonesian exchange. 139 tools in 17 families
-(41 of them registered by default — `STOCKBIT_TOOLS` defaults to `core`),
-three token domains, and, behind switches the account owner turns on themselves, order entry against
-a real brokerage account.
+An MCP server over Stockbit's private JSON API. Real-money execution is removed. Brokerage
+portfolio and history are read-only; paper_* is the local ledger and virtual_* is Stockbit's
+website simulation. Never add a live-order, subscription, deposit or withdrawal route. The generated
+`docs/TOOLS.md` is the authoritative tool inventory.
 
 ## Commands
 
@@ -28,14 +28,14 @@ versions.
 
 | Path | |
 |---|---|
-| `src/http/routes/` | The closed route table — 153 request shapes. The security boundary. |
+| `src/http/routes/` | The closed route table — Explicit request shapes. The security boundary. |
 | `src/http/transport.ts` | What enforces it. |
 | `src/auth/` | Login capture, three token stores, refresh with a cross-process lock. |
 | `src/core/` | One module per Stockbit domain. The readers everything else stands on. |
 | `src/analysis/` | Indicators, patterns, strategies, backtests, scans, position sizing. |
 | `src/render/` | Pure SVG. No browser. |
 | `src/tools/` | MCP registration, one module per family. `_define.ts` is the door. |
-| `src/trading/`, `src/eipo/` | Tickets, previews, submission, the paper ledger. |
+| `src/trading/`, `src/eipo/`, `src/virtual/` | Read-only accounts and explicitly separated simulations. |
 | `src/alerts/` | Rules, the daemon, delivery. |
 | `docs/adr/` | Every decision that changed what this server may do. |
 
@@ -68,24 +68,16 @@ versions.
 - **The tests are offline.** `fetch` is stubbed; every test file sets `STOCKBIT_FORCE_FILE_STORE=1`
   and a temp `STOCKBIT_STORE_DIR` *before* its imports, because module state is captured at import.
 - **Fixtures carry no real data.** No real account numbers, names or watchlists.
-- **No AI co-author trailers in commits.** Commit on `marvel-testing`, never on `main`.
+- **No AI co-author trailers in commits.** Never commit on `main`; use a task branch.
 
 ## Vocabulary
 
 [`CONTEXT.md`](CONTEXT.md) is the glossary — one meaning per word, and the code uses those words.
 The evidence ladder (**Observed / Read-back / Projected**) is load-bearing, not decoration.
 
-## Where the money is
+## Execution boundaries
 
-`src/trading/` and `src/eipo/`. If a change touches the ticket protocol, the confirmation gates, the
-outcome classes or the settings file, read [ADR-0004](docs/adr/0004-order-entry.md),
-[ADR-0008](docs/adr/0008-paper-trading.md) and
-[ADR-0010](docs/adr/0010-elicitation-is-decisive.md) first. The rule those encode: a user must never
-be able to place an order they did not read, and the server must never say "placed" when it does not
-know.
-
-**One gate, in `src/trading/confirmation.ts`.** Exchange orders and e-IPO both call it, and the
-duplicate that used to live in `src/eipo/order.ts` had already drifted in three places before anyone
-noticed. Its branch order is the security property, not an implementation detail: the human is asked
-**before** `confirm` is looked at, and behind no `via` test. A change that moves the ask later, or
-puts any condition in front of it, is reintroducing the defect ADR-0010 closed.
+Real-money routes and execution modules have been removed. Historical order-entry ADRs are
+superseded by ADR-0012. Local paper orders still require preview tickets, and simulated Stockbit
+orders may only use the virtual route allowlist. Never claim a simulation reached the exchange.
+Unknown write outcomes must never be automatically retried. No tool accepts a trading PIN.

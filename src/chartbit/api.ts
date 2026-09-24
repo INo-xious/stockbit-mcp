@@ -21,6 +21,7 @@
  */
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { deleteJson, getJson, postJson, putJson } from "../http/client.js";
 import { StockbitError } from "../http/errors.js";
@@ -35,6 +36,7 @@ import {
   encodeLayoutContent,
   normalizeDrawingSymbol,
   type Drawing,
+  type StoredDrawings,
   type StoredSource,
 } from "./codec.js";
 import { stockbitDir } from "../paths.js";
@@ -336,10 +338,21 @@ export function chartIdFromLayout(layout: unknown, symbol?: string): string | un
  * needs a live call, and until one is made the error says which arguments were tried.
  */
 export async function getChartDrawings(query: DrawingsQuery = {}): Promise<ChartDrawings> {
-  const symbol = query.symbol ? normalizeSymbol(query.symbol) : undefined;
+  let symbol = query.symbol ? normalizeSymbol(query.symbol) : undefined;
   const key = `chartbit:drawings:${query.layoutId ?? "-"}:${query.chartId ?? "-"}:${symbol ?? "-"}`;
   return cached(key, CACHE.defaultTtlMs, async () => {
-    const chartId = query.chartId ?? (query.layoutId ? await deriveChartId(query.layoutId, symbol) : undefined);
+    let chartId = query.chartId;
+    if (query.layoutId && (!chartId || !symbol)) {
+      const layout = await getChartLayout(query.layoutId);
+      chartId ??= chartIdFromLayout(layout.layout, symbol);
+      const named = chartId === undefined ? undefined : chartSymbols(layout.layout)?.[chartId]?.symbol;
+      if (!symbol && typeof named === "string") symbol = normalizeSymbol(normalizeDrawingSymbol(named));
+      // Older single-chart layouts may carry the symbol only on the layout row.
+      const layoutSymbol = asRecord(layout.layout)?.symbol;
+      if (!symbol && chartId && typeof layoutSymbol === "string" && chartIdFromLayout(layout.layout) === chartId) {
+        symbol = normalizeSymbol(normalizeDrawingSymbol(layoutSymbol));
+      }
+    }
     if (!chartId) {
       throw new StockbitError(
         "invalid_param",
@@ -355,6 +368,9 @@ export async function getChartDrawings(query: DrawingsQuery = {}): Promise<Chart
             "Every call without one has answered 400, including with a valid layout_id and symbol " +
             "alone, so this is refused rather than sent.",
       );
+    }
+    if (!symbol) {
+      throw new StockbitError("invalid_param", "chartbit drawings requires symbol as well as chart_id. Pass symbol explicitly when the layout does not identify it.");
     }
     const body = await getJson("chartbitDrawings", {
       params: { layout_id: query.layoutId, chart_id: chartId, symbol },
@@ -375,18 +391,6 @@ export async function getChartDrawings(query: DrawingsQuery = {}): Promise<Chart
   });
 }
 
-/**
- * Read one layout and decode its chart id.
- *
- * A decode failure comes back as `undefined` rather than throwing: the caller's next step is the
- * same either way — say what could not be produced — and a raw decode error here would replace an
- * actionable message with one about zip bytes.
- */
-async function deriveChartId(layoutId: string, symbol?: string): Promise<string | undefined> {
-  const layout = await getChartLayout(layoutId);
-  return chartIdFromLayout(layout.layout, symbol);
-}
-
 /* ------------------------------------ templates ------------------------------------ */
 
 const NamedListResponse = z
@@ -394,22 +398,24 @@ const NamedListResponse = z
   .passthrough();
 
 /** Chart templates, study templates and drawing templates — three lists, one shape. */
-export async function listChartbitTemplates(): Promise<{
+export async function listChartbitTemplates(drawingTool = "LineToolHorzLine"): Promise<{
   chartTemplates: unknown;
   studyTemplates: unknown;
   drawingTemplates: unknown;
+  drawingTool: string;
 }> {
-  return cached("chartbit:templates", CACHE.keystatsTtlMs, async () => {
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,99}$/.test(drawingTool)) throw new StockbitError("invalid_param", "Invalid drawing tool name.");
+  return cached(`chartbit:templates:${drawingTool}`, CACHE.keystatsTtlMs, async () => {
     // Sequential, not fanned out. Concurrent first calls on a cold session have burned this
     // project's token before: three requests race the same refresh and two of them lose.
     const chartTemplates = parseOr(NamedListResponse, await getJson("chartbitSettings"), "chart templates").data;
     const studyTemplates = parseOr(NamedListResponse, await getJson("chartbitStudies"), "study templates").data;
     const drawingTemplates = parseOr(
       NamedListResponse,
-      await getJson("chartbitDrawingTemplates"),
+      await getJson("chartbitDrawingTemplates", { params: { tool_name: drawingTool } }),
       "drawing templates",
     ).data;
-    return { chartTemplates, studyTemplates, drawingTemplates };
+    return { chartTemplates, studyTemplates, drawingTemplates, drawingTool };
   });
 }
 
@@ -654,11 +660,23 @@ async function performLayoutSave(layoutId: string, content: string, at: string):
  *
  * Additive in shape but destructive in effect: the payload replaces the stored set for that chart,
  * and `deletedSources` is how Stockbit's own client removes a tool. So it carries the same
- * apparatus as the layout write, with one deliberate difference — the read-back compares the SET OF
- * KEYS rather than the bytes. Stockbit's adapter is free to re-serialise what it stored, and a byte
- * comparison against a re-serialised payload would report a correct save as a failure and then roll
- * it back, which is the one outcome worse than not saving.
+ * apparatus as the layout write. Read-back compares decoded source values and checks that requested
+ * deletions are absent. Merely finding a key cannot prove an edit was stored: the old value has the
+ * same key. Comparing decoded JSON tolerates object-key order and archive re-serialization without
+ * overlooking changed coordinates, text, or properties.
  */
+function drawingsMatchSave(after: ChartDrawings, expected: StoredDrawings, compareGroups: boolean): boolean {
+  const actual = new Map<string, unknown>();
+  for (const source of after.sources) {
+    // Duplicate or malformed keys cannot identify one stored state reliably.
+    if (!source || typeof source.key !== "string" || actual.has(source.key)) return false;
+    actual.set(source.key, source.value);
+  }
+  return expected.sources.every(source => actual.has(source.key) && isDeepStrictEqual(actual.get(source.key), source.value))
+    && (expected.deleted_sources ?? []).every(source => !actual.has(source.key))
+    && (!compareGroups || isDeepStrictEqual(after.groups, expected.groups));
+}
+
 export async function saveChartDrawings(options: {
   layoutId: string;
   chartId: string;
@@ -684,6 +702,9 @@ export async function saveChartDrawings(options: {
     groups: options.groups,
     deletedSources: options.deletedSources,
   });
+  // Compare against the JSON actually sent, including the codec's series-id normalization.
+  const expected = decodeLayoutContent(content) as StoredDrawings;
+  const matches = (after: ChartDrawings): boolean => drawingsMatchSave(after, expected, options.groups !== undefined);
 
   const release = await acquireDirLock(join(stockbitDir(), `chartbit-drawings-${options.chartId}.lock`), {
     staleMs: WRITE_LOCK_STALE_MS,
@@ -708,8 +729,6 @@ export async function saveChartDrawings(options: {
       );
     }
 
-    const expected = new Set(options.sources.map((s) => s.key));
-
     try {
       await postJson("chartbitDrawingsSave", {
         body: { layout_id: options.layoutId, chart_id: options.chartId, content },
@@ -722,7 +741,7 @@ export async function saveChartDrawings(options: {
       try {
         const after = await getChartDrawings(query);
         afterCount = after.sources.length;
-        landed = [...expected].every((key) => after.sources.some((s) => s.key === key));
+        landed = matches(after);
       } catch {
         landed = undefined;
       }
@@ -762,9 +781,7 @@ export async function saveChartDrawings(options: {
     try {
       const after = await getChartDrawings(query);
       afterCount = after.sources.length;
-      // Keys, not bytes: Stockbit's adapter may re-serialise, and a byte comparison would roll back
-      // a correct save.
-      verified = [...expected].every((key) => after.sources.some((s) => s.key === key));
+      verified = matches(after);
     } catch (err) {
       verifyError = err instanceof Error ? err.message : String(err);
     }
@@ -791,8 +808,8 @@ export async function saveChartDrawings(options: {
         : verifyError
           ? `The drawings were accepted but could not be read back (${verifyError}), so the chart's state is ` +
             `unknown. The previous drawings are at ${snapshotPath}.`
-          : `Stockbit accepted the drawings and reading them back did not show every one of them. The previous ` +
-            `set is at ${snapshotPath}.`,
+          : `Stockbit accepted the drawings, but reading them back did not match the requested source values, ` +
+            `deletions, or explicitly supplied groups. The previous set is at ${snapshotPath}.`,
       logged,
       at,
     };

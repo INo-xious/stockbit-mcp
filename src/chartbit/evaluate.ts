@@ -41,7 +41,9 @@ export function substitute(script: string, substitutions: Record<string, unknown
     const json = JSON.stringify(value ?? null);
     // A placeholder is a bare identifier, so the replacement is anchored on word boundaries. An
     // unbounded replace would also rewrite a longer identifier that happens to contain this one.
-    out = out.replace(new RegExp(`\\b${name}\\b`, "g"), json);
+    // A callback keeps dollar sequences in caller data literal instead of interpreting them as
+    // replacement tokens (which can corrupt labels or insert fragments of the page script).
+    out = out.replace(new RegExp(`\\b${name}\\b`, "g"), () => json);
   }
   return out;
 }

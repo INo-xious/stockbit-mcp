@@ -1,20 +1,14 @@
-/**
- * e-IPO tools: the offerings, this account's subscriptions, and the two-step commitment.
- *
- * The reads are ordinary. The write is not: `eipo_order` commits money out of the RDN account for an
- * allotment that may be a fraction of what was asked for and cannot be undone by selling. It is
- * under the same trading switch and the same preview→confirm→redeem protocol as an exchange order.
- */
+/** Read-only e-IPO research and existing subscription data. No subscription execution. */
 import { z } from "zod";
 import * as eipo from "../eipo/api.js";
-import { placeEipoOrder, previewEipoOrder } from "../eipo/order.js";
-import { COMMITMENT_CONFIRM, runTool } from "./_format.js";
-import { elicitationNote } from "../trading/confirmation.js";
+import { runTool } from "./_format.js";
 import type { Definer } from "./_define.js";
 
 const SESSION_NOTE =
-  "The e-IPO session is minted automatically from the user's ordinary Stockbit login — no PIN and no " +
-  "extra step. If it cannot be minted the error says to run `stockbit-auth login`.";
+  "Requires a separate e-IPO session. Stockbit's legacy automatic handoff currently returns HTTP 404 " +
+  "for some sessions (observed 2026-09-24); report that as an unavailable integration, not an expired " +
+  "market-data login. Use ipo_pipeline for public listings and Stockbit's e-IPO page for account data " +
+  "when the handoff is unavailable. This server cannot submit subscriptions.";
 
 const PROJECTION_NOTE =
   "PENDING VERIFICATION: nothing on this host has been observed live. Offering data comes back as " +
@@ -101,87 +95,4 @@ export function registerEipoTools(define: Definer): void {
     async (a) => runTool(() => eipo.getUnboxing(String(a.emiten_code))),
   );
 
-  define.read(
-    "eipo_order_preview",
-    "Price and check an IPO subscription WITHOUT committing to it. Step one of two.\n" +
-      "It runs Stockbit's OWN verification of the subscription — the server decides whether it would " +
-      "be accepted, which is a better check than anything computed here — and puts the answer in " +
-      "`checks` as `server_verified`.\n" +
-      "RELAY `summary` VERBATIM. It states the lots, the price, the money committed, the RDN cash " +
-      "available, and the two facts that make an IPO different from a trade: the allotment may be " +
-      "smaller than the subscription, and it cannot be cancelled by selling.\n" +
-      "Then ASK the user, in plain words, and wait. A check marked `unverified` passed by default " +
-      "because its input could not be read — that means 'not contradicted', never 'confirmed'.",
-    {
-      emiten_code: z.string().describe("The offering's code, from eipo_list"),
-      lots: z.coerce.number().describe("Lots to subscribe for — 1 lot is 100 shares"),
-      price: z.coerce.number().describe("Price per share, from the offering's price range"),
-    },
-    async (a) =>
-      runTool(() =>
-        previewEipoOrder({
-          emitenCode: String(a.emiten_code),
-          lots: Number(a.lots),
-          price: Number(a.price),
-        }),
-      ),
-  );
-
-  define.write(
-    "eipo_order",
-    "COMMIT A REAL IPO SUBSCRIPTION with the user's own money. There is no undo — an IPO allotment " +
-      "cannot be cancelled by selling, because the stock does not trade yet.\n" +
-      "Step two of two. Call `eipo_order_preview` first, relay its `summary` to the user in words, " +
-      "ask them, and pass `confirm: true` only after they have agreed to that specific " +
-      "subscription. This tool takes a ticket id and nothing else.\n" +
-      "Where the client supports MCP elicitation the user is ALSO asked directly, before `confirm` " +
-      "is looked at, and their answer is the decisive one: a declined dialog refuses the " +
-      "subscription however confirm was set.\n" +
-      "READ `outcome` BEFORE REPORTING ANYTHING. Only `ok` means the subscription is recorded and " +
-      "was seen there. Anything else means the state is uncertain — relay `message` verbatim and DO " +
-      "NOT RESEND.",
-    {
-      ticket_id: z.string().describe("The id from eipo_order_preview. This tool takes no price and no quantity."),
-      confirm: z
-        .boolean()
-        .optional()
-        .describe(COMMITMENT_CONFIRM),
-    },
-    async (a) =>
-      runTool(async () => {
-        const result = await placeEipoOrder({
-          ticketId: String(a.ticket_id),
-          confirm: a.confirm === true,
-          // The gate calls this BEFORE it looks at `confirm`, so a client that can reach a person
-          // always reaches them. See src/trading/confirmation.ts.
-          elicit: define.elicitDecision ? define.elicitDecision.bind(define) : undefined,
-        });
-        // Mirrors describeOutcome() in tools/trading.ts: the outcome sentence is unchanged and the
-        // fact about who agreed rides beside it.
-        const note = elicitationNote(result.elicitation);
-        const suffix = note ? ` ${note}` : "";
-        const message =
-          result.outcome === "ok"
-            ? `The subscription to ${result.emitenCode} is recorded: ${result.lots} lots committing ${result.amountIdr} rupiah.${suffix}`
-            : result.outcome === "write-failed"
-              ? `The subscription to ${result.emitenCode} was refused before it was recorded. ${result.error ?? ""}`.trim()
-              : result.outcome === "rejected"
-                ? `The subscription to ${result.emitenCode} was rejected. ${result.error ?? ""}`.trim()
-                : (result.outcomeUnknown ??
-                    `The outcome of the subscription to ${result.emitenCode} could not be established. Do not resend it.`) +
-                  suffix;
-        return {
-          ...result,
-          message,
-          ...(result.logged
-            ? { auditLog: result.logPath }
-            : {
-                auditGap:
-                  `This attempt could NOT be written to ${result.logPath}. The subscription itself is ` +
-                  "unaffected, but there is no audit line for it — tell the user.",
-              }),
-        };
-      }),
-    { destructiveHint: true, idempotentHint: false },
-  );
 }

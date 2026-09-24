@@ -195,15 +195,18 @@ test("WIRE: earnings sends every supplied parameter, with order lower-cased", as
   assert.equal(q.get("page"), "3");
 });
 
-test("WIRE: earnings with no arguments sends no query string at all", async () => {
+test("WIRE: earnings supplies the three defaults required by the API", async () => {
   reply("/earnings", EARNINGS_BODY);
   const result = await getEarnings();
 
   const url = onlyRequest("/earnings");
   assert.equal(url.pathname, "/earnings");
-  // Stockbit's defaults are Stockbit's; this module must not smuggle in an empty quarter or page.
-  assert.equal(url.search, "", `unexpected query string ${url.search}`);
-  assert.deepEqual(result.query, {});
+  assert.equal(url.searchParams.get("page"), "1");
+  assert.equal(url.searchParams.get("sort_column"), "1");
+  assert.equal(url.searchParams.get("order"), "desc");
+  assert.equal(url.searchParams.has("quarter"), false);
+  assert.equal(url.searchParams.has("year"), false);
+  assert.deepEqual(result.query, { page: 1, sort_column: 1, order: "desc" });
   assert.deepEqual(result.data, EARNINGS_BODY.data);
 });
 

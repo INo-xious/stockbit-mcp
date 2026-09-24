@@ -263,10 +263,9 @@ export function registerCorpactionTools(define: Definer): void {
   define.read(
     "underwriters",
     "The IPO underwriter directory, or ONE underwriter's IPO track record.\n" +
-      "With no arguments it lists the underwriting houses and their codes. With `underwriter_code` " +
+      "The directory request without arguments currently returns an unavailable-endpoint error (HTTP 404, observed 2026-09-24). With `underwriter_code` " +
       "it returns that house's past IPOs and how they performed. The code is 2-6 uppercase letters " +
-      "or digits and is validated before the request is built; look it up in the directory first " +
-      "rather than guessing it from a house's name.\n" +
+      "or digits and is validated before the request is built; use a code shown in Stockbit IPO information. The YP performance lookup was verified live.\n" +
       "`sort_by` accepts only the one ordering that has been observed, ARA streak — how many " +
       "consecutive sessions a listing spent locked at the auto-rejection ceiling, the usual IDX " +
       "measure of a hot debut. Any other value is refused here rather than sent, because this " +
@@ -277,7 +276,7 @@ export function registerCorpactionTools(define: Definer): void {
       underwriter_code: z
         .string()
         .optional()
-        .describe("Underwriter code from the directory. Omit to list all underwriters"),
+        .describe("Underwriter code from Stockbit IPO information, e.g. YP. The directory without a code is currently unavailable."),
       sort_by: z
         .enum(core.UNDERWRITER_SORT_BY)
         .optional()

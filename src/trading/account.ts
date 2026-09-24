@@ -17,13 +17,14 @@
  * without carrying the values across the boundary. Key names are wire vocabulary; values are the
  * user's money.
  *
- * ## Nothing here has been observed live
+ * ## Evidence and missing values
  *
- * The securities session needs a PIN this project never stores, so no capture of these responses
- * exists. Every candidate key list below is read off Stockbit's bundle and off the shape of the
- * neighbouring APIs, and `readFrom` names the key each value actually came from on the response in
- * hand. A field this projection could not read is `undefined` with its name absent from `readFrom`
- * — never a zero, never a silent default. `docs/PENDING-VERIFICATION.md` carries the list.
+ * Nested portfolio totals, empty-position envelopes, cash balances, nested fee rates, masked
+ * identity, tradability and three trading feature blocks were checked read-only on 2026-09-24.
+ * Nonempty holding, order and history rows remain projected from frontend schemas; the current
+ * account has no holdings to verify those rows against. Other candidate keys remain compatibility
+ * paths, and `readFrom` names the path actually used. A field this projection could not read is
+ * undefined, never a zero or silent default. Formula strings are never executed.
  *
  * The one guess that could be wrong *quietly* is lots vs shares: 1 lot = 100 shares, and a figure
  * read out of the wrong key is off by exactly 100×, which still looks like a plausible position.
@@ -199,8 +200,12 @@ function project<K extends string>(
   for (const field of Object.keys(spec) as K[]) {
     const { keys, as } = spec[field];
     for (const key of keys) {
-      if (!(key in row)) continue;
-      const value = as(row[key]);
+      let raw: unknown = row;
+      for (const part of key.split(".")) {
+        raw = raw !== null && typeof raw === "object" && !Array.isArray(raw) && Object.hasOwn(raw, part)
+          ? (raw as Row)[part] : undefined;
+      }
+      const value = as(raw);
       if (value === undefined) continue;
       fields[field] = value;
       readFrom[field] = key;
@@ -209,7 +214,15 @@ function project<K extends string>(
     }
   }
 
-  const unmappedKeys = Object.keys(row).filter((k) => !consumed.has(k));
+  const unmapped = (obj: Row, prefix = ""): string[] => Object.entries(obj).flatMap(([key, value]) => {
+    const path = `${prefix}${key}`;
+    if (consumed.has(path)) return [];
+    if ([...consumed].some(used => used.startsWith(`${path}.`)) && value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return unmapped(value as Row, `${path}.`);
+    }
+    return [path];
+  });
+  const unmappedKeys = unmapped(row);
   return { fields, readFrom, unmappedKeys };
 }
 
@@ -259,6 +272,8 @@ export interface Holding {
   costIdr?: number;
   unrealizedPnlIdr?: number;
   unrealizedPnlPct?: number;
+  /** Fractional gain as returned by the current portfolio adapter (0.05 means 5%). */
+  unrealizedGainRatio?: number;
   /** Fields computed here rather than read off the wire. `["shares"]` means shares = lots × 100. */
   derived?: string[];
   readFrom: ReadFrom;
@@ -269,28 +284,28 @@ const SHARES_PER_LOT = 100;
 
 const HOLDING_SPEC = {
   symbol: { keys: ["symbol", "stock_code", "stockCode", "code", "ticker"], as: asText },
-  lots: { keys: ["lot", "lots", "total_lot", "totalLot", "lot_balance", "balance_lot"], as: asNumber },
+  lots: { keys: ["qty.balance.lot", "lot", "lots", "total_lot", "totalLot", "lot_balance", "balance_lot"], as: asNumber },
   shares: {
-    keys: ["shares", "share", "balance", "total_balance", "quantity", "qty", "volume"],
+    keys: ["qty.balance.share", "shares", "share", "balance", "total_balance", "quantity", "qty", "volume"],
     as: asNumber,
   },
-  availableLots: { keys: ["available_lot", "availableLot", "sellable_lot", "lot_available"], as: asNumber },
+  availableLots: { keys: ["qty.available.lot", "available_lot", "availableLot", "sellable_lot", "lot_available"], as: asNumber },
   availableShares: {
-    keys: ["available_balance", "available_shares", "availableBalance", "sellable", "available"],
+    keys: ["qty.available.share", "available_balance", "available_shares", "availableBalance", "sellable", "available"],
     as: asNumber,
   },
   averagePrice: {
-    keys: ["average_price", "avg_price", "avgPrice", "averagePrice", "price_avg", "buy_average"],
+    keys: ["price.average.price", "average_price", "avg_price", "avgPrice", "averagePrice", "price_avg", "buy_average"],
     as: asNumber,
   },
   lastPrice: {
-    keys: ["last_price", "lastPrice", "market_price", "marketPrice", "close_price", "last"],
+    keys: ["price.latest", "last_price", "lastPrice", "market_price", "marketPrice", "close_price", "last"],
     as: asNumber,
   },
-  marketValueIdr: { keys: ["market_value", "marketValue", "current_value", "value"], as: asNumber },
-  costIdr: { keys: ["total_cost", "cost", "investment_value", "buy_value", "average_value"], as: asNumber },
+  marketValueIdr: { keys: ["asset.unrealised.market_value", "market_value", "marketValue", "current_value", "value"], as: asNumber },
+  costIdr: { keys: ["asset.amount_invested", "total_cost", "cost", "investment_value", "buy_value", "average_value"], as: asNumber },
   unrealizedPnlIdr: {
-    keys: ["unrealized_pnl", "unrealized_pl", "potential_gain", "gain_loss", "profit_loss", "pl"],
+    keys: ["asset.unrealised.profit_loss", "unrealized_pnl", "unrealized_pl", "potential_gain", "gain_loss", "profit_loss", "pl"],
     as: asNumber,
   },
   unrealizedPnlPct: {
@@ -304,6 +319,7 @@ const HOLDING_SPEC = {
     ],
     as: asNumber,
   },
+  unrealizedGainRatio: { keys: ["asset.unrealised.gain"], as: asNumber },
 } as const;
 
 function projectHolding(row: Row): Holding {
@@ -343,6 +359,17 @@ export interface PortfolioTotals {
   realizedPnlIdr?: number;
   cashIdr?: number;
   totalEquityIdr?: number;
+  tradingBalanceIdr?: number;
+  allocatedIdr?: number;
+  creditLimitIdr?: number;
+  netPnlIdr?: number;
+  /** Wire fraction, kept distinct from a percentage. */
+  gainRatio?: number;
+  debtIdr?: number;
+  debtRatio?: number;
+  debtMarketValueIdr?: number;
+  debtBufferIdr?: number;
+  debtBufferPct?: number;
   readFrom: ReadFrom;
   unmappedKeys: string[];
 }
@@ -352,25 +379,44 @@ const TOTALS_SPEC = {
     keys: ["market_value", "marketValue", "total_market_value", "stock_value", "current_value"],
     as: asNumber,
   },
-  costIdr: { keys: ["total_cost", "investment_value", "cost", "buy_value"], as: asNumber },
+  costIdr: { keys: ["amount.invested", "total_cost", "investment_value", "cost", "buy_value"], as: asNumber },
   unrealizedPnlIdr: {
-    keys: ["unrealized_pnl", "unrealized_pl", "potential_gain", "gain_loss", "profit_loss"],
+    keys: ["profit_loss.unrealised", "unrealized_pnl", "unrealized_pl", "potential_gain", "gain_loss", "profit_loss"],
     as: asNumber,
   },
   unrealizedPnlPct: {
     keys: ["unrealized_pnl_percent", "gain_loss_percent", "profit_loss_percent", "percentage"],
     as: asNumber,
   },
-  realizedPnlIdr: { keys: ["realized_pnl", "realized_pl", "realized_gain"], as: asNumber },
+  realizedPnlIdr: { keys: ["profit_loss.realised", "realized_pnl", "realized_pl", "realized_gain"], as: asNumber },
   cashIdr: { keys: ["cash", "cash_balance", "total_cash", "cash_on_hand"], as: asNumber },
-  totalEquityIdr: { keys: ["total_equity", "totalEquity", "net_asset_value", "total_asset"], as: asNumber },
+  totalEquityIdr: { keys: ["equity", "total_equity", "totalEquity", "net_asset_value", "total_asset"], as: asNumber },
+  tradingBalanceIdr: { keys: ["trading.balance"], as: asNumber },
+  allocatedIdr: { keys: ["amount.allocated"], as: asNumber },
+  creditLimitIdr: { keys: ["amount.credit_limit"], as: asNumber },
+  netPnlIdr: { keys: ["profit_loss.net"], as: asNumber },
+  gainRatio: { keys: ["gain"], as: asNumber },
+  debtIdr: { keys: ["debt.total"], as: asNumber },
+  debtRatio: { keys: ["debt.ratio"], as: asNumber },
+  debtMarketValueIdr: { keys: ["debt.market_value"], as: asNumber },
+  debtBufferIdr: { keys: ["debt.buffer.value"], as: asNumber },
+  debtBufferPct: { keys: ["debt.buffer.percentage"], as: asNumber },
 } as const;
+
+function projectPortfolioTotals(row: Row, prefix = ""): PortfolioTotals {
+  const { fields, readFrom, unmappedKeys } = project(row, TOTALS_SPEC);
+  return {
+    ...(fields as Omit<PortfolioTotals, "readFrom" | "unmappedKeys">),
+    readFrom: Object.fromEntries(Object.entries(readFrom).map(([field, path]) => [field, `${prefix}${path}`])),
+    unmappedKeys: unmappedKeys.map(path => `${prefix}${path}`),
+  };
+}
 
 export interface Portfolio {
   holdings: Holding[];
   /** Present when `/portfolio/v2/summary` answered; the summary is fetched alongside the list. */
   totals?: PortfolioTotals;
-  /** Why `totals` is absent, when it is. A summary failure never fails the whole read. */
+  /** Why aggregate totals failed, including when list-level totals provide a fallback. */
   totalsUnavailable?: string;
   count: number;
   rowsFrom: string | null;
@@ -397,6 +443,12 @@ export async function getPortfolio(): Promise<Portfolio> {
       totals = await getPortfolioTotals();
     } catch (err) {
       totalsUnavailable = err instanceof StockbitError ? err.message : String(err);
+      const summary = payload.value !== null && typeof payload.value === "object" && !Array.isArray(payload.value)
+        ? (payload.value as Row).summary : undefined;
+      if (summary !== null && typeof summary === "object" && !Array.isArray(summary)) {
+        totals = projectPortfolioTotals(summary as Row, "summary.");
+        totalsUnavailable = `Account-wide summary unavailable; totals are from the portfolio list summary. ${totalsUnavailable}`;
+      }
     }
 
     return {
@@ -417,8 +469,12 @@ async function getPortfolioTotals(): Promise<PortfolioTotals> {
     const body = await getJson("portfolioSummary");
     const payload = payloadOf(body, "portfolio summary");
     const row = objectOf(payload.value, "portfolio summary");
-    const { fields, readFrom, unmappedKeys } = project(row, TOTALS_SPEC);
-    return { ...(fields as Omit<PortfolioTotals, "readFrom" | "unmappedKeys">), readFrom, unmappedKeys };
+    if (row.aggregated_portfolio_summary !== undefined) {
+      const totals = projectPortfolioTotals(objectOf(row.aggregated_portfolio_summary, "aggregated portfolio summary"), "aggregated_portfolio_summary.");
+      totals.unmappedKeys.push(...Object.keys(row).filter(key => key !== "aggregated_portfolio_summary"));
+      return totals;
+    }
+    return projectPortfolioTotals(row);
   });
 }
 
@@ -426,6 +482,8 @@ export interface Position {
   symbol: string;
   /** Null when the account holds none of this symbol — a normal answer, not an error. */
   holding: Holding | null;
+  /** A separate day-trade position, when the detail endpoint returned that compartment. */
+  dayTradeHolding?: Holding | null;
   envelope: EnvelopePath;
   payloadKeys: string[];
 }
@@ -463,6 +521,22 @@ export async function getPosition(symbol: string): Promise<Position> {
       };
     }
     const row = objectOf(payload.value, "position");
+    if ("result" in row) {
+      const holdingOf = (value: unknown): Holding | null => {
+        if (value === null || value === undefined) return null;
+        const detail = objectOf(value, "position result");
+        // Stockbit answers an unowned symbol with a named shell whose holding fields are null.
+        if (detail.qty === null && detail.asset === null && detail.price === null) return null;
+        return projectHolding(detail);
+      };
+      return {
+        symbol: sym,
+        holding: holdingOf(row.result),
+        ...("day_trade" in row ? { dayTradeHolding: holdingOf(row.day_trade) } : {}),
+        envelope: payload.from,
+        payloadKeys: Object.keys(row),
+      };
+    }
     return { symbol: sym, holding: projectHolding(row), envelope: payload.from, payloadKeys: Object.keys(row) };
   });
 }
@@ -471,7 +545,10 @@ export async function getPosition(symbol: string): Promise<Position> {
 
 export interface CashBalance {
   cashIdr?: number;
+  availableCashOnHandIdr?: number;
   buyingPowerIdr?: number;
+  tradingBalanceIdr?: number;
+  dayTradeBuyingPowerIdr?: number;
   withdrawableIdr?: number;
   /** Settlement buckets, when `/balance/cash/info` carried them. */
   settlement?: { t0Idr?: number; t1Idr?: number; t2Idr?: number; readFrom: ReadFrom; unmappedKeys: string[] };
@@ -482,7 +559,8 @@ export interface CashBalance {
 }
 
 const CASH_SPEC = {
-  cashIdr: { keys: ["cash", "cash_balance", "cash_on_hand", "balance", "total_cash"], as: asNumber },
+  cashIdr: { keys: ["available_cash_on_hand", "cash", "cash_balance", "cash_on_hand", "balance", "total_cash"], as: asNumber },
+  availableCashOnHandIdr: { keys: ["available_cash_on_hand"], as: asNumber },
   buyingPowerIdr: {
     keys: ["buying_power", "buyingPower", "trading_limit", "tradingLimit", "purchasing_power", "limit"],
     as: asNumber,
@@ -521,6 +599,18 @@ export async function getCashBalance(): Promise<CashBalance> {
       const infoPayload = payloadOf(infoBody, "cash info");
       const infoRow = objectOf(infoPayload.value, "cash info");
       const info = project(infoRow, SETTLEMENT_SPEC);
+      // These are distinct balances. In particular, available cash is not a withdrawal limit.
+      const balances = project(infoRow, {
+        buyingPowerIdr: { keys: ["trade_limit"], as: asNumber },
+        tradingBalanceIdr: { keys: ["trade_balance"], as: asNumber },
+        dayTradeBuyingPowerIdr: { keys: ["day_trade_buying_power"], as: asNumber },
+      });
+      for (const [field, value] of Object.entries(balances.fields)) {
+        if (!(field in fields)) {
+          (fields as Row)[field] = value;
+          readFrom[field] = `info.${balances.readFrom[field]}`;
+        }
+      }
       settlement = {
         ...(info.fields as { t0Idr?: number; t1Idr?: number; t2Idr?: number }),
         readFrom: info.readFrom,
@@ -958,11 +1048,11 @@ export interface Fees {
 
 const FEE_SPEC = {
   buy: {
-    keys: ["buy_fee", "fee_buy", "buy_commission", "commission_buy", "buy_fee_percentage", "buy"],
+    keys: ["fee.buy", "buy_fee", "fee_buy", "buy_commission", "commission_buy", "buy_fee_percentage", "buy"],
     as: asNumber,
   },
   sell: {
-    keys: ["sell_fee", "fee_sell", "sell_commission", "commission_sell", "sell_fee_percentage", "sell"],
+    keys: ["fee.sell", "sell_fee", "fee_sell", "sell_commission", "commission_sell", "sell_fee_percentage", "sell"],
     as: asNumber,
   },
 } as const;
@@ -1040,7 +1130,39 @@ export interface TradingInfo {
   readFrom: ReadFrom;
   unmappedKeys: string[];
   envelope: EnvelopePath;
+  requestedFeatures: readonly string[];
+  features: Record<string, { readFrom: ReadFrom; unmappedKeys: string[]; [field: string]: unknown } | null>;
 }
+
+// Confirmed enum names and successful read-only responses. Margin is account-specific and returned
+// NOT_FOUND on the checked account, so it is not bundled into the generally available request.
+const TRADING_FEATURES = ["FEATURE_DAY_TRADE", "FEATURE_SPLIT_ORDER", "FEATURE_MARKET_CYCLE"] as const;
+const FEATURE_SPEC = {
+  day_trade: {
+    countdownStart: { keys: ["countdown_start"], as: asNumber },
+    remainingTradingClose: { keys: ["remaining_trading_close"], as: asNumber },
+    tradingOpen: { keys: ["trading_open"], as: asText },
+    tradingClose: { keys: ["trading_close"], as: asText },
+    eventType: { keys: ["event_type"], as: asText },
+    forceSellDebtRatio: { keys: ["debt_ratio_rules.force_sell"], as: asNumber },
+    cautionDebtRatio: { keys: ["debt_ratio_rules.caution"], as: asNumber },
+  },
+  split_order: {
+    remainingTradingOpen: { keys: ["remaining_trading_open"], as: asNumber },
+    remainingTradingClose: { keys: ["remaining_trading_close"], as: asNumber },
+    tradingOpen: { keys: ["trading_open"], as: asText },
+    tradingClose: { keys: ["trading_close"], as: asText },
+    maxOrders: { keys: ["max_order"], as: asNumber },
+    maxLotsPerOrder: { keys: ["max_lot_per_order"], as: asNumber },
+  },
+  market_cycle: {
+    allocationName: { keys: ["market_cycle_allocation.name"], as: asText },
+    allocationStart: { keys: ["market_cycle_allocation.start_at"], as: asText },
+    allocationEnd: { keys: ["market_cycle_allocation.end_at"], as: asText },
+    auctionSessionType: { keys: ["full_call_auction_cycle.session_type"], as: asText },
+    auctionSessionPhase: { keys: ["full_call_auction_cycle.session_phase"], as: asText },
+  },
+} as const;
 
 const TRADING_INFO_SPEC = {
   status: { keys: ["status", "trading_status", "state", "account_status"], as: asText },
@@ -1049,16 +1171,27 @@ const TRADING_INFO_SPEC = {
 
 export async function getTradingInfo(): Promise<TradingInfo> {
   return cached("carina:trading-info", TTL.fees, async () => {
-    const body = await getJson("tradingInfo");
+    const body = await getJson("tradingInfo", { params: { features: [...TRADING_FEATURES] } });
     const payload = payloadOf(body, "trading info");
     const row = objectOf(payload.value, "trading info");
     const { fields, readFrom, unmappedKeys } = project(row, TRADING_INFO_SPEC);
+    const features: TradingInfo["features"] = {};
+    for (const [name, spec] of Object.entries(FEATURE_SPEC)) {
+      if (row[name] === null || row[name] === undefined) {
+        features[name] = null;
+      } else {
+        const projected = project<string>(objectOf(row[name], `trading feature ${name}`), spec);
+        features[name] = { ...projected.fields, readFrom: projected.readFrom, unmappedKeys: projected.unmappedKeys };
+      }
+    }
     return {
       fees: await getFees(),
       ...(fields as { status?: string; buyingPowerIdr?: number }),
       readFrom,
-      unmappedKeys,
+      unmappedKeys: unmappedKeys.filter(key => !(key in FEATURE_SPEC)),
       envelope: payload.from,
+      requestedFeatures: TRADING_FEATURES,
+      features,
     };
   });
 }
@@ -1067,6 +1200,9 @@ export interface Tradability {
   symbol: string;
   /** Undefined when the response carried no field this projection recognises as the verdict. */
   tradable?: boolean;
+  marginTradable?: boolean;
+  shariaTradable?: boolean;
+  negotiatedTradable?: boolean;
   reason?: string;
   readFrom: ReadFrom;
   unmappedKeys: string[];
@@ -1078,6 +1214,9 @@ const TRADABLE_SPEC = {
     keys: ["tradable", "is_tradable", "can_trade", "tradeable", "is_tradeable"],
     as: (v: unknown) => (typeof v === "boolean" ? v : undefined),
   },
+  marginTradable: { keys: ["is_margin_tradable"], as: (v: unknown) => typeof v === "boolean" ? v : undefined },
+  shariaTradable: { keys: ["is_sharia_tradable"], as: (v: unknown) => typeof v === "boolean" ? v : undefined },
+  negotiatedTradable: { keys: ["is_nego_tradable"], as: (v: unknown) => typeof v === "boolean" ? v : undefined },
   reason: { keys: ["reason", "message", "note", "description", "status"], as: asText },
 } as const;
 
@@ -1086,7 +1225,7 @@ export interface TradabilityResult {
   rowsFrom: string | null;
   envelope: EnvelopePath;
   payloadKeys: string[];
-  request: { stock_codes: string };
+  request: { stock_codes: string[] };
 }
 
 /**
@@ -1102,14 +1241,14 @@ export async function getStockTradable(symbols: string[]): Promise<TradabilityRe
   const stockCodes = codes.join(",");
 
   return cached(`carina:tradable:${stockCodes}`, TTL.tradable, async () => {
-    const body = await getJson("stockTradable", { params: { stock_codes: stockCodes } });
+    const body = await getJson("stockTradable", { params: { stock_codes: codes } });
     const payload = payloadOf(body, "tradability");
     const { rows, from, payloadKeys } = rowsOf(payload.value, "tradability");
 
     const found = rows.map((row) => {
       const { fields, readFrom, unmappedKeys } = project(row, TRADABLE_SPEC);
-      const f = fields as { symbol?: string; tradable?: boolean; reason?: string };
-      return { symbol: f.symbol ?? "", tradable: f.tradable, reason: f.reason, readFrom, unmappedKeys };
+      const f = fields as Partial<Tradability>;
+      return { ...f, symbol: f.symbol ?? "", readFrom, unmappedKeys };
     });
 
     // Every symbol asked about appears in the answer, so a caller can index by what it sent.
@@ -1118,7 +1257,7 @@ export async function getStockTradable(symbols: string[]): Promise<TradabilityRe
       (code) => bySymbol.get(code) ?? { symbol: code, readFrom: {}, unmappedKeys: [] },
     );
 
-    return { symbols: merged, rowsFrom: from, envelope: payload.from, payloadKeys, request: { stock_codes: stockCodes } };
+    return { symbols: merged, rowsFrom: from, envelope: payload.from, payloadKeys, request: { stock_codes: codes } };
   });
 }
 
@@ -1155,12 +1294,12 @@ export interface AccountIdentity {
 }
 
 const ACCOUNT_SPEC = {
-  name: { keys: ["name", "full_name", "fullname", "customer_name", "client_name"], as: asText },
-  accountNumber: { keys: ["account_number", "accountNumber", "account_id", "client_id", "customer_id"], as: asText },
-  rdn: { keys: ["rdn", "rdn_number", "rdn_account", "bank_account", "bank_account_number"], as: asText },
-  sid: { keys: ["sid", "sid_number", "investor_id"], as: asText },
+  name: { keys: ["personal.full_name", "name", "full_name", "fullname", "customer_name", "client_name"], as: asText },
+  accountNumber: { keys: ["account.number", "account_number", "accountNumber", "account_id", "client_id", "customer_id"], as: asText },
+  rdn: { keys: ["account.bank.rdn.account.number", "rdn", "rdn_number", "rdn_account", "bank_account", "bank_account_number"], as: asText },
+  sid: { keys: ["account.ksei.sid", "sid", "sid_number", "investor_id"], as: asText },
   broker: { keys: ["broker", "broker_name", "securities", "company"], as: asText },
-  status: { keys: ["status", "account_status", "state"], as: asText },
+  status: { keys: ["status.description", "status", "account_status", "state"], as: asText },
 } as const;
 
 const SUB_ACCOUNT_SPEC = {
@@ -1177,7 +1316,13 @@ const SUB_ACCOUNT_SPEC = {
  */
 export async function getAccount(): Promise<AccountIdentity> {
   return cached("carina:account", TTL.identity, async () => {
-    const body = await getJson("account");
+    let body: unknown;
+    try {
+      body = await getJson("account");
+    } catch (error) {
+      if (!(error instanceof StockbitError) || error.kind !== "not_found") throw error;
+      body = await getJson("accountPersonal");
+    }
     const payload = payloadOf(body, "account");
     const row = objectOf(payload.value, "account");
     const { fields, readFrom, unmappedKeys } = project(row, ACCOUNT_SPEC);

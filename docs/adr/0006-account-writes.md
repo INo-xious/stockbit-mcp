@@ -83,3 +83,22 @@ something has gone wrong.
 renaming, adding and favouriting. Marking every write destructive teaches a client to ignore the
 flag, which would make the deletions **less** visible rather than more. `test/tools.test.ts` asserts
 the grading rather than the count.
+
+## 2026-09-24 request-shape correction
+
+The current public Stockbit screener bundle
+(`/_next/static/chunks/pages/screener-f6f3c6b38de0136b.js`, modules 18544 and 71914) shows the
+run/save body with JSON-encoded `filters` and `universe`, `screenerid: "0"` for a new screen,
+`sequence`, and pagination/sort fields. An unsaved Market Cap run returned `data.calcs` and
+`totalrows`/`curpage`/`perpage` with this shape. The shared serializer now uses that shape while
+keeping `save: "0"` hard-coded in reads and `save: "1"` confined to the confirmed save path.
+
+The same frontend sends favorites as POST `/screener/favorites` with `{screenerid,type}`, and
+removes one with DELETE `/screener/favorites/:templateId?type=...`. The route table and caller now
+match those observed frontend definitions. Favorite type is read from the existing template;
+unknown ids are refused. No real-money capability is added.
+
+A controlled live MCP lifecycle created one uniquely named temporary screen, marked and unmarked
+its favorite flag, then deleted that exact newly created id. Every step passed its read-back;
+the final listing showed no temporary screen and unchanged names/ids/favorite flags for all
+pre-existing screens. No existing screen was edited.

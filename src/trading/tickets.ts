@@ -1,41 +1,14 @@
 /**
- * Order tickets: the two-step protocol's memory.
- *
- * `order_preview` builds a ticket and hands back its id. `order_buy` takes that id and places what
- * the ticket says. Nothing between the two can change the order — the write tools accept a ticket
- * id and a confirmation, and no price, no lot count and no symbol. That is what makes the user's
- * "yes" mean something specific: they agreed to the summary they were shown, and the summary and
- * the request are the same object.
- *
- * ## Why they live in memory and expire
- *
- * A ticket is priced against a market. Two minutes later the quote, the bands and the buying power
- * it was checked against may all be different, so it stops being an agreement and becomes a stale
- * intention. Expiry is not a security control; it is honesty about what the checks covered.
- *
- * In memory, and never on disk: a persisted ticket would survive a restart and could be redeemed
- * against a market it was never priced for, and a file of them would be a list of intended orders
- * sitting in the user's home directory.
- *
- * ## `take` consumes before the request goes out
- *
- * Not after. A double-send is the one failure mode here with no undo — the exchange would have two
- * orders and the account holder agreed to one — so the window between "this ticket is spent" and
- * "the request left" is closed on the safe side. The cost of getting it wrong the other way is an
- * order the user has to re-preview; the cost this way is an order they never agreed to.
+ * In-memory local paper-simulation tickets, single-use and expiring after two minutes.
+ * paper_order_preview records the exact terms; paper_order_* redeems the ticket.
+ * A ticket is spent before the local ledger changes, so retries cannot duplicate it.
  */
 import { StockbitError } from "../http/errors.js";
 
-/**
- * What every ticket has, whatever it is a ticket for.
- *
- * Exchange orders and e-IPO subscriptions are different commitments with different checks, but the
- * protocol around them is identical — preview, show the user, redeem once, expire — so they share
- * one store. `kind` is what stops an e-IPO ticket being redeemed by `order_buy` and vice versa.
- */
+/** Shared fields of a local paper-simulation ticket. */
 export interface TicketBase {
   id: string;
-  kind: "order" | "eipo";
+  kind: "order";
   expiresAt: string;
   checks: Array<{ name: string; ok: boolean; detail: string; unverified?: true }>;
   summary: string;
@@ -126,7 +99,7 @@ export function slotCount(): number {
  * the three it was.
  *
  * The spent case was added with ADR-0010 and is not cosmetic. Since the human is now asked before
- * the ticket is taken, a `peek` that admitted a consumed ticket meant a model retrying `order_buy`
+ * the ticket is taken, a `peek` that admitted a consumed ticket meant a model retrying `paper_order_buy`
  * put the dialog in front of the person a SECOND time, asking them to approve an order that had
  * already reached the exchange — and only then refused. Being asked twice about one order is how a
  * person ends up believing they have two.
@@ -167,7 +140,7 @@ export function take(id: string, expectedKind?: TicketBase["kind"]): TicketBase 
     throw new StockbitError(
       "invalid_param",
       `No order ticket ${id}. Tickets last ${TICKET_TTL_MS / 1000} seconds and are held in memory, so this one ` +
-        "has expired, was already used, or belongs to a previous run of this server. Run order_preview again.",
+        "has expired, was already used, or belongs to a previous run of this server. Run paper_order_preview again.",
     );
   }
   if (slot.consumedAt !== null) {
@@ -181,7 +154,7 @@ export function take(id: string, expectedKind?: TicketBase["kind"]): TicketBase 
     throw new StockbitError(
       "invalid_param",
       `Order ticket ${id} expired at ${slot.ticket.expiresAt}. It was priced against a market that has moved ` +
-        "since; run order_preview again and show the user the new numbers.",
+        "since; run paper_order_preview again and show the user the new numbers.",
     );
   }
   if (expectedKind && slot.ticket.kind !== expectedKind) {

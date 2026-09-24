@@ -36,14 +36,15 @@ const FAMILY_LABEL: Record<Family, string> = {
   alerts: "Alerts, which fire while no client is open",
   pine: "TradingView Pine Script",
   workflows: "Saved recipes",
-  trading: "The trading account",
-  eipo: "IPOs",
+  trading: "Read-only brokerage account and local paper simulation",
+  eipo: "Read-only IPO information",
+  virtual: "Stockbit website virtual trading",
 };
 
 const FAMILY_NOTE: Partial<Record<Family, string>> = {
   bandarmology:
     "Who accumulated and who distributed — the data no other market API has, and why this server exists.",
-  trading: "Reads are free; the order tools are two-step and confirm-gated. See below.",
+  trading: "Real-account reads and explicitly named local paper tools only.",
 };
 
 export function buildInstructions(surface: Surface): string {
@@ -73,78 +74,21 @@ export function buildInstructions(surface: Surface): string {
       }\n`
     : "";
 
-  // The order protocol, and the projection warning, are about tools that may not be here.
-  //
-  // Under the default profile none of the order tools exist, so the two-step protocol below
-  // describes a thing the model cannot do. Leaving it in is not harmless padding: it teaches the
-  // model to offer order entry, and the failure lands after the user has said yes to something.
-  //
-  // But it is gated on the WHOLE set, not on `order_preview` alone. e-IPO subscription is order
-  // entry — `eipo_order` is on the write list fifteen lines below, and it uses this exact ticket /
-  // confirm / read-`outcome` protocol — so keying off the equities preview tool got both halves
-  // wrong at once under `STOCKBIT_TOOLS=eipo`: it suppressed the protocol for a tool that needs it,
-  // and then asserted "there is no way to place an order from here" while a tool that places one
-  // was registered. A false negative about order entry is the most expensive sentence on this page.
-  // Each preview describes its OWN ticket. An IPO has no auto-rejection band and its ticket carries
-  // no commission and no net; saying otherwise under `eipo` invented three fields, which is the
-  // "never invent a number" rule losing to a shared sentence.
-  const ORDER_PREVIEWS = [
-    {
-      tool: "order_preview",
-      fields: "the price, the lots, the commission, the net, today's band, and every check",
-    },
-    {
-      tool: "eipo_order_preview",
-      fields: "the lots, the shares, the price, the amount committed, the RDN balance, and every check",
-    },
-  ];
-  const ORDER_ENTRY_TOOLS = [
-    ...ORDER_PREVIEWS.map((p) => p.tool),
-    "order_buy",
-    "order_sell",
-    "order_amend",
-    "order_cancel",
-    "eipo_order",
-  ];
-  const previews = ORDER_PREVIEWS.filter((p) => has(p.tool));
-  const orderWrites = ["order_buy", "order_sell", "order_amend", "order_cancel", "eipo_order"].filter(has);
-
-  // Three states, not two, and the middle one is a profile nobody would configure on purpose.
-  //
-  // Gating on "any order tool at all" was the fix for a false NEGATIVE — `STOCKBIT_TOOLS=eipo`
-  // being told order entry was impossible while `eipo_order` was registered. But it turned that
-  // into a false POSITIVE for a hand-picked profile that registers a write and no preview
-  // (STOCKBIT_TOOLS takes individual tool names, so `core,order_buy` is a thing a user can type).
-  // The write tools take a ticket id and nothing else, and tickets are minted only by a preview, so
-  // that server can describe the protocol perfectly and still refuse every call — and the refusal
-  // tells the model to run a tool that does not exist. The protocol needs a preview, so it is
-  // gated on one.
-  const orderBlock = previews.length
-    ? `PLACING AN ORDER IS TWO STEPS, ALWAYS
-${previews.map((p, i) => `${i + 1}. ${p.tool} builds a ticket: ${p.fields}.\n   Relay its "summary" to the user VERBATIM and ask them, in words.`).join("\n")}
-${previews.length + 1}. Only after they agree, call the matching write tool with that ticket id and confirm: true. The
-   write tools take no price and no quantity, so what reaches the exchange is exactly what the user
-   was shown. Never set confirm on their behalf. A ticket expires in two minutes.
-Afterwards, read "outcome" before saying anything. Only "ok" means the order is on the book and was
-seen there. Anything else means the state is uncertain: relay "message" and DO NOT RESEND — a resend
-is how one intention becomes two orders.
-`
-    : orderWrites.length
-      ? `ORDER ENTRY IS REGISTERED HERE BUT CANNOT BE USED
-This server registered ${orderWrites.join(" / ")} without a preview tool. Those take a
-ticket id and nothing else, and tickets are minted only by order_preview / eipo_order_preview, which
-this server did not register — so every call will be refused, and the refusal will name a tool that
-is not here. Do not offer to place, amend or cancel an order. Setting STOCKBIT_TOOLS to include the
-whole trading or eipo family, rather than individual tool names, is what fixes it.
-`
-      : `ORDER ENTRY IS NOT REGISTERED IN THIS SERVER
-This server has none of ${ORDER_ENTRY_TOOLS.join(" / ")}, so there is
-no way to place, amend or cancel an order — or to subscribe to an e-IPO — from here, whatever the
-trading mode says. Do not offer to.
-The trading account can still be READ if the tools above list it. Adding
-STOCKBIT_TOOLS=${surface.profileLabel},trading for equities, or ,eipo for e-IPO subscription, to the
-client's config and restarting it is what changes that — the claim above covers both, so the remedy
-has to name both. It is the user's decision to make.
+  const paperPreview = has("paper_order_preview");
+  const paperWrites = ["paper_order_buy", "paper_order_sell", "paper_order_amend", "paper_order_cancel"].filter(has);
+  const orderBlock = `REAL-MONEY EXECUTION IS NOT AVAILABLE
+This build has no live buy, sell, amend, cancel, IPO subscription, deposit or withdrawal route.
+No setting, environment variable or tool profile can enable real-money execution. Brokerage
+portfolio, cash and order-history tools are read-only and always refer to the real account.
+Local paper_* tools and Stockbit virtual_* tools are separate simulations. Never describe either
+as a real holding, an exchange fill or investment advice.
+${paperPreview ? `LOCAL PAPER ORDERS USE TWO STEPS
+paper_order_preview builds a local simulation ticket. Relay its summary and obtain agreement before
+calling the matching paper_order_* tool. Inspect outcome before reporting success. Paper fills use
+local simulation rules, not Stockbit's website virtual portfolio.
+` : paperWrites.length ? `PAPER WRITES CANNOT BE USED WITHOUT paper_order_preview
+Add the trading family to STOCKBIT_TOOLS to include their required preview tool.
+` : ""}
 `;
 
   const accountBlock = has("portfolio")
@@ -206,12 +150,12 @@ Two arguments, and they are not interchangeable:
   and OTP from scratch. This is for a profile that is broken or held open, NOT for switching
   accounts.
 
-TRADING IS OFF UNTIL THE USER TURNS IT ON
-${has("trading_status") ? "Call trading_status to see whether it is on, and what to say if it is not." : "status reports the trading mode — this server did not register trading_status."}
-The user enables it themselves at a terminal with "stockbit-auth trading-enable"; nothing you can do
-turns it on. The trading session needs their 6-digit PIN, entered at their own terminal via
-"stockbit-auth trading-login". NEVER ask the user for that PIN — no tool here accepts one and this
-server never stores one. Tools that say "Requires the trading session" mean this one.
+PORTFOLIO ACCESS AND SIMULATION
+${has("trading_status") ? "Call trading_status to inspect local paper settings." : "status reports local paper settings."}
+The securities session is only for reading the brokerage account. It requires the user's six-digit
+PIN entered at their own terminal via "stockbit-auth trading-login". NEVER ask for that PIN in chat.
+Local paper mode is enabled at a terminal with "stockbit-auth trading-enable --paper".
+Stockbit website virtual tools use the ordinary Stockbit login and a distinct virtual-only route set.
 
 READING A RESULT — the conventions, once, for every tool
 These used to be restated inside forty-odd tool descriptions. They are the same everywhere, so they

@@ -2,7 +2,7 @@
 
 # Tool reference
 
-**139 tools** (114 read, 25 write) in 17 families, 8 prompts.
+**152 tools** (124 read, 28 write) in 18 families, 8 prompts.
 
 Unset, this server registers the **`core`** profile: **41 default tools** and **6 default prompts**. Everything below is the full `STOCKBIT_TOOLS=all` surface; the rest needs that set.
 
@@ -35,8 +35,9 @@ Every tool carries an **evidence** word — Observed, Read-back or Projected. Th
 | [alerts](#alerts) | 4 | Rules that fire while no client is open | Observed |
 | [pine](#pine) | 1 | TradingView Pine Script generation | Observed |
 | [workflows](#workflows) | 2 | Saved multi-step recipes, also offered as prompts | Observed |
-| [trading](#trading) | 17 | The brokerage account and order entry | Projected |
-| [eipo](#eipo) | 9 | The IPO pipeline and subscribing to one | Projected |
+| [trading](#trading) | 24 | Read-only brokerage account and local paper simulation | Projected |
+| [eipo](#eipo) | 7 | Read-only IPO pipeline and existing subscriptions | Projected |
+| [virtual](#virtual) | 8 | Stockbit website virtual portfolio and simulated orders | Mixed |
 
 ## system
 
@@ -62,7 +63,7 @@ Prices, depth, movers, bars, the session clock.
 | `price_performance` | read | Multi-timeframe price performance (1D/1W/1M/…): close, high, low, and % change per timeframe. | Observed | symbol* |
 | `orderbook` | read | Full order-book depth ladder for a symbol. | Observed | symbol* |
 | `price_bands` | read | The IDX auto-rejection band (ARA/ARB) and the session's foreign flow for a stock. | Observed | symbol* |
-| `chart_series` | read | A whole daily OHLCV series for one symbol in ONE request, oldest bar first. | Observed | symbol*, timeframe*, raw |
+| `chart_series` | read | A chart price series for one symbol in ONE request, oldest observation first. | Observed | symbol*, timeframe*, raw |
 | `running_trade` | read | The running-trade tape: individual prints as they cross the exchange. | Projected | symbol, action, limit, order_by, grouped |
 | `trade_book` | read | Traded volume broken down by price level for a session. | Projected | symbol, mode, data_modes, group_by, limit, chart |
 | `broker_flow_intraday` | read | Per-broker intraday flow for one symbol, minute by minute, returned exactly as Stockbit sends it. | Observed | symbol* |
@@ -71,7 +72,7 @@ Prices, depth, movers, bars, the session clock.
 | `order_queue` | read | The live order queue for one symbol: what is currently resting on the book. | Projected | symbol*, sort_by, limit |
 | `market_session` | read | Where the IDX trading day currently is: pre-opening, session 1, the midday break, session 2, post-closing, or shut. | Projected | — |
 | `prices_batch` | read | A price SERIES for ONE symbol. | Observed | symbols* |
-| `price_market` | read | DOES NOT WORK. | Projected | symbol*, date, boards |
+| `price_market` | read | Per-board activity for one symbol from the working orderbook market_data array: All Market, Regular, Nego and Cash. | Projected | symbol*, date, boards |
 
 ## bandarmology
 
@@ -169,7 +170,7 @@ Posts, news and research from Stockbit's own feed.
 | `stream` | read | Posts from Stockbit's social stream: news, trading ideas, filed reports, insider posts, charts, polls and predictions. | Observed | symbol, category, report_type, keyword, from_date, to_date, limit, last_stream_id, last_reply, watchlist_ids |
 | `news` | read | News posts, market-wide or for one symbol. | Observed | symbol, keyword, from_date, to_date, limit, last_stream_id |
 | `stream_trending` | read | The posts Stockbit is currently promoting as trending, market-wide. | Observed | date, limit, last_stream_id |
-| `stream_post_detail` | read | Read ONE post by id, with the whole payload the detail endpoint returns. | Projected | post_id* |
+| `stream_post_detail` | read | Read ONE post by id, with the whole payload the detail endpoint returns. | Observed | post_id* |
 | `stream_pinned` | read | The posts pinned to a symbol's page — what Stockbit or the company has chosen to keep at the top. | Projected | symbol* |
 | `stream_user` | read | One Stockbit user's posts, by username. | Observed | username*, limit, last_stream_id |
 | `research` | read | Stockbit's research metadata. | Projected | symbol |
@@ -180,11 +181,11 @@ Stockbit's screener — the catalogue, the presets, and running one.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
-| `screener_run` | read | Run an ad-hoc stock screen over Stockbit's IDX metric catalogue and get the matching stocks. | Projected | rules*, watchlist_id, limit |
+| `screener_run` | read | Run an ad-hoc stock screen over Stockbit's IDX metric catalogue and get the matching stocks. | Observed | rules*, watchlist_id, limit, page |
 | `screener_favorites` | read | The screens the user has marked as favourites. | Observed | — |
 | `screener_finitems` | read | Stockbit's fin-item watchlist: the financial-statement line items saved for use as screener columns. | Observed | — |
 | `watchlist_symbols` | read | The tickers in one watchlist, from Stockbit's dedicated symbols route. | Projected | watchlist_id* |
-| `watchlist_search` | read | Search Stockbit's company directory by keyword — the lookup behind the watchlist's add-a-stock box. | Projected | keyword* |
+| `watchlist_search` | read | Search company suggestions for a specific watchlist's add-a-stock box. | Observed | keyword*, watchlist_id*, page |
 
 ## account
 
@@ -199,7 +200,7 @@ The user's watchlists and saved screens, and editing them.
 | `watchlist_delete` | write, destructive | DELETE one of the user's watchlists, and everything in it. | Read-back | watchlist_id*, confirm, confirm_delete_members |
 | `watchlist_add` | write | Add a symbol to one of the user's watchlists. | Read-back | watchlist_id*, symbol*, confirm |
 | `watchlist_remove` | write, destructive | Remove a symbol from one of the user's watchlists. | Read-back | watchlist_id*, symbol*, confirm |
-| `watchlist_favorite` | write | Make a watchlist the favourite — the one Stockbit opens on, and the one THIS SERVER uses when a tool is asked for 'the user's watchlist' without an id. | Read-back | watchlist_id*, confirm |
+| `watchlist_favorite` | write | Set a watchlist's favorite flag. | Read-back | watchlist_id*, favorite, confirm |
 | `screener_save` | write | SAVE a screen to the user's account, so it appears in their screener alongside the ones they built by hand. | Read-back | name*, rules*, watchlist_id, confirm |
 | `screener_delete` | write, destructive | DELETE one of the user's saved screens. | Read-back | template_id*, confirm |
 | `screener_favorite` | write | Mark a saved screen as a favourite, or clear the mark. | Read-back | template_id*, favorite*, confirm |
@@ -214,14 +215,14 @@ Reading and drawing on the user's real chart, in their own browser.
 | `chart_settings` | read | Read the user's saved chart CONFIGURATION — theme, chart properties, drawing-toolbar state, last-used resolution. | Observed | — |
 | `chartbit_layouts` | read | List the chart layouts saved on the Stockbit account: id, name, symbol, resolution and when each was last saved. | Observed | — |
 | `chartbit_layout` | read | Read one saved chart layout by id: its panes, studies and chart properties, decoded. | Observed | layout_id* |
-| `chartbit_drawings` | read | What the user has actually DRAWN on a chart, as stored by Stockbit: each line tool with its type, its anchor points as {time, price}, and its text. | Observed | symbol, layout_id, chart_id |
-| `chartbit_templates` | read | The saved chart, study and drawing templates on the account — the named presets the user has made in Stockbit's own chart UI. | Observed | — |
+| `chartbit_drawings` | read | Read the drawings saved on a Stockbit chart: tool type, anchor points and text. | Observed | symbol, layout_id, chart_id |
+| `chartbit_templates` | read | Read saved chart and study templates, plus drawing templates for one TradingView line-tool type. | Observed | drawing_tool |
 | `chartbit_layout_save` | write, destructive | REPLACE a saved chart layout on the Stockbit account. | Observed | layout_id*, layout, confirm*, allow_lossy |
 | `chartbit_drawings_save` | write, destructive | REPLACE the drawings stored for a chart. | Observed | layout_id*, chart_id*, symbol, sources*, deleted_keys, confirm* |
 | `chartbit_layout_delete` | write, destructive | DELETE a saved chart layout. | Observed | layout_id*, confirm* |
 | `chartbit_open` | read | Open a symbol's Chartbit page in the user's own logged-in browser, and optionally set the timeframe or chart type. | Observed | symbol*, resolution, chart_type, headless |
 | `chartbit_draw` | write | Draw levels, zones, trend lines, channels and markers on the user's REAL Stockbit chart. | Observed | symbol*, annotations*, anchor_date*, replace, headless |
-| `chartbit_clear` | write, destructive | Remove drawings from the user's real chart. | Observed | symbol*, scope*, confirm, headless |
+| `chartbit_clear` | write, destructive | Remove drawings from the user's real chart. | Observed | symbol*, scope*, shape_ids, confirm, headless |
 | `chartbit_shapes` | read | Every drawing currently on the user's chart, with the ones this server created marked `ours`. | Observed | symbol*, kind, ours_only, headless |
 | `chartbit_screenshot` | read | A PNG of the user's chart exactly as it looks right now, including their own drawings, studies and theme. | Observed | symbol*, headless |
 | `chartbit_save` | write | Ask Stockbit to persist the chart now, rather than waiting for its autosave, then check over the API that it did. | Observed | symbol*, layout_id, chart_id, headless |
@@ -258,7 +259,7 @@ Saved multi-step recipes, also offered as prompts.
 
 ## trading
 
-The brokerage account and order entry.
+Read-only brokerage account and local paper simulation.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
@@ -272,17 +273,24 @@ The brokerage account and order entry.
 | `trading_info` | read | The account's trading state and, most importantly, ITS OWN commission rates. | Projected | — |
 | `stock_tradable` | read | Whether the exchange will accept an order in these symbols right now. | Projected | symbols* |
 | `account` | read | Which brokerage account this session is attached to, and its sub-accounts. | Projected | — |
-| `trading_status` | read | Whether this server may place an order right now, and why not if it may not. | Projected | — |
-| `order_preview` | read | Price an order and check it, WITHOUT sending anything. | Projected | action*, symbol, price, lots, order_id |
-| `order_buy` | write, destructive | PLACE A REAL BUY ORDER on the Indonesian exchange with the user's own money. | Projected | ticket_id*, confirm |
-| `order_sell` | write, destructive | PLACE A REAL SELL ORDER on the Indonesian exchange, against the user's actual position. | Projected | ticket_id*, confirm |
-| `order_amend` | write, destructive | CHANGE a working order's price or size on the exchange. | Projected | ticket_id*, confirm |
-| `order_cancel` | write, destructive | CANCEL a working order. | Projected | ticket_id*, confirm |
+| `paper_portfolio` | read | LOCAL PAPER SIMULATION: portfolio from this machine’s paper ledger. | Projected | — |
+| `paper_position` | read | LOCAL PAPER SIMULATION: position from this machine’s paper ledger. | Projected | symbol* |
+| `paper_cash_balance` | read | LOCAL PAPER SIMULATION: cash balance from this machine’s paper ledger. | Projected | — |
+| `paper_orders` | read | LOCAL PAPER SIMULATION: orders from this machine’s paper ledger. | Projected | symbol |
+| `paper_order_detail` | read | LOCAL PAPER SIMULATION: order detail from this machine’s paper ledger. | Projected | order_id* |
+| `paper_order_history` | read | LOCAL PAPER SIMULATION: order history from this machine’s paper ledger. | Projected | kind, symbol, period, page, limit |
+| `paper_trade_performance` | read | LOCAL PAPER SIMULATION: trade performance from this machine’s paper ledger. | Projected | series |
+| `trading_status` | read | Local paper-simulation policy and securities session presence. | Projected | — |
+| `paper_order_preview` | read | LOCAL PAPER SIMULATION: price a paper order and check it, WITHOUT sending anything. | Projected | action*, symbol, price, lots, order_id |
+| `paper_order_buy` | write, destructive | LOCAL PAPER SIMULATION ONLY: buy a paper order in this machine's ledger. | Projected | ticket_id*, confirm |
+| `paper_order_sell` | write, destructive | LOCAL PAPER SIMULATION ONLY: sell a paper order in this machine's ledger. | Projected | ticket_id*, confirm |
+| `paper_order_amend` | write, destructive | LOCAL PAPER SIMULATION ONLY: amend a paper order in this machine's ledger. | Projected | ticket_id*, confirm |
+| `paper_order_cancel` | write, destructive | LOCAL PAPER SIMULATION ONLY: cancel a paper order in this machine's ledger. | Projected | ticket_id*, confirm |
 | `trading_forget` | write | Cancel the user's standing "don't ask again", so the next order asks them directly again. | Projected | — |
 
 ## eipo
 
-The IPO pipeline and subscribing to one.
+Read-only IPO pipeline and existing subscriptions.
 
 | Tool | Kind | When to use | Evidence | Inputs |
 |---|---|---|---|---|
@@ -293,8 +301,21 @@ The IPO pipeline and subscribing to one.
 | `eipo_price_groups` | read | The price bands a subscription may be placed at. | Projected | — |
 | `eipo_rdn_balance` | read | The RDN cash an IPO subscription is funded from. | Projected | — |
 | `eipo_unboxing` | read | Stockbit's own write-up of an offering. | Projected | emiten_code* |
-| `eipo_order_preview` | read | Price and check an IPO subscription WITHOUT committing to it. | Projected | emiten_code*, lots*, price* |
-| `eipo_order` | write, destructive | COMMIT A REAL IPO SUBSCRIPTION with the user's own money. | Projected | ticket_id*, confirm |
+
+## virtual
+
+Stockbit website virtual portfolio and simulated orders.
+
+| Tool | Kind | When to use | Evidence | Inputs |
+|---|---|---|---|---|
+| `virtual_portfolio` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | — |
+| `virtual_position` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | symbol* |
+| `virtual_orders` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | — |
+| `virtual_config` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | — |
+| `virtual_activate` | write | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | confirm |
+| `virtual_order` | write | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | symbol*, action*, price*, lots*, confirm |
+| `virtual_order_amend` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | order_id*, symbol*, price*, lots*, confirm |
+| `virtual_order_cancel` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | order_id*, confirm |
 
 ## Prompts
 

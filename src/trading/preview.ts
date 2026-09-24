@@ -2,12 +2,8 @@
  * The order ticket: everything that is known before an order is sent, and every reason it might be
  * a bad idea, assembled into one object a person can say yes or no to.
  *
- * ## Why a preview exists at all
- *
- * A tool that took a symbol, a price and a quantity and placed an order would be one malformed
- * argument away from a real trade. The two-step protocol makes the write tools take a ticket id and
- * nothing else, so the order that is placed is exactly the order that was described — the
- * confirmation and the request are the same object, not two descriptions that have to agree.
+ * Preview tickets describe a LOCAL simulation, never a real-money commitment. The
+ * MCP wrapper supplies paper-ledger account readers; market checks still use Stockbit.
  *
  * ## Checks that failed, and checks that could not be run
  *
@@ -447,7 +443,7 @@ export async function previewOrder(input: PreviewInput): Promise<OrderTicket> {
           "value_within_cap",
           true,
           "No per-order value cap is configured. Set one with `stockbit-auth trading-enable " +
-            "--max-order-value N`; it is also what `autoConfirm` requires.",
+            "--paper --max-order-value N`.",
         ),
       );
     } else {

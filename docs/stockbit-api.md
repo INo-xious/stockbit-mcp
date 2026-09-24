@@ -84,10 +84,10 @@ The real-time protobuf service is named `securities.transactional.datafeed.v1.To
     **empty body**, response nested `{ data: { data: {...} } }`. Live probe with an invalid bearer
     returns `401 UNAUTHORIZED` (endpoint exists). Frontend: `post(q7 + "/login/refresh", null, {headers:{Authorization: Bearer <UR().refresh.token>}})`.
   - **Securities/trading token** (portfolio, orders — now used, see ADR-0004). Unlock chain:
-    `GET exodus/sekuritas/auth/token` → `{login_token}` → `POST carina/auth/v2/login {login_token, pin}`
+    `GET exodus/sekuritas/auth/token` → `{data:{token,target:"2"}}` → `POST carina/auth/v2/login {login_token, pin}`
     → `{access_token, refresh_token}`. Refresh: `POST carina/auth/refresh` with a `{refresh_token}`
-    **body** and no Authorization header — that is what Stockbit's own client does, and it is the one
-    thing about this chain that differs from the main session. `POST carina/auth/pin/validate
+    **body and Authorization bearer containing that same refresh token**. Frontend modules88216 and
+    94615 confirm both placements (2026-09-24). `POST carina/auth/pin/validate
     {pin, purpose}` exists for actions that demand the PIN again.
   - **e-IPO token** (`api-sekuritas`): `GET exodus/auth/eipo/webview/link` → the grant in that link →
     `POST sekuritas/partner/eipo/access_token` → `{access_token, refresh_token}`. Refresh:

@@ -26,6 +26,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { StockbitError } from "../http/errors.js";
 import { normalizeSymbol } from "../symbol.js";
 import { stockbitPath } from "../paths.js";
 
@@ -72,6 +73,21 @@ export function loadOurDrawings(symbolInput: string): OurDrawing[] {
     // can be inspected.
     return [];
   }
+}
+
+/** Select a subset for cleanup without ever admitting an unowned chart entity. */
+export function selectOurDrawings(symbol: string, ids?: readonly string[]): OurDrawing[] {
+  const owned = loadOurDrawings(symbol);
+  if (ids === undefined) return owned;
+  if (!ids.length || ids.some(id => typeof id !== "string" || !id.length)) {
+    throw new StockbitError("invalid_param", "shape_ids must contain at least one nonempty entity id.");
+  }
+  const known = new Set(owned.map(d => d.tvEntityId));
+  if (ids.some(id => !known.has(id))) {
+    throw new StockbitError("invalid_param", "Every shape_id must belong to this server's recorded drawings for this symbol.");
+  }
+  const selected = new Set(ids);
+  return owned.filter(d => selected.has(d.tvEntityId));
 }
 
 function write(symbol: string, drawings: OurDrawing[]): void {

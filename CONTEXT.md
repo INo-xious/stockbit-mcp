@@ -19,12 +19,13 @@ A glossary, not a spec. One meaning per word; the code and the docs use these wo
 - **Rotation** — a successful `/login/refresh` mints a new refresh token and retires the one presented. Observed, not assumed. It is why two processes refreshing at once lock each other out, and why the browser loading a Stockbit page spends the CLI's credential.
 - **Store / backend** — where credentials live: macOS Keychain, or an encrypted file elsewhere.
 - **PIN** — the six-digit Stockbit Sekuritas trading PIN. Typed only at a terminal; no tool accepts one.
-- **Trading mode** — `off` (default), `paper` (local ledger, no real money, no PIN), `live` (real orders). Set only by `stockbit-auth trading-enable --paper|--live`.
+- **Trading mode** — `off` (default) or `paper` (local ledger, no real money, no PIN). Legacy live settings fail closed. Set only by `stockbit-auth trading-enable --paper`.
 - **Paper account** — the local ledger paper mode trades against; every paper result says "PAPER ACCOUNT".
+- **Virtual account** — Stockbit website simulation, accessed only through `/virtualtrading/` routes. Distinct from the real portfolio and local paper ledger.
 
 ## Orders
-- **Ticket** — an order intent priced and checked by `order_preview`; in memory, expires in two minutes, spent before the request goes out. Write tools take a ticket id, an optional confirmation, and nothing else.
-- **Elicited** — a *person* answered, through MCP elicitation, the only channel in the protocol that reaches one. Distinct from **explicit**, which is `confirm: true`, a boolean the calling *model* set. Where a person can be reached they are asked first and their answer decides it; where they cannot, `confirm: true` is the only gate and the result and the audit line both say so. Capped live autoconfirm is an operator-enabled exception, set at a terminal, that skips the ask entirely. ADR-0010.
+- **Ticket** — an order intent priced and checked by `paper_order_preview`; in memory, expires in two minutes, spent before the request goes out. Write tools take a ticket id, an optional confirmation, and nothing else.
+- **Elicited** — a *person* answered, through MCP elicitation, the only channel in the protocol that reaches one. Distinct from **explicit**, which is `confirm: true`, a boolean the calling *model* set. Where a person can be reached they are asked first and their answer decides it; where they cannot, `confirm: true` is the only gate and the result and the audit line both say so. Live execution and autoconfirm have been removed. Historical ADR-0010 documents the confirmation gate.
 - **Remember grant** — a "don't ask again" the person creates for themselves by ticking a second box in that dialog. In memory only, and bounded five ways at once: **new orders only** (a buy or a sell — never an amend, a cancel or an e-IPO subscription), the value of the order they actually approved, fifteen minutes, the trading policy in force when they ticked it, and any later revocation. **Waivable** is the code's word for the first of those, and it is stated by the caller rather than inferred from the commitment's value.
 - **Outcome** — what is known after a write: `ok` · `rejected` · `not-visible` · `landed-despite-error` · `not-found-after-error` · `outcome-unknown` · `write-failed`. `ok` is the only clean success; `landed-despite-error` is also visible on read-back but followed an errored request. Never resend a non-`ok` outcome.
 - **Check** — one preview validation; `ok:false` blocks; `unverified` means the input could not be read ("not contradicted", never "confirmed").
@@ -34,8 +35,8 @@ A glossary, not a spec. One meaning per word; the code and the docs use these wo
 - **readFrom** — the wire key a value was read from. **unmappedKeys** — names of unrecognised fields on an account response (values dropped). **unmapped.sampleKeys** — the same on market data, where the raw row is returned. **derived** — a value computed rather than read.
 
 ## The server
-- **Tool** — one MCP tool. **Read tool** (a noun: `quote`, `orders`) reads; **write tool** (a verb: `order_buy`, `watchlist_add`) changes something and is confirm-gated.
-- **Family** — one registration module = one Stockbit UI section (market, bandarmology, analysis, company, fundamentals, insider, corpaction, stream, screener, account, chartbit, alerts, pine, workflows, trading, eipo, system).
+- **Tool** — one MCP tool. **Read tool** (a noun: `quote`, `orders`) reads; **write tool** (a verb: `paper_order_buy`, `watchlist_add`) changes something and is confirm-gated.
+- **Family** — one registration module = one Stockbit UI section (market, bandarmology, analysis, company, fundamentals, insider, corpaction, stream, screener, account, chartbit, alerts, pine, workflows, trading, eipo, virtual, system).
 - **Profile** — which families/tools a server instance registers (`STOCKBIT_TOOLS`).
 - **Recipe / workflow** — a saved sequence of read tools (`workflow_run`); recipes cannot reach a write tool. **Prompt** — the same workflow offered as an MCP prompt.
 - **Daemon** — `stockbit-alerts`, the process that evaluates alert rules while no client is open.

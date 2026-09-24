@@ -78,7 +78,7 @@ test("every capture route labels itself, and exactly one is a harvest", () => {
   // added with the WRONG method compiles fine and silently reintroduces the bug. This is the check
   // for that: the cookie read is the only harvest, and everything else is a live login response.
   const login = SRC("login.ts");
-  const calls = [...login.matchAll(/accept\((?:refresh|token),\s*"([^"]+)",\s*"(\w+)"\)/g)]
+  const calls = [...login.matchAll(/accept\((?:refresh|token),\s*"([^"]+)",\s*"(\w+)"(?=\s*[,\)])/g)]
     .map((m) => ({ via: m[1], method: m[2] }));
 
   assert.ok(calls.length >= 4, `expected every accept() call to carry a method, found ${calls.length}`);

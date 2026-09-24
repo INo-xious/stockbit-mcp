@@ -65,6 +65,7 @@ import { registerScreenerTools } from "./screener.js";
 import { registerChartbitTools } from "./chartbit.js";
 import { registerTradingTools } from "./trading.js";
 import { registerEipoTools } from "./eipo.js";
+import { registerVirtualTools } from "./virtual.js";
 import { registerAccountWriteTools } from "./account.js";
 
 /** Sub-panel titles, matching the periods `PANEL_PRESETS` declares. */
@@ -1247,7 +1248,7 @@ export function registerTools(
       "silent-wrong-answer generator: check which one you are holding before comparing anything, " +
       "and never compare `volume` here against `volumeLots` there without the ×100.\n" +
       "`market_data[]` carries the per-board split (All Market / Regular / Nego / Cash). It is also " +
-      "the answer for anything price_market looks like it should do — that route cannot be called.\n" +
+      "also presented by price_market, with optional board filtering and an explicit orderbook source.\n" +
       "FOREIGN FLOW HAS NO DATE ON THIS PAYLOAD. `fbuy`/`fsell`/`fnet` arrive with nothing saying " +
       "which session they are from, and foreign flow publishes at roughly 18:00 WIB, so before that " +
       "release they are the PREVIOUS session's. price_bands surfaces this as an explicitly null " +
@@ -1793,6 +1794,7 @@ export function registerTools(
   registerChartbitTools(define.family("chartbit", { evidence: "observed" }));
   registerTradingTools(define.family("trading", { evidence: "projected" }));
   registerEipoTools(define.family("eipo", { evidence: "projected" }));
+  registerVirtualTools(define.family("virtual", { evidence: "projected" }));
   registerAccountWriteTools(define.family("account", { evidence: "read-back" }));
 
   /* --------------------------------- workflows --------------------------------- */

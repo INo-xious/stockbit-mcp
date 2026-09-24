@@ -32,6 +32,7 @@ import { normalizeSymbol } from "../symbol.js";
 import { EXODUS_ROUTES } from "./routes/exodus.js";
 import { CARINA_ROUTES } from "./routes/carina.js";
 import { SEKURITAS_ROUTES } from "./routes/sekuritas.js";
+import { VIRTUAL_ROUTES } from "./routes/virtual.js";
 import type { AuthKind, Host, HttpMethod, RouteSpec } from "./routes/_spec.js";
 
 export type { AuthKind, Host, HttpMethod, RouteSpec } from "./routes/_spec.js";
@@ -310,7 +311,7 @@ export function mergeRoutes<
  * nothing used. Two constructions can drift; one cannot.
  */
 export const ROUTES = mergeRoutes(
-  EXODUS_ROUTES,
+  mergeRoutes(EXODUS_ROUTES, VIRTUAL_ROUTES, {}),
   CARINA_ROUTES,
   SEKURITAS_ROUTES,
 ) satisfies Record<string, RouteSpec>;
@@ -347,14 +348,14 @@ const AUTH_DOMAIN: Record<AuthKind, TokenDomain | null> = {
  * the bare minted token. Sending it as `Bearer <token>` is a different header value and this
  * endpoint does not accept it.
  */
-type Placement = "header" | "rawHeaderToken" | "bodyRefreshToken" | "queryToken" | "none";
+type Placement = "header" | "rawHeaderToken" | "headerAndBodyRefreshToken" | "queryToken" | "none";
 
 const PLACEMENT: Record<AuthKind, Placement> = {
   main: "header",
   securities: "header",
   eipo: "header",
   refreshMain: "header",
-  refreshSecurities: "bodyRefreshToken",
+  refreshSecurities: "headerAndBodyRefreshToken",
   refreshEipo: "queryToken",
   webviewToken: "rawHeaderToken",
   none: "none",
@@ -545,10 +546,11 @@ export async function authenticatedRequest(
     throw new StockbitError("invalid_param", `Route ${name} is a GET and cannot carry a body`);
   }
 
-  // Carina's refresh takes the token in the body. Merged here so the credential never has to be
-  // assembled into a body by a call site.
+  // Stockbit's refresh client (frontend module94615) sends the securities REFRESH
+  // token in Authorization as well as the refresh_token body. Both placements
+  // belong here so a call site never constructs a credential-bearing body/header.
   const effectiveBody =
-    placement === "bodyRefreshToken"
+    placement === "headerAndBodyRefreshToken"
       ? { ...((body as Record<string, unknown>) ?? {}), refresh_token: token }
       : body;
 
@@ -560,7 +562,7 @@ export async function authenticatedRequest(
       method,
       headers: {
         ...defaultHeaders(),
-        ...(placement === "header" ? { authorization: `Bearer ${token}` } : {}),
+        ...(placement === "header" || placement === "headerAndBodyRefreshToken" ? { authorization: `Bearer ${token}` } : {}),
         // Raw, no scheme. See the placement note above: captured from Stockbit's own client.
         ...(placement === "rawHeaderToken" ? { authorization: String(token) } : {}),
         ...(effectiveBody !== undefined ? { "content-type": "application/json" } : {}),

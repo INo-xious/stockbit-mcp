@@ -837,25 +837,36 @@ test("the prices_batch cache key follows the symbol", async () => {
 
 /* --------------------------------- market prices --------------------------------- */
 
-test("price_market refuses without a request, because the route cannot be called", async () => {
-  // Measured 2026-09-01: /company-price-feed/prices/:symbol/market answers 400 with NO parameters
-  // at all, and with every board spelling and parameter name tried. A bare call being refused is
-  // what settles it — if sending nothing is also an error, no argument combination is the fix.
-  await assert.rejects(
-    () => getMarketPrices({ symbol: "BBRI" }),
-    (err: unknown) => err instanceof StockbitError && /cannot be called/.test(err.message),
-  );
-  assert.equal(requests, 0, "no round trip is spent to be told the request is invalid");
+const BOARD_ROWS = [
+  { label: "All Market", volume: { raw: "10000", formatted: "10 K" } },
+  { label: "Regular", volume: { raw: "9000", formatted: "9 K" } },
+  { label: "Nego", volume: { raw: "1000", formatted: "1 K" } },
+  { label: "Cash", volume: { raw: "0", formatted: "0" } },
+];
+
+test("price_market reads the working orderbook board-activity source", async () => {
+  responder = () => ({ data: { market_data: BOARD_ROWS } });
+  const result = await getMarketPrices({ symbol: "bbri" });
+  assert.equal(result.symbol, "BBRI");
+  assert.equal(result.source, "orderbook.market_data");
+  assert.deepEqual(result.marketData, BOARD_ROWS);
+  assert.match(lastUrl("/orderbook/").pathname, /orderbook\/companies\/BBRI/);
+  assert.equal(requests, 1);
 });
 
-test("price_market names orderbook as the thing that actually answers", async () => {
-  // The workaround is the point of the refusal: orderbook.market_data[] already carries the
-  // per-board split, so a caller is redirected rather than left with a dead tool.
-  await assert.rejects(
-    () => getMarketPrices({ symbol: "BBRI", date: "2026-08-03", boards: ["REGULER"] }),
-    (err: unknown) => err instanceof StockbitError && /orderbook/.test(err.message),
-  );
-  assert.equal(requests, 0);
+test("price_market filters observed labels and refuses unsupported date/board arguments", async () => {
+  responder = () => ({ data: { market_data: BOARD_ROWS } });
+  const result = await getMarketPrices({ symbol: "BBRI", boards: ["rg", "TN"] });
+  assert.deepEqual(result.marketData, [BOARD_ROWS[1], BOARD_ROWS[3]]);
+  const before = requests;
+  await assert.rejects(() => getMarketPrices({ symbol: "BBRI", date: "2026-08-03" }), /cannot honor a date filter/);
+  await assert.rejects(() => getMarketPrices({ symbol: "BBRI", boards: ["mystery"] }), /Unknown market board/);
+  assert.equal(requests, before, "unsupported filters fail before requesting anything");
+});
+
+test("price_market reports a missing board array as schema drift, not no trading", async () => {
+  responder = () => ({ data: null });
+  await assert.rejects(() => getMarketPrices({ symbol: "BBRI" }), (error) => error instanceof StockbitError && error.kind === "schema_drift");
 });
 
 
@@ -902,9 +913,32 @@ test("the daily chart carries its close in `value`, and empty OHL is reported as
   assert.equal(series.mapped.close, "value", "the close is read from `value`");
   assert.equal(series.bars.length, 2);
   assert.equal(series.bars[0].close, 2930);
+  assert.equal(series.bars[0].value, null, "a price level is not traded value in IDR");
+  assert.equal(series.mapped.value, undefined);
   // Present-but-empty must be as loud as absent: every candle here is flat.
   assert.ok(
     series.warnings.some((w) => /open\/high\/low/.test(w)),
     "a flat series must say so even when the keys were present and empty",
   );
+});
+
+test("the live intraday zero timestamp is recovered without calling hourly samples daily bars", async () => {
+  responder = () => ({ data: { prices: [
+    { date: "1790236800000", formatted_date: "2026-09-24 15:00:00", value: "3160", open: "", high: "", low: "", volume: "" },
+    { date: "1790240400000", formatted_date: "2026-09-24 16:00:00", value: "3140", open: "", high: "", low: "", volume: "" },
+    { date: "0", formatted_date: "2026-09-24 16:14:00", value: "3140", open: "", high: "", low: "", volume: "" },
+  ] } });
+  const series = await getSeriesBars("BBRI", "1w");
+  assert.equal(series.granularity, "intraday");
+  assert.equal(series.timezone, "Asia/Jakarta");
+  assert.equal(series.dateFallbackCount, 1);
+  assert.equal(series.mapped.date, "formatted_date");
+  assert.deepEqual(series.bars.map((bar) => bar.date), ["2026-09-24T15:00:00+07:00", "2026-09-24T16:00:00+07:00", "2026-09-24T16:14:00+07:00"]);
+  assert.match(series.warnings.join(" "), /intraday series, not daily/);
+  assert.equal(series.bars[2].close, 3140);
+});
+
+test("a zero date without an explicit fallback still refuses the series", async () => {
+  responder = () => ({ data: { prices: [{ date: "0", value: "3140" }] } });
+  await assert.rejects(() => getSeriesBars("BBRI", "1w"), /no usable date/);
 });

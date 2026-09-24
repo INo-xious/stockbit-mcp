@@ -32,9 +32,11 @@ import { writeBrowserProfile } from "./browserprofile.js";
 import { fileDir, getStore, type StoreSlot } from "./store.js";
 import { HOSTS } from "../config.js";
 import { logStderr } from "../redact.js";
-import { extractRefresh, refreshFromRawBody, tokenUrlAllowed } from "./capture.js";
+import { extractRefresh, refreshFromRawBody, securitiesTokenUrlAllowed, tokenUrlAllowed } from "./capture.js";
 import { captureWebSession, readCredentialStorage, saveWebSession } from "./websession.js";
-import { decodeJwt } from "./session.js";
+import { adoptAccessToken, decodeJwt, parseRefresh } from "./session.js";
+import { writeAccessCache } from "./accesscache.js";
+import { clearSessionHealth } from "./health.js";
 import { syncStoreFromBrowser } from "./resync.js";
 import { findBrowser, findBrowsers } from "./browsers.js";
 
@@ -206,6 +208,54 @@ export interface LoginResult {
   method?: CaptureMethod;
 }
 
+/** The HTTP response already observed by a login capture; never includes request credentials. */
+export interface CapturedLoginResponse {
+  url: string;
+  status: number;
+  body: string;
+  base64Encoded?: boolean;
+}
+
+/**
+ * Persist a captured refresh token, retaining the access token from a securities login as well.
+ * The browser fallback must hand the same pair to the next MCP process as a direct PIN login.
+ * Main captures retain their existing cookie/harvest precedence; a missing access token still
+ * permits the established refresh-only capture. Exported for an offline process-handoff test.
+ */
+export function persistCapturedLogin(
+  refresh: string,
+  slot: StoreSlot,
+  response?: CapturedLoginResponse,
+): void {
+  getStore(slot).set(refresh);
+  if (
+    slot !== "securities" || !response || typeof response.status !== "number" ||
+    response.status < 200 || response.status >= 300 ||
+    !securitiesTokenUrlAllowed(response.url)
+  ) return;
+
+  let parsed: ReturnType<typeof parseRefresh>;
+  try {
+    const text = response.base64Encoded ? Buffer.from(response.body, "base64").toString("utf8") : response.body;
+    const body = JSON.parse(text) as Record<string, unknown>;
+    const data = body?.data as Record<string, unknown> | undefined;
+    // The observed Carina login/refresh envelope is {data:{access_token,refresh_token}}.
+    // Never adopt an unrelated nested token or pair it with a different captured refresh token.
+    if (
+      body?.error || body?.error_type || body?.success === false ||
+      typeof data?.access_token !== "string" || !data.access_token ||
+      data.refresh_token !== refresh
+    ) return;
+    parsed = parseRefresh(body);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(parsed.expiresAt) || parsed.expiresAt <= Date.now() / 1000) return;
+  adoptAccessToken("securities", parsed.access, parsed.expiresAt, refresh);
+  writeAccessCache("securities", parsed.access, parsed.expiresAt, refresh);
+  clearSessionHealth("securities");
+}
+
 /**
  * Must this capture be proven against the API before the CLI may call it a success?
  *
@@ -354,7 +404,7 @@ export async function captureViaBrowserLogin(
   };
 
   const cdp = await CDP.connect(wsUrl);
-  const tracked = new Map<string, { sid?: string; url: string }>();
+  const tracked = new Map<string, { sid?: string; url: string; status: number }>();
   const attached = new Set<string>();
 
   return new Promise<LoginResult>((resolve, reject) => {
@@ -538,7 +588,7 @@ export async function captureViaBrowserLogin(
       void cleanup().finally(() => resolve(result));
     };
 
-    const accept = (refresh: string, via: string, method: CaptureMethod) => {
+    const accept = (refresh: string, via: string, method: CaptureMethod, response?: CapturedLoginResponse) => {
       if (done) return;
       // Persistence is separated from recognition because both callers sit inside a catch that
       // logs "getResponseBody failed" at debug level. A store write that throws there — a locked
@@ -556,7 +606,7 @@ export async function captureViaBrowserLogin(
       // settle, and the CLI `process.exit` that follows it, before the write ever landed.
       if (persist) {
         try {
-          getStore(options.slot ?? "main").set(refresh);
+          persistCapturedLogin(refresh, options.slot ?? "main", response);
         } catch (err) {
           fail(
             `Session was captured but could not be stored: ${err instanceof Error ? err.message : String(err)}`,
@@ -649,7 +699,9 @@ export async function captureViaBrowserLogin(
           const res = await cdp.send("Fetch.getResponseBody", { requestId }, sid);
           const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
           dbg("fetch-intercepted", status, url, "-> refresh found:", Boolean(refresh));
-          if (refresh) accept(refresh, "intercepted", "intercepted");
+          if (refresh) accept(refresh, "intercepted", "intercepted", {
+            url, status, body: res?.body ?? "", base64Encoded: Boolean(res?.base64Encoded),
+          });
         } catch (e) {
           dbg("Fetch.getResponseBody failed", url, String(e));
         } finally {
@@ -671,7 +723,9 @@ export async function captureViaBrowserLogin(
         const res = await cdp.send("Network.getResponseBody", { requestId }, sid);
         const refresh = refreshFromRawBody(res?.body ?? "", Boolean(res?.base64Encoded));
         dbg("checked body", info.url, "-> refresh found:", Boolean(refresh));
-        if (refresh) accept(refresh, "network", "intercepted");
+        if (refresh) accept(refresh, "network", "intercepted", {
+          url: info.url, status: info.status, body: res?.body ?? "", base64Encoded: Boolean(res?.base64Encoded),
+        });
       } catch (e) {
         dbg("getResponseBody failed", info.url, String(e));
       }
@@ -690,7 +744,7 @@ export async function captureViaBrowserLogin(
       const mime: string = r.mimeType ?? "";
       const authish = /\/login|\/auth|social|refresh|token|session/i.test(url);
       if (mime.includes("json") || authish) {
-        tracked.set((p as any).requestId, { sid, url });
+        tracked.set((p as any).requestId, { sid, url, status: r.status });
         if (authish) {
           dbg("candidate response", r.status, mime, url);
           void tryCapture((p as any).requestId, sid);

@@ -9,14 +9,15 @@
  *
  * The check is an allow-list, deliberately: a deny-list only catches the mistakes someone already
  * thought of. Anything that is not a compiled `.js` under `dist/bin` or `dist/src`, or one of the
- * six root files a consumer actually reads, is an offender — including files this project has not
+ * explicitly named consumer documentation, is an offender — including files this project has not
  * invented yet.
  */
 import { execFileSync, execSync } from "node:child_process";
 import { basename } from "node:path";
 
 /** Exactly what belongs in the tarball. Anything else fails the run. */
-const ALLOWED = /^(dist\/(bin|src)\/.+\.js|README(\.id)?\.md|CHANGELOG\.md|SECURITY\.md|LICENSE|package\.json)$/;
+// npm also includes docs/README.md automatically when files from docs/ are packaged.
+const ALLOWED = /^(dist\/(bin|src)\/.+\.js|docs\/(README|CLIENTS|TOOLS|VERIFICATION)\.md|README(\.id)?\.md|CHANGELOG\.md|SECURITY\.md|LICENSE|package\.json)$/;
 
 /**
  * Names that mean a specific past mistake came back.
@@ -110,7 +111,7 @@ function main() {
   }
 
   const js = files.filter((f) => f.startsWith("dist/")).length;
-  console.log(`check:pack OK — ${name}@${version}: ${files.length} files (${js} compiled, ${files.length - js} root).`);
+  console.log(`check:pack OK — ${name}@${version}: ${files.length} files (${js} compiled, ${files.length - js} documentation/metadata).`);
 }
 
 main();

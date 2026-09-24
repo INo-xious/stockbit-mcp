@@ -29,7 +29,6 @@ import { clearTickets, peek, setClock, resetClock } from "../src/trading/tickets
 import { forgetRemember, grantRemember } from "../src/trading/remember.ts";
 import { findGrant, ensureEipoSession } from "../src/eipo/session.ts";
 import { getMyOrder, getRdnBalance, listOfferings, normalizeEmiten } from "../src/eipo/api.ts";
-import { eipoLogPath, eipoOrderBody, placeEipoOrder, previewEipoOrder, readVerdict } from "../src/eipo/order.ts";
 import { registerEipoTools } from "../src/tools/eipo.ts";
 import type { Definer, ToolHandler } from "../src/tools/_define.ts";
 
@@ -44,7 +43,7 @@ const SECRET_ID = "9988776655443322";
 
 const wire = {
   /** How the webview link answers: a token field, a link with one in its query, or neither. */
-  grantShape: "field" as "field" | "link" | "missing",
+  grantShape: "field" as "field" | "link" | "missing" | "unavailable",
   /** Answer the place with this status instead of recording it. */
   rejectPlaceWith: null as null | { status: number; body: unknown },
   /** Fail the place at the socket. `landed` records it anyway; `lost` does not. */
@@ -83,6 +82,7 @@ before(() => {
       return json({ data: { access_token: farFutureJwt() } });
     }
     if (path.includes("/auth/eipo/webview/link")) {
+      if (wire.grantShape === "unavailable") return json({ message: "Unrecognized Command" }, 404);
       if (wire.grantShape === "missing") return json({ data: {} });
       return wire.grantShape === "link"
         ? json({ data: { link: "https://eipo.stockbit.com/open?token=GRANT-FROM-LINK&lang=id" } })
@@ -159,7 +159,7 @@ beforeEach(() => {
   wire.failDetailFrom = null;
   wire.verifyBody = { data: { valid: true } };
   wire.hideOrder = false;
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000 });
+  setPolicy({ mode: "off", maxOrderValueIdr: 100_000_000 });
 });
 
 /* ------------------------------------ the grant ------------------------------------ */
@@ -232,359 +232,22 @@ test("no subscription is an answer, not an error", async () => {
 
 /* ----------------------------------- the verdict ----------------------------------- */
 
-test("Stockbit's own verify is read as accepted, refused, or unreadable — three answers", () => {
-  assert.deepEqual(readVerdict({ data: { valid: true } }), { accepted: true });
-  assert.equal(readVerdict({ data: { eligible: false, message: "quota exceeded" } }).accepted, false);
-  assert.equal(readVerdict({ message: "You are not eligible for this offering" }).accepted, false);
-  assert.equal(readVerdict({ data: { something: 1 } }).accepted, null, "unreadable is not a no");
-});
-
-/* ------------------------------------ the preview ------------------------------------ */
-
-test("the preview's arithmetic and its summary state what is being committed", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 10, price: 700 });
-  assert.equal(ticket.kind, "eipo");
-  assert.equal(ticket.shares, 1000);
-  assert.equal(ticket.amountIdr, 700_000);
-  assert.match(ticket.summary, /SUBSCRIBE to BREN/);
-  assert.match(ticket.summary, /Rp 700,000/);
-  assert.match(ticket.summary, /allotment is often smaller/);
-  assert.match(ticket.summary, /cannot be cancelled by selling/);
-});
-
-test("a refusal from Stockbit's own verification blocks the subscription", async () => {
-  wire.verifyBody = { data: { valid: false, message: "subscription window closed" } };
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const check = ticket.checks.find((c) => c.name === "server_verified")!;
-  assert.equal(check.ok, false);
-  assert.match(check.detail, /window closed/);
-  assert.match(ticket.summary, /CANNOT BE PLACED/);
-});
-
-test("a verification that cannot be read passes as unverified rather than blocking", async () => {
-  wire.verifyBody = { data: { unexpected: true } };
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const check = ticket.checks.find((c) => c.name === "server_verified")!;
-  assert.equal(check.ok, true);
-  assert.equal(check.unverified, true);
-  assert.match(ticket.warnings.join(" "), /not contradicted/);
-});
-
-test("a subscription larger than the RDN balance fails the funding check", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1000, price: 700 });
-  const check = ticket.checks.find((c) => c.name === "rdn_sufficient")!;
-  assert.equal(check.ok, false);
-  assert.match(check.detail, /more than the Rp 25,000,000 available/);
-});
-
-test("lots and price are validated before any request goes out", async () => {
-  sent.length = 0;
-  await assert.rejects(() => previewEipoOrder({ emitenCode: "BREN", lots: 0, price: 700 }), /positive whole number/);
-  await assert.rejects(() => previewEipoOrder({ emitenCode: "BREN", lots: 1, price: -1 }), /positive number/);
-  assert.deepEqual(sent, []);
-});
-
-/* ------------------------------------ refusals ------------------------------------ */
-
-async function refuses(fn: () => Promise<unknown>, pattern: RegExp): Promise<void> {
-  const before = sent.filter((s) => s.url.endsWith("/eipo/order")).length;
-  await assert.rejects(fn, pattern);
-  const after = sent.filter((s) => s.url.endsWith("/eipo/order")).length;
-  assert.equal(after, before, "nothing may reach the subscription endpoint on a refused path");
-}
-
-test("trading off refuses the subscription and names the settings file", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  setPolicy({ mode: "off" });
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /Trading is off/);
-});
-
-test("no confirmation, no subscription", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id }), /without confirmation/);
-  assert.ok(peek(ticket.id), "a refused call must not spend the ticket");
-});
-
-test("an expired ticket is refused rather than repriced", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  setClock(() => Date.parse(ticket.expiresAt) + 1);
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /expired/);
-});
-
-test("a doctored ticket is caught by its own fingerprint", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  (peek(ticket.id) as { lots: number }).lots = 500;
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /does not match its own fingerprint/);
-});
-
-test("a snapshot that cannot be read aborts before the subscription", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  wire.failDetailFrom = 1;
-  detailCalls = 0;
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id, confirm: true }), /no way to tell whether this one landed/);
-});
-
-/* --------------------- elicitation is decisive here too (ADR-0010) --------------------- */
-
-/**
- * The human channel, as the shared gate sees it.
- *
- * This file contained no occurrence of the word `elicit` before ADR-0010, so the whole channel was
- * untested on the one commitment in this project that cannot be undone by selling. Mirrors the
- * harness in `test/trading.test.ts` deliberately: one gate, so one shape of test.
- */
-function fakeElicit(...answers: Array<"accepted" | "declined" | "unavailable" | { remember: true }>) {
-  const calls: Array<{ message: string; prompt?: Record<string, unknown> }> = [];
-  let index = 0;
-  const elicit = async (message: string, prompt?: Record<string, unknown>) => {
-    calls.push({ message, prompt });
-    const answer = answers[Math.min(index++, answers.length - 1)];
-    return typeof answer === "string"
-      ? { answer, remember: false }
-      : { answer: "accepted" as const, remember: true };
-  };
-  return { elicit, calls };
-}
-
-test("confirm: true cannot skip a declined elicitation on an IPO subscription either", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const asked = fakeElicit("declined");
-  await refuses(
-    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
-    /declined this subscription/,
-  );
-  assert.equal(asked.calls.length, 1, "the human must have been asked");
-  assert.ok(peek(ticket.id), "and a refused call does not spend the ticket");
-});
-
-test("an elicited yes commits it, and the result says a person was asked", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 10, price: 700 });
-  const asked = fakeElicit("accepted");
-  const result = await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.elicitation, "accepted");
-  const entry = JSON.parse(readFileSync(eipoLogPath(), "utf8").trim().split("\n").pop()!);
-  assert.equal(entry.via, "elicited");
-  assert.equal(entry.elicitation, "accepted");
-});
-
-test("the subscription dialog says what an IPO is, not what an order is", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const asked = fakeElicit("accepted");
-  await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(asked.calls[0].message, ticket.summary);
-  assert.match(String(asked.calls[0].prompt?.title), /IPO subscription/);
-  assert.match(String(asked.calls[0].prompt?.description), /RDN/);
-  assert.match(String(asked.calls[0].prompt?.description), /cannot be cancelled by selling/);
-});
-
-test("no human reachable plus confirm: true proceeds, marked as unelicited", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const result = await placeEipoOrder({
-    ticketId: ticket.id,
-    confirm: true,
-    elicit: fakeElicit("unavailable").elicit,
-  });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.elicitation, "unavailable");
-  const entry = JSON.parse(readFileSync(eipoLogPath(), "utf8").trim().split("\n").pop()!);
-  assert.equal(entry.via, "explicit-unelicited");
-});
-
-test("elicitation: required refuses a client that cannot ask, and names the way out", async () => {
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  await refuses(
-    () => placeEipoOrder({ ticketId: ticket.id, confirm: true }),
-    /--elicitation when-available/,
-  );
-});
-
-test("the de-drifted refusal now carries the sentence the e-IPO copy had lost", async () => {
-  // The duplicated gate's own wording had drifted: it never told a model not to set confirm on the
-  // user's behalf, which is the single most load-bearing sentence in the whole refusal.
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  await refuses(() => placeEipoOrder({ ticketId: ticket.id }), /Do not set it on their behalf/);
-});
-
-test("a grant ticked on an exchange order does NOT waive an IPO subscription", async () => {
-  // The grant store is one slot shared with `src/trading/orders.ts`, and the first implementation
-  // bounded it by time, value and policy but not by what KIND of commitment it was. So a box ticked
-  // on a cancellable share order silently waived the dialog for the one commitment in this project
-  // that cannot be undone even by selling — and the person never saw the words about the allotment
-  // possibly being smaller, because the dialog was never shown.
-  const policy = tradingPolicy();
-  grantRemember(policy, 10_000_000);
-
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 }); // Rp 700,000
-  assert.ok(ticket.amountIdr < 10_000_000, "well inside the grant's cap, so only the KIND bound can refuse it");
-
-  const asked = fakeElicit("declined");
-  await refuses(
-    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
-    /declined this subscription/,
-  );
-  assert.equal(asked.calls.length, 1, "the human MUST have been asked despite the standing grant");
-});
-
-test("an IPO dialog never offers the waiver box", async () => {
-  // It could not be honoured, and a box that does nothing tells the person they have answered for
-  // next time when they have not.
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const asked = fakeElicit("accepted");
-  await placeEipoOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(asked.calls[0].prompt?.remember, undefined);
-});
-
-test("an unplaceable subscription is refused before anyone is asked", async () => {
-  // The same guard `passGates` has, on the same gate's other caller. An e-IPO ticket has six
-  // failable checks — including the RDN balance — so without it a person could be asked to commit
-  // money out of an account that does not have it, and only then be refused.
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1000, price: 700 });
-  assert.equal(ticket.checks.find((c) => c.name === "rdn_sufficient")!.ok, false, "precondition");
-
-  const asked = fakeElicit("accepted");
-  await refuses(
-    () => placeEipoOrder({ ticketId: ticket.id, confirm: true, elicit: asked.elicit }),
-    /cannot be placed: rdn_sufficient/,
-  );
-  assert.equal(asked.calls.length, 0, "nobody is asked to approve a subscription the ticket already blocks");
-});
-
-test("the tool layer wires the human channel through to the subscription", async () => {
-  const reads = new Map<string, ToolHandler>();
-  const writes = new Map<string, ToolHandler>();
-  const asked = fakeElicit("declined");
-  registerEipoTools({
-    read: (name, _d, _s, handler) => {
-      reads.set(name, handler);
-    },
-    write: (name, _d, _s, handler) => {
-      writes.set(name, handler);
-    },
-    writeNames: () => [...writes.keys()],
-    elicitDecision: asked.elicit,
-  });
-
-  const preview = await reads.get("eipo_order_preview")!({ emiten_code: "BREN", lots: 1, price: 700 });
-  const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
-
-  const before = sent.filter((s) => s.url.endsWith("/eipo/order")).length;
-  const placed = (await writes.get("eipo_order")!({ ticket_id: ticketId, confirm: true })) as {
-    content: Array<{ text: string }>;
-    isError?: boolean;
-  };
-  assert.equal(placed.isError, true);
-  assert.match(placed.content[0].text, /declined this subscription/);
-  assert.equal(asked.calls.length, 1);
-  assert.equal(sent.filter((s) => s.url.endsWith("/eipo/order")).length, before, "nothing was committed");
-});
-
-/* --------------------------------- the outcomes --------------------------------- */
-
-test("ok: recorded, and seen on the read-back", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 10, price: 700 });
-  const result = await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.verified, true);
-  assert.equal(result.logged, true);
-});
-
-test("the body is what the module documents, in lots", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 10, price: 700 });
-  assert.deepEqual(eipoOrderBody(ticket), { emiten_code: "BREN", price: 700, lot: 10 });
-  await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  const placed = sent.find((s) => s.url.endsWith("/eipo/order"))!;
-  assert.deepEqual(placed.body, { emiten_code: "BREN", price: 700, lot: 10 });
-});
-
-test("not-visible: accepted but absent, and the user is told not to resend", async () => {
-  wire.hideOrder = true;
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const result = await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "not-visible");
-  assert.match(result.outcomeUnknown!, /Do NOT resend/);
-});
-
-test("landed-despite-error: the request failed and the subscription exists anyway", async () => {
-  wire.dropPlaceResponse = "landed";
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const result = await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "landed-despite-error");
-  assert.equal(result.verified, true);
-});
-
-test("outcome-unknown: the request failed and so did the read-back", async () => {
-  wire.dropPlaceResponse = "lost";
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  detailCalls = 0;
-  wire.failDetailFrom = 2;
-  const result = await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "outcome-unknown");
-  assert.match(result.outcomeUnknown!, /Do not resend/);
-});
-
-test("write-failed: a 4xx means nothing was committed", async () => {
-  wire.rejectPlaceWith = { status: 400, body: { message: "lot below minimum" } };
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  const result = await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "write-failed");
-  assert.equal(result.verified, false);
-});
-
-test("the audit line lands in the same log an exchange order writes to", async () => {
-  const ticket = await previewEipoOrder({ emitenCode: "BREN", lots: 1, price: 700 });
-  await placeEipoOrder({ ticketId: ticket.id, confirm: true });
-  assert.ok(eipoLogPath().endsWith("order-mutations.log"), "one audit trail, whatever the venue");
-  const lines = readFileSync(eipoLogPath(), "utf8").trim().split("\n");
-  const entry = JSON.parse(lines[lines.length - 1]);
-  assert.equal(entry.venue, "eipo");
-  assert.equal(entry.emitenCode, "BREN");
-  assert.equal(entry.outcome, "ok");
-});
-
-/* ------------------------------------ the tools ------------------------------------ */
-
-test("eight reads and one write, and the write is the only thing that commits money", () => {
-  const reads = new Map<string, ToolHandler>();
+test("e-IPO exposes only the seven research and account reads", () => {
+  const reads: string[] = [];
   const writes: string[] = [];
-  const definer: Definer = {
-    read: (name, _d, _s, handler) => {
-      reads.set(name, handler);
-    },
-    write: (name) => {
-      writes.push(name);
-    },
-    writeNames: () => [...writes],
-  };
-  registerEipoTools(definer);
-  assert.deepEqual(
-    [...reads.keys()].sort(),
-    [
-      "eipo_detail",
-      "eipo_list",
-      "eipo_my_order",
-      "eipo_order_preview",
-      "eipo_price_groups",
-      "eipo_rdn_balance",
-      "eipo_status",
-      "eipo_unboxing",
-    ],
-  );
-  assert.deepEqual(writes, ["eipo_order"], "and it is not reachable from a saved workflow recipe");
+  registerEipoTools({ read: (name) => { reads.push(name); }, write: (name) => { writes.push(name); }, writeNames: () => writes });
+  assert.deepEqual(reads.sort(), ["eipo_detail", "eipo_list", "eipo_my_order", "eipo_price_groups", "eipo_rdn_balance", "eipo_status", "eipo_unboxing"]);
+  assert.deepEqual(writes, []);
 });
 
-test("the write's description says there is no undo and forbids a resend", () => {
-  const descriptions = new Map<string, string>();
-  registerEipoTools({
-    read: () => {},
-    write: (name, description) => {
-      descriptions.set(name, description);
-    },
-    writeNames: () => [...descriptions.keys()],
+test("an unavailable e-IPO handoff reports integration unavailability instead of asking for another login", async () => {
+  wire.grantShape = "unavailable";
+  await assert.rejects(() => listOfferings(), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /handoff endpoint is unavailable/);
+    assert.match(error.message, /ipo_pipeline/);
+    assert.match(error.message, /do not repeatedly log in/);
+    return true;
   });
-  const description = descriptions.get("eipo_order")!;
-  assert.match(description, /no undo/i);
-  assert.match(description, /confirm: true/);
-  assert.match(description, /RESEND/);
+  assert.equal(mintCalls, 0, "no speculative exchange or subscription request is attempted");
 });

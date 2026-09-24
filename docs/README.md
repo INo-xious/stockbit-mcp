@@ -1,45 +1,18 @@
 # Documentation
 
-Start at the [README](../README.md). This is everything else.
+Start with the [README](../README.md) or [Bahasa Indonesia guide](../README.id.md).
+Use this checkout until these changes are released; an older npm build may still expose real-money tools.
 
-## For users
+| Guide | Contents |
+| --- | --- |
+| [Client setup](CLIENTS.md) | Build and connect this checkout to Claude or ChatGPT. |
+| [Tool reference](TOOLS.md) | Generated tool inventory, arguments, evidence and limitations. |
+| [Verification](VERIFICATION.md) | What was tested, remaining prerequisites and observed upstream failures. |
+| [Security](../SECURITY.md) | Credential storage and account boundaries. |
 
-| | |
-|---|---|
-| [**User guide**](FEATURES.md) | Every feature, what it returns, and what to ask for. The long version of the README's tour. |
-| [**Tool reference**](TOOLS.md) | All 138 tools, generated from the running server — family, evidence, arguments. Never stale: a test fails if it is. |
-| [**Liveness**](LIVENESS.md) | How fresh each reading is, and why nothing here answers "what just traded". |
-| [**Trading**](trading.md) | Paper mode, the live switches, the ticket protocol, the outcome table. |
-| [**Chart drawing**](chartbit-drawing.md) | Reading and drawing on your real Stockbit chart. |
-| [**Testing the login**](TESTING-LOGIN.md) | What the browser capture does, and what to do when it will not. |
+This build supports brokerage portfolio reads, Stockbit website virtual trading, and a separate local
+paper ledger. Real-money execution routes are removed. Old `live` settings cannot restore them.
+This technical restriction is not a statement of OJK approval or legal certification.
 
-## What is known, and what is not
-
-| | |
-|---|---|
-| [**Verification status**](VERIFICATION.md) | The evidence ladder, what each family is, what was compared against what, and how to settle a projection. |
-| [**Pending verification**](PENDING-VERIFICATION.md) | What is still guessed, in the order of what goes wrong if the guess is wrong. |
-
-## Installing it somewhere
-
-The [README](../README.md) has copy-paste config for each client. The manifests behind them:
-`server.json` (MCP Registry), `.claude-plugin/` plus `.mcp.json` (Claude Code plugin, which also
-ships the six skills under [`skills/`](../skills/)), and `mcpb/manifest.json` (Claude Desktop
-Extension, built by `npm run build:mcpb`). All four repeat the version number, and
-`test/distribution.test.ts` fails when they stop agreeing.
-
-## For developers
-
-| | |
-|---|---|
-| [**CONTRIBUTING**](../CONTRIBUTING.md) | Setup, the three invariants, what a pull request needs. |
-| [**CONTEXT**](../CONTEXT.md) | The glossary. One meaning per word. |
-| [**Decision records**](adr/README.md) | Every decision that changed what this server may do. |
-| [**Stockbit API reference**](stockbit-api.md) | The reverse-engineered surface: hosts, auth, routes, response shapes. Unofficial. |
-| [**SECURITY**](../SECURITY.md) | What to report, how, and where credentials live. |
-
-## Historical
-
-[`research/`](research/) holds the investigations this project came out of — a session log, a
-capability sweep, and the recovery of Chartbit's layout format. They are kept as a record of how
-things were found out, not as current guidance, and each carries a banner saying so.
+Additional architecture records and historical research are available in the repository checkout.
+Use the current guides above for supported behavior and installation instructions.

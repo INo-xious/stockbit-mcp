@@ -91,7 +91,21 @@ export async function ensureEipoSession(): Promise<{ minted: boolean }> {
     return { minted: false };
   }
 
-  const linkBody = await getJson("eipoWebviewLink");
+  let linkBody: unknown;
+  try {
+    linkBody = await getJson("eipoWebviewLink");
+  } catch (error) {
+    if (error instanceof StockbitError && error.status === 404) {
+      throw new StockbitError("not_found",
+        "Stockbit's e-IPO session handoff endpoint is unavailable (HTTP 404). The normal market-data login " +
+        "cannot create an e-IPO session through this route. A 404 does not show that your market-data login expired; do not repeatedly log in to fix it. " +
+        "Use ipo_pipeline for public IPO listings. For existing subscriptions or RDN balance, open the e-IPO " +
+        "page in Stockbit with your securities account. These e-IPO account reads remain unavailable here " +
+        "until the current website session flow is supported. No subscription was submitted.",
+        { status: 404 });
+    }
+    throw error;
+  }
   const grant = findGrant(linkBody);
   if (!grant) {
     throw new StockbitError(

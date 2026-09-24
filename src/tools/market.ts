@@ -20,12 +20,12 @@ const PENDING = "PENDING VERIFICATION: this response shape has not been observed
 export function registerMarketTools(define: Definer): void {
   define.read(
     "chart_series",
-    "A whole daily OHLCV series for one symbol in ONE request, oldest bar first.\n" +
+    "A chart price series for one symbol in ONE request, oldest observation first.\n" +
       "This is the cheap path. The other one (the `bars` family) pages 12 rows at a time, so a year " +
       "costs ~21 upstream calls and three years ~62; this costs one. Prefer it when you need a " +
       "series and a calendar window is good enough.\n" +
       "timeframe is a CALENDAR WINDOW, not a bar interval, and must be lowercase: 1w, 1m, 3m, ytd, " +
-      "1y, 3y, 5y. Bars are always daily. An uppercase or interval-style value (1D, DAILY) is " +
+      "1y, 3y, 5y. Read granularity: 1w is intraday and preserves full Jakarta timestamps; longer windows are usually daily. An uppercase or interval-style value (1D, DAILY) is " +
       "refused here rather than sent, because the server answers those with HTTP 200 and an empty " +
       "series that looks exactly like a symbol with no history.\n" +
       "This tool ERRORS instead of returning an empty series — including when the response parses " +
@@ -51,7 +51,7 @@ export function registerMarketTools(define: Definer): void {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       timeframe: z
         .enum(core.CHART_TIMEFRAMES)
-        .describe("Calendar window, lowercase: 1w, 1m, 3m, ytd, 1y, 3y, 5y. Bars are daily regardless."),
+        .describe("Calendar window, lowercase: 1w, 1m, 3m, ytd, 1y, 3y, 5y. Read granularity to distinguish intraday points from daily bars."),
       raw: z
         .boolean()
         .optional()
@@ -355,22 +355,12 @@ export function registerMarketTools(define: Definer): void {
 
   define.read(
     "price_market",
-    "DOES NOT WORK. Use orderbook instead — its `market_data[]` already returns the per-board " +
-      "split (All Market / Regular / Nego / Cash) for a symbol.\n" +
-      "This is not a vocabulary problem and there is no argument that fixes it. Measured " +
-      "2026-09-01, /company-price-feed/prices/:symbol/market answers 400 \"Silahkan Periksa " +
-      "permintaan\" with NO query parameters at all. It also refuses every board spelling tried " +
-      "(REGULER, RG, regular, REGULAR, TN, NG, CASH, ALL, MARKET_TYPE_REGULAR, MARKET_TYPE_ALL, " +
-      "BOARD_REGULAR, 1, 0) under every key tried (market, board, market_type, type).\n" +
-      "The bare call being refused is what settles it: if sending nothing is also an error, no " +
-      "combination of arguments can be the answer. Earlier passes read these 400s as an unknown " +
-      "board vocabulary and kept guessing spellings; the control that was missing was the empty " +
-      "request.\n" +
-      "Calling this tool refuses immediately and names the alternative rather than spending a round " +
-      "trip to be told the request is invalid.",
+    "Per-board activity for one symbol from the working orderbook market_data array: All Market, Regular, Nego and Cash. " +
+      "The result identifies source=orderbook.market_data and preserves the raw/formatted values. These are market activity totals, not a historical last-price series. " +
+      "Omit boards for every board, or select by label/RG/NG/TN. Date filters are unsupported and explicitly refused; omit date.",
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
-      date: z.string().optional().describe("Session date, YYYY-MM-DD. Omit for the current session."),
+      date: z.string().optional().describe("Unsupported for this current-orderbook source. Omit; a supplied date is refused."),
       boards: z.array(z.string()).optional().describe("Uppercase board names, e.g. [\"REGULER\"]."),
     },
     async (a) =>
