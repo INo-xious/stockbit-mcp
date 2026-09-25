@@ -20,7 +20,11 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 - Stockbit website virtual portfolio/orders and confirmation-gated simulated order tools, separate
   from the local `paper_*` ledger. A controlled virtual sell/amend/cancel lifecycle was verified by
   read-back during market hours on 2026-09-25, leaving holdings and virtual cash unchanged and no
-  open orders. Successful buy submission, activation and fills remain unverified.
+  open orders. A separately authorized sell and buy then both fully filled, verified against order
+  status, position quantities and cash changes. Activation and partial fills remain unverified.
+- Virtual fee evidence records that the configuration formulas disagreed with fees on the filled
+  test orders. Raw `price_average` and `amount.matched` were fee-adjusted on those orders and
+  must not be mistaken for execution price and gross consideration.
 - Optional authenticated loopback Streamable HTTP transport, current Claude/ChatGPT setup guide,
   and a privacy-preserving live read sweep with explicit coverage gaps.
 - Selective cleanup of server-created chart drawings by entity ID.

@@ -22,7 +22,8 @@ inventory; historical research in `PENDING-VERIFICATION.md` is not the current s
 - `paper_*` operates on the local simulation ledger. `virtual_*` operates only on Stockbit's
   `/virtualtrading/*` API using the ordinary market-data session.
 - Credentials stay in the local credential store. No MCP tool accepts a PIN. Verification reports
-  store statuses and counts, not account balances, identity records, tokens, or raw responses.
+  retain controlled test parameters, statuses, counts and comparisons, not account balances,
+  identity records, tokens, or raw responses.
 
 The offline suite checks the route boundary, legacy-setting refusal, simulation confirmation,
 ambiguous write outcomes, account masking, cache separation, chart persistence verification, and
@@ -38,7 +39,8 @@ transport isolation. Tests never submit real orders.
 | Market, analysis and company data | Representative calls across the registered read tools | Reusable sweep covers quotes, books, broker flow, fundamentals, insider data, news, calendars, screeners, local calculations and renderers. See coverage below. |
 | Real portfolio | Portfolio, absent position, cash, orders, history, performance, fees, tradability and masked account metadata | Actual nested response shapes were inspected without recording account values. Empty holdings/orders do not prove nonempty position/order mappings; synthetic regressions cover those branches. |
 | Stockbit virtual account | Portfolio, held/absent position, orders and configuration | Reads passed against the website simulation account. |
-| Stockbit virtual order lifecycle | Controlled simulated sell, amend and cancel through actual MCP calls on 2026-09-25 | Passed by read-back: a one-lot SUPA sell at 610 IDR became `OPEN`, amendment to 605 IDR produced a replacement `OPEN` order, and cancellation produced `WITHDRAWN`; the original order remained `AMENDED`. No open test orders remained. Holding quantities, costs and reservations, and virtual trading balance were unchanged. Successful buy submission, activation and fills remain unverified. |
+| Stockbit virtual order lifecycle | Controlled simulated sell, amend and cancel through actual MCP calls on 2026-09-25 | Passed by read-back: a one-lot SUPA sell at 610 IDR became `OPEN`, amendment to 605 IDR produced a replacement `OPEN` order, and cancellation produced `WITHDRAWN`; the original order remained `AMENDED`. No open test orders remained. Holding quantities, costs and reservations, and virtual trading balance were unchanged by this scenario. |
+| Stockbit virtual fills | User-authorized one-lot SUPA sell and one-lot GOTO buy through actual MCP calls on 2026-09-25 | Both orders reached `MATCH` with `total: 1`, `done: 1`, `open: 0`. Portfolio quantities and cash changed accordingly; unrelated holdings and preexisting orders were unchanged, with no open orders left. Activation and partial fills remain unverified. Raw `price_average` and `amount.matched` were fee-adjusted in these responses; see below. |
 | Chart browser | Open, inspect shapes, analyze without drawing, draw one level, screenshot, save, REST read-back and selective cleanup | Passed. The created entity was found in saved drawings. Cleanup removed only that entity; the original two drawings remained and the saved count returned to two. |
 | Watchlist edits | Temporary list: create, rename, add/remove BBRI, favorite/unfavorite, delete | Controlled scenario checks each write by reading it back and verifies existing lists remain unchanged. |
 | Screener edits | Temporary screen: save, favorite/unfavorite, delete | Controlled scenario verifies the current frontend request shape and removes the test screen afterward. |
@@ -78,6 +80,30 @@ An earlier one-lot BBCA buy at 5,300 IDR was refused with HTTP 400 for insuffici
 without creating an order. Together with the previous day's market-closed refusal, this verifies
 buy rejection handling but does not establish the successful buy path. Neither refusal was
 automatically retried. Virtual activation was not repeated on an already active account.
+
+At 11:22:40 WIB, a separate, explicitly authorized test sold one virtual SUPA lot with a
+484 IDR limit, then used part of the proceeds to buy one virtual GOTO lot with a 50 IDR limit.
+Both were read back as `MATCH`, with `total: 1`, `done: 1` and `open: 0`. The SUPA
+`balance_lot` decreased by one and GOTO `balance_lot` increased by one. Virtual cash increased
+by 48,255 IDR after the sell and decreased by 5,010 IDR after the buy, a net test change of
+43,245 IDR. Unlike the earlier cancellation scenario, these authorized fills intentionally changed
+the two simulated holdings. All unrelated holdings and preexisting orders were unchanged, and
+no open orders remained. This verifies successful buy and sell submission and full fills by
+order, position and cash read-back. Activation and partial fills were not exercised.
+
+The raw order fields require care: the sell returned `price_average: 482.548`,
+`amount.matched: 48254.8` and `amount.fee: 145.2`; the buy returned `price_average: 50.1`,
+`amount.matched: 5010` and `amount.fee: 10`. For these orders, `price_average` and
+`amount.matched` included the fee adjustment: the sell matched amount was the 48,400 IDR
+limit notional minus the fee, and the buy matched amount was the 5,000 IDR limit notional plus
+the fee. Do not label raw `price_average` as the exchange execution price. The sell's cash
+credit exceeded its raw matched amount by 0.2 IDR; this observation does not establish a general
+rounding rule. The buy cash debit matched exactly.
+
+The configuration endpoint's formula strings contained buy/sell rates of 0.0015/0.0025, while
+the observed fees for these orders were 0.002/0.003 of their limit notionals. Those strings are
+returned as upstream data, never executed, and must not be assumed to predict the actual fee.
+The observed rates are evidence for these two orders, not a guarantee for other orders or accounts.
 
 ## Coverage and reproducibility
 
@@ -120,9 +146,12 @@ and chart browser checks were verified separately as described above.
 
 ## Remaining limitations
 
-- Stockbit's virtual sell, amend and cancel success paths have live read-back evidence. Successful
-  buy submission, activation and full/partial fills remain unverified. Offline tests cover request
+- Stockbit's virtual buy, sell, full fills, sell-price amendment and cancellation have live
+  read-back evidence. Activation and partial fills remain unverified. Offline tests cover request
   construction, confirmation, rejection, ambiguous outcomes and exact read-back matching.
+- Virtual fee formula strings disagreed with the fees observed on the two filled test orders.
+  Raw `price_average` and `amount.matched` were fee-adjusted; they must not be presented as
+  an execution price and gross consideration without checking their meaning.
 - No order detail was called with a fabricated ID when the real account had no orders.
 - The authenticated e-IPO handoff endpoint returns 404. Dependent e-IPO reads remain unavailable;
   public `ipo_pipeline` information works. Real-money subscription capability is removed entirely.

@@ -29,14 +29,14 @@ export function registerVirtualTools(define: Definer): void {
     () => runTool(() => getVirtualPortfolio()), { evidence: "observed" });
   define.read("virtual_position", NOTE + "Read one virtual holding.", { symbol },
     (a) => runTool(() => getVirtualPosition(a.symbol)), { evidence: "observed" });
-  define.read("virtual_orders", NOTE + "Read virtual orders and their actual upstream statuses. An order record is not proof of a fill.", {},
+  define.read("virtual_orders", NOTE + "Read virtual orders and their actual upstream statuses. An order record is not proof of a fill. Filled-order price_average and amount.matched can include fees; do not treat them as gross execution prices or amounts.", {},
     () => runTool(() => getVirtualOrders()), { evidence: "observed" });
-  define.read("virtual_config", NOTE + "Read virtual-account fee and formula settings without executing formula strings.", {},
+  define.read("virtual_config", NOTE + "Read raw virtual-account formula strings without executing them. These formulas differed from observed filled-order fees; use actual order amounts and portfolio cash changes to verify charges.", {},
     () => runTool(() => getVirtualConfig()), { evidence: "observed" });
   define.write("virtual_activate", NOTE + "Activate Stockbit's virtual account and verify portfolio access. " + WRITE_NOTE,
     { confirm }, (a) => runWrite(() => activateVirtualAccount(a.confirm === true)),
     { destructiveHint: false, idempotentHint: false });
-  define.write("virtual_order", NOTE + "Place a simulated buy or sell on Stockbit and read back the virtual order. A sell order was verified live; successful buys and fills remain unverified. " + WRITE_NOTE,
+  define.write("virtual_order", NOTE + "Place a simulated buy or sell on Stockbit and read back the virtual order. Full buy and sell fills were verified live against order quantities, portfolio positions and cash changes; partial fills remain unverified. " + WRITE_NOTE,
     { symbol, action: z.enum(["buy", "sell"]), price, lots, confirm },
     (a) => runWrite(() => placeVirtualOrder({ ...a, confirm: a.confirm === true })),
     { evidence: "read-back", destructiveHint: false, idempotentHint: false });

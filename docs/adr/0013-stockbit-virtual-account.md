@@ -1,7 +1,7 @@
 # ADR-0013 — Isolate Stockbit website virtual trading
 
 Date: 2026-09-24. Updated: 2026-09-25. Status: accepted; authenticated reads observed;
-virtual sell, amend and cancel verified by read-back.
+virtual buy/sell full fills, sell-price amendment and cancellation verified by read-back.
 
 The user requires Stockbit's own virtual trading and read-only access to the real
 portfolio. A local paper ledger does not satisfy the website virtual-account
@@ -40,9 +40,9 @@ The public Stockbit frontend was fetched on 2026-09-24, Next build
 evidence**. Subsequently, authenticated portfolio, order-list, configuration, and
 position reads succeeded on 2026-09-24. These four tools are `observed`. The
 `virtual_order`, `virtual_order_amend` and `virtual_order_cancel` tools have
-`read-back` evidence from the controlled sell lifecycle on 2026-09-25 described
-below. Successful buy submission has not been observed; `virtual_activate` remains
-`projected`.
+`read-back` evidence from the controlled sell lifecycle and subsequent authorized
+buy/sell fill test on 2026-09-25 described below. `virtual_activate` remains
+`projected`; partial fills remain unverified.
 
 All chunks are under `https://stockbit.com/_next/static/chunks/`:
 
@@ -95,7 +95,33 @@ Earlier on 2026-09-25, a one-lot BBCA buy at 5,300 IDR returned HTTP 400 for
 insufficient virtual cash and created no order. This is evidence of buy rejection
 handling, not of successful buy submission. No blind retry was made.
 
-Virtual activation, successful buy submission and full/partial fills remain
-unverified live. Support for GTC, virtual history, resetting balances, or other
-virtual features must wait for their own frontend and live contracts; no
-speculative paths are allowed.
+At 11:22:40 WIB on 2026-09-25, a separate user-authorized test sold one virtual
+SUPA lot with a 484 IDR limit to fund a one-lot virtual GOTO buy with a 50 IDR
+limit. Both actual MCP submissions were read back as `MATCH` with `total: 1`,
+`done: 1` and `open: 0`. Portfolio `balance_lot` decreased by one for SUPA and
+increased by one for GOTO. Virtual cash increased by 48,255 IDR for the sell and
+decreased by 5,010 IDR for the buy. The net test cash change was 43,245 IDR;
+unrelated holdings and preexisting orders were unchanged, with zero open orders
+remaining. These authorized fills intentionally changed the two simulated holdings.
+No account balances or order IDs are recorded here.
+
+The sell returned raw `price_average: 482.548`, `amount.matched: 48254.8` and
+`amount.fee: 145.2`; the buy returned `price_average: 50.1`,
+`amount.matched: 5010` and `amount.fee: 10`. In these responses, the sell matched
+amount was the 48,400 IDR limit notional minus its fee, while the buy matched
+amount was the 5,000 IDR limit notional plus its fee. Thus these raw fields were
+fee-adjusted: `price_average` must not be relabeled as the exchange execution
+price. The sell's cash credit exceeded its raw matched amount by 0.2 IDR;
+this observation does not establish a general rounding rule. The buy's cash
+debit matched exactly.
+
+The configuration formula strings contained buy/sell rates of 0.0015/0.0025,
+but the observed order fees were 0.002/0.003 of the test limit notionals. This
+disagreement is recorded rather than hiding it behind a calculated fee. Formula
+strings remain uninterpreted upstream data, and these two observed rates are not
+a universal fee contract.
+
+Virtual activation and partial fills remain unverified live. Amendment and
+cancellation evidence covers an unfilled sell and a price-only change. Support
+for GTC, virtual history, resetting balances, or other virtual features must wait
+for their own frontend and live contracts; no speculative paths are allowed.

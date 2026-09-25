@@ -438,7 +438,7 @@ const OBSERVED = [
 
 const READ_BACK = [
   // 2026-09-25: virtual sell -> price amendment -> WITHDRAWN, with unchanged holdings/cash.
-  // Successful virtual buys and fills remain unverified, as the tool description states.
+  // Later that day, full sell and buy fills matched position/cash changes; partial fills remain unverified.
   "virtual_order", "virtual_order_amend", "virtual_order_cancel",
   "watchlist_create",
   "watchlist_rename",
