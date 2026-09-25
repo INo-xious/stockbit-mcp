@@ -1,14 +1,15 @@
 name: Release
 
 # The tag-triggered path. `publish.yml` is the primary one — a version bump landing on `main`
-# publishes, tags and releases in one run — and this exists for a tag pushed by hand.
+# publishes, tags and releases in one run. Manual dispatch can finish a release whose npm
+# publication succeeded but whose later steps failed, without moving the tag or republishing npm.
 #
 # ## The order of the steps is the point
 #
 # This file used to create the GitHub Release BEFORE the publish step, and the publish step skipped
 # itself when NPM_TOKEN was absent. The result, in production: v1.0.0 and v1.0.1 both ran GREEN,
-# both produced a public GitHub Release with attached assets, and neither reached npm. `stockbit-mcp`
-# has still never been published. A green run that announces something nobody can install is the
+# both produced a public GitHub Release with attached assets, and neither reached npm.
+# A green run that announces something nobody can install is the
 # worst outcome this pipeline can produce, so:
 #
 #   - the publish happens FIRST and the Release is the LAST thing in the job;
@@ -19,6 +20,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag whose npm version is already published (for example v1.4.1)
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 concurrency:
   # SHARED WITH publish.yml, byte for byte. `npm version patch && git push --follow-tags` delivers
@@ -36,11 +46,28 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
     env:
       STOCKBIT_NO_BROWSER: "1"
       STOCKBIT_FORCE_FILE_STORE: "1"
+      RELEASE_EVENT: ${{ github.event_name }}
     steps:
+      - name: Validate the release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::An existing version tag such as v1.4.1 is required." >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Pin the source for the MCP Registry job
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v7
         with:
@@ -51,7 +78,7 @@ jobs:
       - name: The tag must be the version in package.json
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
           pkg="$(node -p "require('./package.json').version")"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match package.json $pkg" >&2
@@ -93,6 +120,10 @@ jobs:
               echo "needed=false" >> "$GITHUB_OUTPUT"
               echo "::notice::$VERSION is already on npm — publish.yml got here first. Skipping the publish." ;;
             absent)
+              if [ "$RELEASE_EVENT" = "workflow_dispatch" ]; then
+                echo "::error::Manual recovery requires a version already on npm. Wait for npm processing; use the Publish workflow for a new version." >&2
+                exit 1
+              fi
               echo "needed=true" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::npm-version-state printed '$state', which is neither present nor absent." >&2
@@ -123,6 +154,7 @@ jobs:
 
       # `npm pack` runs prepack (clean plus tsc), so this is the build that ships.
       - name: Pack the tarball that will be published
+        if: steps.registry.outputs.needed == 'true'
         run: |
           set -euo pipefail
           npm pack
@@ -131,6 +163,33 @@ jobs:
             ls -1 ./*.tgz >&2 || true
             exit 1
           fi
+
+      # Recovery must attach the bytes npm already accepted, not a fresh build with the same name.
+      # Keep this inline: an older tag does not contain helpers added with this recovery workflow.
+      - name: Reuse the published tarball
+        if: steps.registry.outputs.needed == 'false'
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFile, writeFile } from 'node:fs/promises';
+          const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+          const url = `https://registry.npmjs.org/${encodeURIComponent(pkg.name)}/${encodeURIComponent(pkg.version)}`;
+          const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+          if (!response.ok) throw new Error(`npm metadata returned HTTP ${response.status}`);
+          const metadata = await response.json();
+          if (metadata.name !== pkg.name || metadata.version !== pkg.version || metadata.mcpName !== pkg.mcpName) {
+            throw new Error('Published package identity does not match the release tag');
+          }
+          const tarball = new URL(metadata.dist.tarball);
+          if (tarball.origin !== 'https://registry.npmjs.org') throw new Error('Unexpected npm tarball host');
+          const archive = await fetch(tarball, { signal: AbortSignal.timeout(60000) });
+          if (!archive.ok) throw new Error(`npm tarball returned HTTP ${archive.status}`);
+          const bytes = Buffer.from(await archive.arrayBuffer());
+          const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+          if (integrity !== metadata.dist.integrity) throw new Error('Published tarball integrity mismatch');
+          await writeFile(`stockbit-mcp-${process.env.VERSION}.tgz`, bytes);
+          console.log(`Verified the published ${pkg.name}@${pkg.version} tarball`);
+          NODE
 
       # The TARBALL PATH, not the directory: npm runs prepack and prepublishOnly for a directory spec
       # only (`lib/commands/publish.js`: `if (spec.type === 'directory' && !ignoreScripts)`), so
@@ -152,10 +211,12 @@ jobs:
       - name: GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            stockbit-mcp-*.tgz
-            stockbit-mcp-*.mcpb
+            stockbit-mcp-${{ env.VERSION }}.tgz
+            stockbit-mcp-${{ env.VERSION }}.mcpb
 
   registry:
     name: MCP Registry
@@ -166,6 +227,8 @@ jobs:
       id-token: write # mcp-publisher authenticates as this repository over OIDC
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.commit }}
 
       # Pinned for the same reason the job above pins it: this job now runs
       # `scripts/mcp-registry-version-state.mjs`, which uses global `fetch` and
