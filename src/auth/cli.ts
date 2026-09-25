@@ -11,7 +11,7 @@
  * dispatch, and generates its usage text from it (`formatUsage`), so validation and help cannot
  * drift apart. The help wording below is the bin's original usage block, kept verbatim where a line
  * existed; flags that block never documented (`login --verify`, `import-har --shred`,
- * `trading-enable --no-auto-confirm`) are written down here for the first time.
+ * `trading-enable --paper`) are written down here for the first time.
  *
  * `status --offline` stays an accepted no-op ON PURPOSE: offline is the default now, but
  * SECURITY.md tells vulnerability reporters to paste `stockbit-auth status --offline --json`, and a
@@ -86,12 +86,9 @@ export const AUTH_COMMANDS: CommandTable = {
     },
   },
   "trading-enable": {
-    summary: "ALLOW this server to place orders. Off until you run this.",
+    summary: "Enable the LOCAL paper simulation. Real-money execution is unavailable.",
     flags: {
       "--paper": "a local ledger. No real money, no PIN. Start here.",
-      "--live": "real orders on the exchange, with real money",
-      "--auto-confirm": "skip per-order confirmation (live only; needs --max-order-value)",
-      "--no-auto-confirm": "turn that back off",
       "--require-elicitation": "same as --elicitation required",
       "--no-elicitation": "same as --elicitation never",
     },

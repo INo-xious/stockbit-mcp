@@ -1,17 +1,5 @@
-/**
- * Order entry. ADR-0004.
- *
- * The tests here are not about whether an order can be placed. They are about every path on which
- * one must NOT be, and about what is said when the outcome is not known — because those are the
- * paths with no undo. A chart save that goes wrong is restored from a snapshot; an order that goes
- * wrong is an order.
- *
- * So the shape of this file is: first, a long list of refusals, each asserting that ZERO requests
- * left the process. Then the outcome classes, one test each, driven by a fake account that can lie
- * in every way a real one can — accept and hide the order, error after accepting it, error without
- * accepting it, or fail the read-back that would have told us which.
- */
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+/** Local paper preview, single-use tickets, consent and audit regressions. */
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
@@ -37,13 +25,11 @@ import {
 } from "../src/trading/tickets.ts";
 import { idr, nearestTicks, previewOrder, tickSize } from "../src/trading/preview.ts";
 import {
-  orderBody,
   orderLogPath,
   placeBuy,
   placeSell,
   cancelOrder,
   submitOrder,
-  verifyAgainst,
 } from "../src/trading/orders.ts";
 import { describeRemember, forgetRemember, REMEMBER_TTL_MS } from "../src/trading/remember.ts";
 import { resolveConfirmation } from "../src/trading/confirmation.ts";
@@ -192,6 +178,7 @@ function setPolicy(trading: Partial<ReturnType<typeof defaultSettings>["trading"
 }
 
 beforeEach(() => {
+  rmSync(join(process.env.STOCKBIT_STORE_DIR!, "paper"), { recursive: true, force: true });
   clearCache();
   clearTickets();
   // A "don't ask again" is process memory, so it would otherwise leak from one test into the next
@@ -212,7 +199,7 @@ beforeEach(() => {
   wire.challengeOnBuy = false;
   wire.hideOrder = false;
   delete process.env.STOCKBIT_TRADING;
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000 });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 100_000_000 });
 });
 
 /** A ticket for 5 lots of BBRI at 4100 — inside the band, on the tick grid, affordable. */
@@ -316,7 +303,7 @@ test("a cancel whose order list is unreadable and whose symbol is unknown is ref
 });
 
 test("an order value over the configured cap fails the check", async () => {
-  setPolicy({ mode: "live", maxOrderValueIdr: 1_000_000 });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 1_000_000 });
   const ticket = await buyTicket();
   const check = ticket.checks.find((c) => c.name === "value_within_cap")!;
   assert.equal(check.ok, false);
@@ -324,7 +311,7 @@ test("an order value over the configured cap fails the check", async () => {
 });
 
 test("a symbol off the allow-list fails, and the message says how to change it", async () => {
-  setPolicy({ mode: "live", allowedSymbols: ["TLKM"] });
+  setPolicy({ mode: "paper", allowedSymbols: ["TLKM"] });
   const ticket = await buyTicket();
   const check = ticket.checks.find((c) => c.name === "symbol_allowed")!;
   assert.equal(check.ok, false);
@@ -375,7 +362,7 @@ async function refuses(fn: () => Promise<unknown>, pattern: RegExp): Promise<voi
 test("trading off by default: the tool exists, refuses, and names the settings file", async () => {
   const ticket = await buyTicket();
   setPolicy({ mode: "off" });
-  await refuses(() => placeBuy({ ticketId: ticket.id, confirm: true }), /Trading is off/);
+  await refuses(() => placeBuy({ ticketId: ticket.id, confirm: true }), /Paper trading is off/);
   const policy = tradingPolicy();
   assert.match(policy.reason, /trading-enable/);
   assert.ok(policy.settingsPath.endsWith("settings.json"));
@@ -400,31 +387,6 @@ test("no confirmation, no order — and the refusal tells the model not to set i
   const ticket = await buyTicket();
   await refuses(() => placeBuy({ ticketId: ticket.id }), /Do not set it on their behalf/);
   assert.ok(peek(ticket.id), "a refused call must NOT spend the ticket");
-});
-
-test("autoConfirm without a value cap is refused, not honoured", async () => {
-  // The rule the whole switch rests on: "I trust it for small orders" must not silently become
-  // "I trust it for any order" the day the cap is removed.
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: null });
-  const ticket = await buyTicket();
-  await refuses(() => placeBuy({ ticketId: ticket.id }), /honoured only when maxOrderValueIdr is also set/);
-  assert.match(tradingPolicy().autoConfirmIgnored ?? "", /maxOrderValueIdr/);
-});
-
-test("autoConfirm covers an order under the cap and refuses one over it", async () => {
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
-  const small = await buyTicket();
-  const result = await placeBuy({ ticketId: small.id });
-  assert.equal(result.outcome, "ok");
-
-  // Refused on the ticket's own `value_within_cap` check rather than on autoConfirm's, and the
-  // change of message is deliberate. `maxOrderValueIdr` is BOTH caps — the one autoConfirm is
-  // bounded by and the one the preview checks — so an order over it can never be placed, and the
-  // old wording ("Ask the user and pass confirm: true") was advice that could not have worked. The
-  // refusal now names the thing that actually blocks it.
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 1_000_000 });
-  const big = await buyTicket();
-  await refuses(() => placeBuy({ ticketId: big.id }), /value_within_cap — Rp 2,050,000 exceeds/);
 });
 
 test("an expired ticket is refused at the write, not repriced", async () => {
@@ -452,14 +414,6 @@ test("a buy ticket cannot be redeemed by the sell tool", async () => {
   assert.ok(peek(ticket.id), "and the mismatch does not spend the ticket");
 });
 
-test("a snapshot that cannot be read aborts before the order, not after", async () => {
-  const ticket = await buyTicket();
-  wire.failListFrom = 1;
-  await refuses(() => placeBuy({ ticketId: ticket.id, confirm: true }), /no way to tell whether this order landed/);
-  const log = readFileSync(orderLogPath(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(log[log.length - 1].outcome, "aborted-no-snapshot");
-});
-
 test("lock contention refuses instead of waiting — two orders from one intention is the risk", async () => {
   const ticket = await buyTicket();
   mkdirSync(join(process.env.STOCKBIT_STORE_DIR!, "order-BBRI.lock"), { recursive: true });
@@ -480,136 +434,6 @@ test("lock contention refuses instead of waiting — two orders from one intenti
 });
 
 /* ---------------------------------- the request ---------------------------------- */
-
-test("the body is exactly what plan §2.4 says, in shares and with the ticket's ui_ref", async () => {
-  const ticket = await buyTicket();
-  await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].body, {
-    ui_ref: ticket.uiRef,
-    symbol: "BBRI",
-    price: 4100,
-    shares: 500,
-    board_type: "RG",
-    is_gtc: false,
-    time_in_force: "0",
-    split_order: false,
-  });
-  assert.ok(sent[0].url.endsWith("/order/v2/buy"));
-});
-
-test("platform_order_type is deliberately absent, and lots never reach the wire", async () => {
-  const ticket = await buyTicket();
-  const body = orderBody(ticket) as Record<string, unknown>;
-  assert.equal("platform_order_type" in body, false, "an enum whose vocabulary is unobserved is not invented");
-  assert.equal("lot" in body || "lots" in body, false, "the wire takes shares");
-});
-
-test("a cancel body carries the order id and the ui_ref and nothing else", async () => {
-  book = [{ order_id: "ORD-7", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 }];
-  const ticket = await previewOrder({ action: "cancel", orderId: "ORD-7" });
-  await cancelOrder({ ticketId: ticket.id, confirm: true });
-  assert.deepEqual(sent[0].body, { order_id: "ORD-7", ui_ref: ticket.uiRef });
-});
-
-/* -------------------------------- outcome classes -------------------------------- */
-
-test("ok: accepted, and seen on the book by its ui_ref", async () => {
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.verified, true);
-  assert.equal(result.orderId, "ORD-1");
-  assert.equal(result.logged, true);
-});
-
-test("ok: verified by a diff when the list does not echo ui_ref", async () => {
-  // Stockbit's list has never been observed, so it may not return the handle we sent. A verification
-  // that only knew how to match on `ui_ref` would report every real order as not-visible.
-  wire.echoUiRef = false;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.orderId, "ORD-1");
-});
-
-test("rejected: on the book with a rejected status is a failure, not a success", async () => {
-  wire.exchangeRejects = true;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "rejected");
-  assert.equal(result.verified, false);
-});
-
-test("write-failed: a 4xx means nothing reached the exchange", async () => {
-  wire.rejectBuyWith = { status: 400, body: { message: "bad board type" } };
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "write-failed");
-  assert.equal(result.verified, false);
-});
-
-test("rejected: a 4xx that names a rejection is reported as one", async () => {
-  wire.rejectBuyWith = { status: 400, body: { message: "order rejected: insufficient funds" } };
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "rejected");
-});
-
-test("not-visible: accepted but absent from the read-back, and the user is told not to resend", async () => {
-  wire.hideOrder = true;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "not-visible");
-  assert.equal(result.verified, false);
-  assert.match(result.outcomeUnknown!, /Do NOT resend/);
-});
-
-test("landed-despite-error: the request failed and the order is there anyway", async () => {
-  wire.dropBuyResponse = "landed";
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "landed-despite-error");
-  assert.equal(result.verified, true);
-  assert.match(result.outcomeUnknown!, /must not be/);
-});
-
-test("not-found-after-error: the request failed and the book is clean", async () => {
-  wire.dropBuyResponse = "lost";
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "not-found-after-error");
-  assert.equal(result.verified, false);
-});
-
-test("outcome-unknown: the request failed AND the read-back failed", async () => {
-  // The worst case, and the one that must not be dressed up. Reporting it as a failure would invite
-  // a resend; reporting it as a success would be a lie.
-  wire.dropBuyResponse = "landed";
-  wire.failListFrom = 2;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "outcome-unknown");
-  assert.match(result.outcomeUnknown!, /Do not resend/);
-});
-
-test("outcome-unknown: accepted, but the read-back failed", async () => {
-  wire.failListFrom = 2;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.outcome, "outcome-unknown");
-  assert.equal(result.verified, false);
-});
-
-test("a Cloudflare challenge is reported as a challenge, not as an entitlement problem", async () => {
-  wire.challengeOnBuy = true;
-  const ticket = await buyTicket();
-  const result = await placeBuy({ ticketId: ticket.id, confirm: true });
-  assert.equal(result.verified, false);
-  assert.match(result.error!, /challenge/i);
-});
-
-/* ---------------------------------- the audit log ---------------------------------- */
 
 test("every attempt appends one line, and the line names the outcome and how it was confirmed", async () => {
   const before = existsSync(orderLogPath()) ? readFileSync(orderLogPath(), "utf8").split("\n").length : 0;
@@ -685,7 +509,7 @@ test("a client that cannot ask does not become a client that cannot be refused",
   const ticket = await buyTicket();
   await refuses(
     () => submitOrder({ ticketId: ticket.id, elicit: fakeElicit("unavailable").elicit }),
-    /Refusing to send an order without confirmation/,
+    /Refusing to record a paper order without confirmation/,
   );
 });
 
@@ -730,19 +554,6 @@ test("confirm: true plus an available human records `elicited`, not `explicit-un
   assert.equal(entry.elicitation, "accepted");
 });
 
-test("the order dialog is given its own words, not the generic fallback", async () => {
-  // `passGates` used to call `options.elicit(ticket.summary)` with one argument, so every order
-  // dialog silently fell back to _define.ts's defaults. The summary is the message; the title and
-  // description are what the box itself says.
-  const ticket = await buyTicket();
-  const asked = fakeElicit("accepted");
-  await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(asked.calls[0].message, ticket.summary);
-  assert.match(String(asked.calls[0].prompt?.title), /Place this order\?/);
-  assert.match(String(asked.calls[0].prompt?.description), /exchange/);
-  assert.ok(asked.calls[0].prompt?.remember, "and the waiver box is offered under the default policy");
-});
-
 test("in paper mode the dialog says paper, rather than promising the exchange", async () => {
   setPolicy({ mode: "paper" });
   const ticket = await buyTicket();
@@ -763,7 +574,7 @@ test("an unavailable human plus confirm: true proceeds, and both the result and 
 });
 
 test("elicitation: required refuses when no person can be reached, and names the way out", async () => {
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 100_000_000, elicitation: "required" });
   const ticket = await buyTicket();
   await refuses(
     () => submitOrder({ ticketId: ticket.id, confirm: true, elicit: fakeElicit("unavailable").elicit }),
@@ -776,7 +587,7 @@ test("elicitation: required refuses when no person can be reached, and names the
 });
 
 test("elicitation: required still lets an accepted dialog through", async () => {
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "required" });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 100_000_000, elicitation: "required" });
   const ticket = await buyTicket();
   const asked = fakeElicit("accepted");
   const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
@@ -785,13 +596,13 @@ test("elicitation: required still lets an accepted dialog through", async () => 
 });
 
 test("elicitation: never does not ask, even when it could, and needs confirm", async () => {
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, elicitation: "never" });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 100_000_000, elicitation: "never" });
   const asked = fakeElicit("declined");
 
   const refused = await buyTicket();
   await refuses(
     () => submitOrder({ ticketId: refused.id, elicit: asked.elicit }),
-    /Refusing to send an order without confirmation/,
+    /Refusing to record a paper order without confirmation/,
   );
 
   const ticket = await buyTicket();
@@ -801,31 +612,6 @@ test("elicitation: never does not ask, even when it could, and needs confirm", a
   assert.equal(asked.calls.length, 0, "the channel exists and must not have been used");
   const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
   assert.equal(entry.via, "explicit-elicit-disabled");
-});
-
-test("autoConfirm within its cap proceeds without asking, and says that is what happened", async () => {
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
-  const ticket = await buyTicket();
-  const asked = fakeElicit("declined");
-  const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.elicitation, "waived-by-auto-confirm");
-  assert.equal(asked.calls.length, 0, "the owner's own capped switch is the one thing that skips the ask");
-  const entry = JSON.parse(readFileSync(orderLogPath(), "utf8").trim().split("\n").pop()!);
-  assert.equal(entry.via, "auto-confirm");
-});
-
-test("autoConfirm loses to elicitation: required — the ask wins, and the order still goes through", async () => {
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000, elicitation: "required" });
-  const asked = fakeElicit("accepted");
-  const ticket = await buyTicket();
-  const result = await submitOrder({ ticketId: ticket.id, elicit: asked.elicit });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.elicitation, "accepted");
-  assert.equal(asked.calls.length, 1, "autoConfirm must not have skipped the ask the owner demanded");
-
-  // And the contradiction is reported through the channel that already exists for it.
-  assert.match(tradingPolicy().autoConfirmIgnored ?? "", /elicitation is `required`/);
 });
 
 test("the gate offers no waiver box it could not honour, and grants nothing on its own", async () => {
@@ -894,38 +680,6 @@ test("an accepted dialog with the box UNticked grants nothing", async () => {
   assert.equal(asked.calls.length, 2, "consent to one order is not consent to the next");
 });
 
-test("a cancel is never covered by a grant", async () => {
-  const asked = fakeElicit({ remember: true });
-  const first = await buyTicket({ lots: 5 });
-  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
-
-  book.push({ order_id: "ORD-77", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
-  const cancel = await previewOrder({ action: "cancel", symbol: "BBRI", orderId: "ORD-77" });
-  const result = await submitOrder({ ticketId: cancel.id, elicit: asked.elicit });
-  assert.equal(result.elicitation, "accepted");
-  assert.equal(asked.calls.length, 2, "a grant covers new orders, and a cancel is not one");
-});
-
-test("an AMEND is never covered by a grant — and it does have a gross value", async () => {
-  // The first implementation of this bound inferred it from `valueIdr === null`, on the reasoning
-  // that a cancel and an amend carry no value. That is false of an amend: its ticket resolves price
-  // and lots from the working order, so its gross is a real number. Every amend was therefore
-  // waived by a box ticked on a buy, for something `order_amend`'s own description calls "a real
-  // order decision and not an edit". The first assertion below is the one that would have caught it.
-  const asked = fakeElicit({ remember: true });
-  const first = await buyTicket({ lots: 5 }); // Rp 2,050,000
-  await submitOrder({ ticketId: first.id, elicit: asked.elicit });
-
-  book.push({ order_id: "ORD-88", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
-  const amend = await previewOrder({ action: "amend", symbol: "BBRI", orderId: "ORD-88", price: 4200, lots: 4 });
-  assert.equal(amend.grossIdr, 1_680_000, "an amend ticket carries a real gross — the null it was inferred from is a fiction");
-  assert.ok(amend.grossIdr < 2_050_000, "and it is under the approved cap, so only the KIND bound can refuse it");
-
-  const result = await submitOrder({ ticketId: amend.id, elicit: asked.elicit });
-  assert.equal(result.elicitation, "accepted");
-  assert.equal(asked.calls.length, 2, "the amend MUST have been put to the human");
-});
-
 test("the waiver box is not offered on a commitment a grant may not cover", async () => {
   // A box that does nothing is worse than no box: the person believes they have answered for next
   // time, and they have not.
@@ -942,19 +696,6 @@ test("the waiver box is not offered on a commitment a grant may not cover", asyn
   const amend = await previewOrder({ action: "amend", symbol: "BBRI", orderId: "ORD-99", price: 4200, lots: 4 });
   await submitOrder({ ticketId: amend.id, elicit: asked.elicit });
   assert.equal(asked.calls[1].prompt?.remember, undefined, "no box on an amend");
-});
-
-test("autoConfirm does not refuse a cancel it simply cannot speak to — it asks", async () => {
-  // A cancel has no gross value, so it is not "over the cap"; it is outside what a value cap can
-  // say anything about. Refusing it would make cancelling an order harder than placing one.
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
-  book.push({ order_id: "ORD-70", symbol: "BBRI", action: "buy", status: "OPEN", price: 4100, shares: 500 });
-  const cancel = await previewOrder({ action: "cancel", symbol: "BBRI", orderId: "ORD-70" });
-  const asked = fakeElicit("accepted");
-  const result = await submitOrder({ ticketId: cancel.id, elicit: asked.elicit });
-  assert.equal(result.outcome, "ok");
-  assert.equal(result.elicitation, "accepted");
-  assert.equal(asked.calls.length, 1);
 });
 
 test("a grant expires, on the same clock the tickets use", async () => {
@@ -977,7 +718,7 @@ test("changing the policy invalidates a grant made under the old one", async () 
 
   // They agreed to "orders up to Rp 2,050,000" against one set of rules. Tightening or loosening
   // any of them makes it a different set, and the grant was not made against it.
-  setPolicy({ mode: "live", maxOrderValueIdr: 50_000_000 });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 50_000_000 });
   const after = await buyTicket({ lots: 1 });
   await submitOrder({ ticketId: after.id, elicit: asked.elicit });
   assert.equal(asked.calls.length, 2);
@@ -991,7 +732,7 @@ test("a terminal revocation reaches a grant this process is already holding", as
   // What `stockbit-auth trading-forget` does: stamp a moment into the file. The server cannot be
   // reached from a terminal, but it re-reads the policy on every order, so this is what crosses.
   setPolicy({
-    mode: "live",
+    mode: "paper",
     maxOrderValueIdr: 100_000_000,
     confirmationsRevokedAt: new Date(Date.now() + 1000).toISOString(),
   });
@@ -1036,7 +777,7 @@ test("a ticket that cannot be placed is refused before anyone is asked", async (
 
 test("replaying a spent ticket does not ask the person a second time", async () => {
   // Since the human is asked BEFORE the ticket is taken, a `peek` that admitted a consumed ticket
-  // meant a model retrying order_buy put the dialog up again — asking someone to approve an order
+  // meant a model retrying paper_order_buy put the dialog up again — asking someone to approve an order
   // that had already reached the exchange, and only then refusing. Being asked twice about one
   // order is how a person ends up believing they have two.
   const asked = fakeElicit("accepted");
@@ -1049,21 +790,6 @@ test("replaying a spent ticket does not ask the person a second time", async () 
   assert.equal(asked.calls.length, 1, "the replay must not reach a person at all");
 });
 
-test("a cap lowered between the preview and the write refuses, and does not auto-confirm", async () => {
-  // The two caps are the same field read at two moments: `value_within_cap` is computed at preview,
-  // and the gate reads the policy at the write. Lower it in between and a ticket that passed its
-  // own check arrives at the gate over the new cap. The autoConfirm branch must refuse it —
-  // returning `auto-confirm` here would send an order the owner's current policy forbids, unasked.
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 5_000_000 });
-  const ticket = await buyTicket({ lots: 5 }); // Rp 2,050,000, inside the cap it was priced against
-  assert.ok(ticket.checks.every((c) => c.ok), "precondition: the ticket passed every check");
-
-  setPolicy({ mode: "live", autoConfirm: true, maxOrderValueIdr: 1_000_000 });
-  const asked = fakeElicit("accepted");
-  await refuses(() => submitOrder({ ticketId: ticket.id, elicit: asked.elicit }), /the cap changed after this ticket was priced/);
-  assert.equal(asked.calls.length, 0, "and the cap is not something a person can confirm away");
-});
-
 test("a revocation timestamp that cannot be parsed revokes everything", async () => {
   // The safe direction for a revocation. Somebody wrote something into that field; the reading that
   // asks the human again costs a dialog, and the other reading costs an order.
@@ -1071,7 +797,7 @@ test("a revocation timestamp that cannot be parsed revokes everything", async ()
   const first = await buyTicket({ lots: 5 });
   await submitOrder({ ticketId: first.id, elicit: asked.elicit });
 
-  setPolicy({ mode: "live", maxOrderValueIdr: 100_000_000, confirmationsRevokedAt: "yesterday" });
+  setPolicy({ mode: "paper", maxOrderValueIdr: 100_000_000, confirmationsRevokedAt: "yesterday" });
   const after = await buyTicket({ lots: 1 });
   await submitOrder({ ticketId: after.id, elicit: asked.elicit });
   assert.equal(asked.calls.length, 2);
@@ -1112,7 +838,7 @@ test("trading_forget clears the grant, and says whether there was one", async ()
 
 test("the tool layer wires the human channel through, and a declined dialog reaches the caller", async () => {
   // The three Definer literals in this file had no elicitation member at all, so the whole
-  // tool-level path — the one a real client actually takes — was untested. This drives order_buy
+  // tool-level path — the one a real client actually takes — was untested. This drives paper_order_buy
   // the way an MCP client does.
   const reads = new Map<string, ToolHandler>();
   const writes = new Map<string, ToolHandler>();
@@ -1128,11 +854,11 @@ test("the tool layer wires the human channel through, and a declined dialog reac
     elicitDecision: asked.elicit,
   });
 
-  const preview = await reads.get("order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
+  const preview = await reads.get("paper_order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
   const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
 
   sent.length = 0;
-  const placed = (await writes.get("order_buy")!({ ticket_id: ticketId, confirm: true })) as {
+  const placed = (await writes.get("paper_order_buy")!({ ticket_id: ticketId, confirm: true })) as {
     content: Array<{ text: string }>;
     isError?: boolean;
   };
@@ -1155,61 +881,17 @@ test("the tool layer's message tells the user when nobody was asked", async () =
     writeNames: () => [...writes.keys()],
   });
 
-  const preview = await reads.get("order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
+  const preview = await reads.get("paper_order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
   const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
-  const placed = await writes.get("order_buy")!({ ticket_id: ticketId, confirm: true });
+  const placed = await writes.get("paper_order_buy")!({ ticket_id: ticketId, confirm: true });
   const payload = JSON.parse((placed as { content: Array<{ text: string }> }).content[0].text).data;
   assert.equal(payload.outcome, "ok");
-  assert.match(payload.message, /is on the book/);
+  assert.match(payload.message, /PAPER ACCOUNT/);
   assert.match(payload.message, /No human was asked directly/);
   assert.match(payload.message, /--elicitation required/, "and names the switch that would refuse instead");
 });
 
 /* ------------------------------------ the tools ------------------------------------ */
-
-test("the four write tools are not in the workflow handler map", () => {
-  // `workflow_run` executes saved recipes by calling handlers directly. A recipe is data — a name
-  // and a list of steps — and data must not be able to place an order.
-  const reads = new Map<string, ToolHandler>();
-  const writes: string[] = [];
-  const definer: Definer = {
-    read: (name, _d, _s, handler) => {
-      reads.set(name, handler);
-    },
-    write: (name) => {
-      writes.push(name);
-    },
-    writeNames: () => [...writes],
-  };
-  registerTradingTools(definer);
-  for (const name of ["order_buy", "order_sell", "order_amend", "order_cancel"]) {
-    assert.equal(reads.has(name), false, `${name} must not be reachable from a workflow recipe`);
-    assert.ok(writes.includes(name));
-  }
-});
-
-test("the write tool composes a message per outcome, and says when the audit line is missing", async () => {
-  const handlers = new Map<string, ToolHandler>();
-  const writeHandlers = new Map<string, ToolHandler>();
-  registerTradingTools({
-    read: (name, _d, _s, handler) => {
-      handlers.set(name, handler);
-    },
-    write: (name, _d, _s, handler) => {
-      writeHandlers.set(name, handler);
-    },
-    writeNames: () => [...writeHandlers.keys()],
-  });
-
-  const preview = await handlers.get("order_preview")!({ action: "buy", symbol: "BBRI", price: 4100, lots: 5 });
-  const ticketId = JSON.parse((preview as { content: Array<{ text: string }> }).content[0].text).data.id;
-
-  const placed = await writeHandlers.get("order_buy")!({ ticket_id: ticketId, confirm: true });
-  const payload = JSON.parse((placed as { content: Array<{ text: string }> }).content[0].text).data;
-  assert.equal(payload.outcome, "ok");
-  assert.match(payload.message, /is on the book/);
-  assert.ok(payload.auditLog.endsWith("order-mutations.log"));
-});
 
 test("trading_status answers with no session and no requests", async () => {
   const handlers = new Map<string, ToolHandler>();
@@ -1312,7 +994,7 @@ test("a spent ticket still reports 'already used' while it is retained", () => {
 
 
 /* ------------------------------------------------------------------ *
- * order_preview's argument bounds, at the schema.
+ * paper_order_preview's argument bounds, at the schema.
  *
  * `z.coerce.number()` on its own accepts NaN ("abc"), 0 (""), negatives and fractions, and
  * previewOrder does five sequential network reads before anything looks at the value — so a user
@@ -1320,7 +1002,7 @@ test("a spent ticket still reports 'already used' while it is retained", () => {
  * reached with a message that rendered as `idr(NaN)`.
  * ------------------------------------------------------------------ */
 
-test("order_preview rejects an impossible price or lot count without a request", () => {
+test("paper_order_preview rejects an impossible price or lot count without a request", () => {
   const shapes = new Map<string, Record<string, { safeParse(v: unknown): { success: boolean } }>>();
   registerTradingTools({
     read: (name, _d, shape) => {
@@ -1330,8 +1012,8 @@ test("order_preview rejects an impossible price or lot count without a request",
     writeNames: () => [],
   } as unknown as Definer);
 
-  const shape = shapes.get("order_preview");
-  assert.ok(shape, "order_preview must be a read tool");
+  const shape = shapes.get("paper_order_preview");
+  assert.ok(shape, "paper_order_preview must be a read tool");
   const price = shape.price;
   const lots = shape.lots;
 
@@ -1381,78 +1063,52 @@ const vTicket = (over: Record<string, unknown> = {}) =>
     ...over,
   }) as Parameters<typeof verifyAgainst>[0];
 
-test("verifyAgainst: a buy is landed when the read-back carries its ui_ref", () => {
-  const after = [vOrder({ orderId: "o1", uiRef: "ui-abc", symbol: "BBRI", status: "open" })];
-  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: true, orderId: "o1", rejected: false });
-});
 
-test("verifyAgainst: a ui_ref match whose status says rejected is landed AND rejected", () => {
-  // Both at once, deliberately: the order reached the book and the book turned it down. Reporting
-  // only `landed` would say `ok` about an order that is not working.
-  const after = [vOrder({ orderId: "o1", uiRef: "ui-abc", status: "REJECTED — price outside band" })];
-  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: true, orderId: "o1", rejected: true });
-});
-
-test("verifyAgainst: with no ui_ref on the row it falls back to an id that was not there before", () => {
-  const before = [vOrder({ orderId: "old", symbol: "BBRI" })];
-  const after = [vOrder({ orderId: "old", symbol: "BBRI" }), vOrder({ orderId: "fresh", symbol: "BBRI" })];
-  assert.deepEqual(verifyAgainst(vTicket(), before, after), { landed: true, orderId: "fresh", rejected: false });
-});
-
-test("verifyAgainst: the fallback will not claim an order on a different symbol", () => {
-  const after = [vOrder({ orderId: "fresh", symbol: "TLKM" })];
-  assert.deepEqual(verifyAgainst(vTicket(), [], after), { landed: false, rejected: false });
-});
-
-test("verifyAgainst: nothing new means not landed, and never a guess at an id", () => {
-  const before = [vOrder({ orderId: "old", symbol: "BBRI" })];
-  const result = verifyAgainst(vTicket(), before, before);
-  assert.equal(result.landed, false);
-  assert.equal(result.orderId, undefined, "a not-landed verdict must not name an order");
-});
-
-test("verifyAgainst: a cancel counts as landed when the order is gone OR says cancelled", () => {
-  const ticket = vTicket({ action: "cancel", orderId: "o1", price: null, lots: null, shares: null });
-
-  // Gone from the list entirely.
-  assert.deepEqual(verifyAgainst(ticket, [vOrder({ orderId: "o1" })], []), {
-    landed: true,
-    orderId: "o1",
-    rejected: false,
+test("the local paper buy, sell, amend and cancel tools complete without a brokerage write", async () => {
+  const handlers = new Map<string, ToolHandler>();
+  registerTradingTools({
+    read: (name, _description, _schema, handler) => { handlers.set(name, handler); },
+    write: (name, _description, _schema, handler) => { handlers.set(name, handler); },
+    writeNames: () => [],
   });
-
-  // Still listed, but marked.
-  assert.equal(verifyAgainst(ticket, [], [vOrder({ orderId: "o1", status: "Cancelled" })]).landed, true);
-
-  // Still open — the cancel did not take.
-  assert.equal(verifyAgainst(ticket, [], [vOrder({ orderId: "o1", status: "open" })]).landed, false);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await handlers.get(name)!(args) as { content: Array<{ text: string }>; isError?: boolean };
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return JSON.parse(result.content[0].text).data;
+  };
+  const order = async (action: string, terms: Record<string, unknown>) => {
+    const ticket = await call("paper_order_preview", { action, ...terms });
+    const result = await call(`paper_order_${action}`, { ticket_id: ticket.id, confirm: true });
+    assert.equal(result.outcome, "ok");
+    assert.equal(result.paper, true);
+    assert.match(result.message, /PAPER ACCOUNT/);
+    return result;
+  };
+  sent.length = 0;
+  const opened = await order("buy", { symbol: "BBRI", price: 4100, lots: 1 });
+  assert.equal(opened.fill.status, "open");
+  const amended = await order("amend", { order_id: opened.orderId, price: 4260 });
+  assert.equal(amended.fill.status, "filled");
+  const sell = await order("sell", { symbol: "BBRI", price: 4260, lots: 1 });
+  assert.equal(sell.fill.status, "open");
+  await order("cancel", { order_id: sell.orderId });
+  assert.deepEqual(sent, [], "no securities order endpoint was reached");
 });
 
-test("verifyAgainst: an amend lands only when the target carries the NEW terms", () => {
-  const ticket = vTicket({ action: "amend", orderId: "o1", price: 4200, lots: 6, shares: 600 });
-
-  assert.equal(
-    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4200, shares: 600 })]).landed,
-    true,
-  );
-  assert.equal(
-    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4100, shares: 600 })]).landed,
-    false,
-    "the old price still standing is the amend not having happened",
-  );
-  assert.equal(
-    verifyAgainst(ticket, [], [vOrder({ orderId: "o1", price: 4200, shares: 500 })]).landed,
-    false,
-    "and so is the old size",
-  );
-  assert.equal(verifyAgainst(ticket, [], []).landed, false, "a vanished order is not an amended one");
+test("legacy autoConfirm cannot skip the paper confirmation", async () => {
+  setPolicy({ mode: "paper", autoConfirm: true, maxOrderValueIdr: 3_000_000 });
+  const ticket = await buyTicket();
+  await refuses(() => submitOrder({ ticketId: ticket.id }), /without confirmation/);
 });
 
-test("verifyAgainst: an amend that names only one term does not require the other to match", () => {
-  const priceOnly = vTicket({ action: "amend", orderId: "o1", price: 4200, lots: null, shares: null });
-  assert.equal(
-    verifyAgainst(priceOnly, [], [vOrder({ orderId: "o1", price: 4200, shares: 999 })]).landed,
-    true,
-    "shares were not part of the request, so they cannot falsify it",
-  );
+test("a value cap lowered after paper preview is checked before asking or recording", async () => {
+  const ticket = await buyTicket();
+  setPolicy({ mode: "paper", maxOrderValueIdr: 1_000_000 });
+  let asked = false;
+  await refuses(() => submitOrder({ ticketId: ticket.id, confirm: true, elicit: async () => {
+    asked = true;
+    return { answer: "accepted", remember: false };
+  } }), /cap changed/);
+  assert.equal(asked, false);
+  assert.ok(peek(ticket.id), "a refused attempt does not spend the ticket");
 });

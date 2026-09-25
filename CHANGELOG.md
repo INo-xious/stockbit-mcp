@@ -8,6 +8,41 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Where an ent
 was **Observed**, it was read off a live response with a real account rather than inferred from a
 name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
+## [Unreleased]
+
+### Removed
+
+- Real-money order submission, amendment, cancellation and e-IPO subscriptions, including their
+  HTTP routes. Old live settings fail closed. Brokerage portfolio reads remain available.
+
+### Added
+
+- Stockbit website virtual portfolio/orders and confirmation-gated simulated order tools, separate
+  from the local `paper_*` ledger. A controlled virtual sell/amend/cancel lifecycle was verified by
+  read-back during market hours on 2026-09-25, leaving holdings and virtual cash unchanged and no
+  open orders. A separately authorized sell and buy then both fully filled, verified against order
+  status, position quantities and cash changes. Activation and partial fills remain unverified.
+- Virtual fee evidence records that the configuration formulas disagreed with fees on the filled
+  test orders. Raw `price_average` and `amount.matched` were fee-adjusted on those orders and
+  must not be mistaken for execution price and gross consideration.
+- Optional authenticated loopback Streamable HTTP transport, current Claude/ChatGPT setup guide,
+  and a privacy-preserving live read sweep with explicit coverage gaps.
+- Selective cleanup of server-created chart drawings by entity ID.
+
+### Fixed
+
+- Securities grant parsing, one-shot PIN submission, portfolio login proof, accurate credential
+  backend reporting, and encrypted access-token handoff from the CLI to a separate MCP process.
+- Observed portfolio/cash/fee/account response mapping, repeated-symbol tradability queries,
+  earnings defaults, hourly chart dates, stream detail, watchlist search, and current market data.
+- Chart drawing/template query parameters, literal label substitution, stale-cache verification,
+  and verification of drawing updates/deletions.
+- Watchlist name/favorite requests and screener run/save/favorite request formats, verified using
+  temporary objects that were removed afterward.
+
+See [VERIFICATION.md](docs/VERIFICATION.md) for live checks and unresolved upstream limits. These
+changes are not included in the published 1.3.1 release.
+
 ## [1.3.1] — 2026-09-03
 
 ### Security

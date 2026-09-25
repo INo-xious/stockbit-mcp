@@ -28,7 +28,7 @@ import {
   missingSessionMessage,
   resetSession,
 } from "../src/auth/session.js";
-import { loginSecurities, logoutSecurities } from "../src/auth/tradinglogin.js";
+import { loginSecurities, logoutSecurities, verifySecuritiesSession } from "../src/auth/tradinglogin.js";
 import { securitiesTokenUrlAllowed } from "../src/auth/capture.js";
 import {
   loadSettings,
@@ -356,7 +356,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
   //
   // Without this the report claimed a tool profile it had not computed, and the "trading is on but
   // there are no order tools" warning was dead on the CLI path — which is precisely the terminal the
-  // user is standing in when they run `trading-enable --live`. Describing a server this process is
+  // user is standing in when they run `trading-enable --paper`. Describing a server this process is
   // not is the whole reason it has to be derived rather than defaulted.
   let profileLabel: string | undefined;
   let profileIsDefault = false;
@@ -517,24 +517,19 @@ async function cmdTradingLogin(argv: string[]): Promise<void> {
     }
   }
 
-  // Prove it works before saying it does. A stored token that 401s on first use is the most
-  // expensive kind of "success".
+  // Read with the access token the login just returned. A forced refresh would
+  // unnecessarily rotate a fresh credential and can obscure a successful PIN login.
   try {
-    await forceRefresh("securities");
-    logStderr("Test refresh: OK - the trading session is live.");
+    await verifySecuritiesSession();
+    logStderr("Portfolio read: OK - the securities session is live.");
   } catch (err) {
-    logStderr(`Stored the trading session but the test refresh failed: ${String(err)}`);
+    logStderr(`Stored the securities session, but the portfolio read could not be verified: ${String(err)}`);
+    logStderr("The stored session was retained. This is not a request to enter the PIN again.");
     process.exit(1);
   }
 
-  const policy = tradingPolicy();
   logStderr("");
-  logStderr(
-    policy.enabled
-      ? "Trading is ENABLED in settings. Orders still require confirmation per call unless autoConfirm is on."
-      : "Trading is still OFF. Logging in unlocks the account READS; run `stockbit-auth trading-enable` to " +
-        "allow orders.",
-  );
+  logStderr("Securities login unlocks read-only portfolio, balances and history. Real-money execution is unavailable.");
 }
 
 /** What the trading side is currently able to do, and why. */
@@ -544,7 +539,6 @@ async function cmdTradingStatus(argv: string[]): Promise<void> {
   logStderr(`Trading: ${policy.enabled ? "ENABLED" : "OFF"} (${policy.source})`);
   logStderr(`  ${policy.reason}`);
   if (policy.corrupt) logStderr("  WARNING: the settings file could not be parsed and was treated as no permission.");
-  if (policy.autoConfirmIgnored) logStderr(`  ${policy.autoConfirmIgnored}`);
   logStderr(
     `  autoConfirm: ${policy.autoConfirm ? "on" : "off"}; ` +
       `elicitation: ${policy.elicitation}; ` +
@@ -570,8 +564,8 @@ async function cmdTradingStatus(argv: string[]): Promise<void> {
   }
   logStderr("Securities session: present. Checking it against Stockbit...");
   try {
-    await forceRefresh("securities");
-    logStderr("Validity: OK - the trading token refreshed successfully.");
+    await verifySecuritiesSession();
+    logStderr("Validity: OK - a read-only portfolio request succeeded.");
   } catch (err) {
     logStderr(`Validity: FAILED - ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -613,8 +607,7 @@ const ELICITATION_MEANING: Record<ElicitationPolicy, string> = {
  * Three spellings for the same dial, because `--auto-confirm` / `--no-auto-confirm` already set
  * that precedent and a user who has learned one pair should not have to learn a different shape for
  * the next. Contradictions are rejected rather than resolved by precedence: `--require-elicitation
- * --no-elicitation` is not a preference, it is a mistake, and the same is true of `--paper --live`
- * two commands up.
+ * --no-elicitation` is not a preference, it is a mistake.
  */
 function readElicitationFlags(argv: string[]): ElicitationPolicy | undefined {
   const chosen: ElicitationPolicy[] = [];
@@ -660,26 +653,13 @@ function readElicitationFlags(argv: string[]): ElicitationPolicy | undefined {
  * differ by everything, and a default is a decision made for someone who did not make it.
  */
 async function cmdTradingEnable(argv: string[]): Promise<void> {
-  const paper = argv.includes("--paper");
-  const live = argv.includes("--live");
-  if (paper && live) {
-    logStderr("Pick one: --paper or --live.");
+  if (!argv.includes("--paper")) {
+    logStderr("Use `stockbit-auth trading-enable --paper` for the local simulation. Real-money execution is unavailable.");
     process.exit(2);
   }
-  if (!paper && !live) {
-    logStderr("Say which: `trading-enable --paper` or `trading-enable --live`.");
-    logStderr("");
-    logStderr("  --paper   orders go to a local ledger. No real money, no PIN, no session needed.");
-    logStderr("            Start here. The protocol is identical, so nothing is a surprise later.");
-    logStderr("  --live    orders reach the exchange and move real money. Needs a trading session");
-    logStderr("            (`stockbit-auth trading-login`) and its 6-digit PIN.");
-    logStderr("");
-    logStderr("A bare `trading-enable` used to mean --live. It no longer means anything, on purpose.");
-    process.exit(2);
-  }
-
   const settings = loadSettings();
-  settings.trading.mode = paper ? "paper" : "live";
+  settings.trading.mode = "paper";
+  settings.trading.autoConfirm = false;
 
   const cash = flagValue(argv, "--cash");
   if (cash !== undefined) {
@@ -691,8 +671,6 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
     settings.trading.paper.startingCashIdr = parsed;
   }
 
-  if (argv.includes("--auto-confirm")) settings.trading.autoConfirm = true;
-  if (argv.includes("--no-auto-confirm")) settings.trading.autoConfirm = false;
 
   const elicitation = readElicitationFlags(argv);
   if (elicitation !== undefined) settings.trading.elicitation = elicitation;
@@ -728,38 +706,12 @@ async function cmdTradingEnable(argv: string[]): Promise<void> {
   saveSettings(settings);
   const policy = tradingPolicy();
 
-  if (paper) {
-    logStderr(`PAPER trading enabled. Wrote ${settingsPath()}.`);
-    logStderr(`Ledger: ${paperLedgerPath()} (created on the first order).`);
-    logStderr(
-      `Starting cash Rp ${settings.trading.paper.startingCashIdr.toLocaleString("en-US")}. ` +
-        "Reset any time with `stockbit-auth paper-reset`.",
-    );
-    logStderr("");
-    logStderr("Nothing reaches the exchange. No PIN and no trading session are needed — the account");
-    logStderr("reads and the order tools are served from the ledger instead.");
-    logStderr("Every order still needs confirm: true, because rehearsing without it rehearses the");
-    logStderr("wrong thing. Fills are approximate: close-only data, no queue position, no partials.");
-    logStderr(`Elicitation: ${policy.elicitation}. ${ELICITATION_MEANING[policy.elicitation]}`);
-    return;
-  }
-
-  logStderr(`LIVE trading ENABLED. Wrote ${settingsPath()}.`);
-  logStderr("Orders now reach the exchange and move real money.");
+  logStderr(`PAPER trading enabled. Wrote ${settingsPath()}.`);
+  logStderr(`Ledger: ${paperLedgerPath()} (created on the first simulated order).`);
+  logStderr(`Starting cash Rp ${settings.trading.paper.startingCashIdr.toLocaleString("en-US")}. Reset with \`stockbit-auth paper-reset\`.`);
+  logStderr("Use paper_* tools for the local simulation. Portfolio and other securities reads continue to show your actual account.");
+  logStderr("Real-money execution is unavailable. Fills are approximate: close-only data, no queue position, no partials.");
   logStderr(`Elicitation: ${policy.elicitation}. ${ELICITATION_MEANING[policy.elicitation]}`);
-  if (policy.autoConfirmIgnored) logStderr(policy.autoConfirmIgnored);
-  else if (policy.autoConfirm) {
-    logStderr(
-      `autoConfirm is ON for orders up to Rp ${policy.maxOrderValueIdr?.toLocaleString("en-US")}. ` +
-        "Anything above that still needs confirm: true.",
-    );
-  } else {
-    logStderr("Every order needs confirm: true. That is the default and it is the safe one.");
-  }
-  if (!hasStoredSession("securities")) {
-    logStderr("");
-    logStderr(`No trading session yet. ${missingSessionMessage("securities")}`);
-  }
 }
 
 /**

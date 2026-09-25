@@ -40,19 +40,22 @@ const WRITES = [
   "chartbit_layout_save",
   "chartbit_save",
   "chartbit_study",
-  "eipo_order",
   "login",
   "logout",
-  "order_amend",
-  "order_buy",
-  "order_cancel",
-  "order_sell",
+  "paper_order_amend",
+  "paper_order_buy",
+  "paper_order_cancel",
+  "paper_order_sell",
   "screener_delete",
   "screener_favorite",
   "screener_save",
   // Not an order tool: it revokes a standing "don't ask again". A write because it changes process
   // state and so must stay out of the workflow handler map, never because it can cost anything.
   "trading_forget",
+  "virtual_activate",
+  "virtual_order",
+  "virtual_order_amend",
+  "virtual_order_cancel",
   "watchlist_add",
   "watchlist_create",
   "watchlist_delete",
@@ -151,7 +154,7 @@ test("the tools that can change something are exactly these, and everything else
 
   // The four order tools are the ones with no undo. Named again here so that adding a fifth is a
   // deliberate edit to a list that says why it exists.
-  for (const name of ["order_buy", "order_sell", "order_amend", "order_cancel"]) {
+  for (const name of ["paper_order_buy", "paper_order_sell", "paper_order_amend", "paper_order_cancel"]) {
     assert.ok(writes.includes(name), `${name} must be registered as a write`);
   }
 });
@@ -166,7 +169,7 @@ test("destructiveHint is graded rather than uniform", () => {
     _registeredTools: Record<string, { annotations?: { destructiveHint?: boolean } }>;
   })._registeredTools;
 
-  for (const name of ["order_buy", "order_sell", "watchlist_delete", "screener_delete", "eipo_order"]) {
+  for (const name of ["paper_order_buy", "paper_order_sell", "watchlist_delete", "screener_delete"]) {
     assert.equal(tools[name].annotations?.destructiveHint, true, `${name} should warn the client`);
   }
   for (const name of ["watchlist_add", "watchlist_create", "watchlist_rename", "screener_save"]) {
@@ -284,64 +287,30 @@ test("describeSurface agrees with a real server, without starting one", () => {
 });
 
 
-test("the order-entry block on the instructions page is true under every shape of profile", () => {
-  // None of this was covered. The gating was changed twice in two commits and each change traded
-  // one false claim for another, with a green suite both times — so the three states are pinned
-  // here, by rendering the real page.
+test("every profile describes real money as unavailable and paper as simulation", () => {
   const page = (raw: string) => {
     const resolved = resolveToolProfile(raw, new Set(describeSurface().tools.map((t) => t.name)));
     return buildInstructions(describeSurface(resolved.profile, resolved.isDefault));
   };
-
-  // 1. A preview is registered -> the protocol, naming the previews that actually exist.
-  const eipo = page("eipo");
-  assert.match(eipo, /PLACING AN ORDER IS TWO STEPS/, "eipo_order places an order and needs the protocol");
-  assert.ok(eipo.includes("eipo_order_preview builds a ticket"), "and it must name the preview it has");
-  assert.doesNotMatch(
-    eipo,
-    /ORDER ENTRY IS NOT REGISTERED/,
-    "saying order entry is impossible while eipo_order is registered is a false negative about a money write",
-  );
-  // An IPO has no auto-rejection band, and its ticket carries no commission and no net. Sharing one
-  // sentence between the two previews invented all three.
-  const eipoStep = eipo.slice(eipo.indexOf("eipo_order_preview builds a ticket"));
-  const eipoLine = eipoStep.slice(0, eipoStep.indexOf("\n"));
-  for (const invented of ["commission", "band", "the net"]) {
-    assert.ok(!eipoLine.includes(invented), `the e-IPO ticket has no ${invented}: ${eipoLine}`);
+  for (const profile of ["all", "core", "eipo", "trading", "virtual"]) {
+    assert.match(page(profile), /REAL-MONEY EXECUTION IS NOT AVAILABLE/);
+    assert.doesNotMatch(page(profile), /--live|eipo_order_preview|stockbit-auth trading-enable"/);
   }
-
-  // 2. A write with NO preview -> not the protocol. The write takes a ticket id and nothing else,
-  //    and only a preview mints tickets, so this server can describe the protocol perfectly and
-  //    still refuse every call.
-  const writeOnly = page("core,order_buy");
-  assert.doesNotMatch(writeOnly, /PLACING AN ORDER IS TWO STEPS/, "no preview means the protocol cannot be followed");
-  assert.match(writeOnly, /CANNOT BE USED/, "and the page has to say why rather than staying silent");
-
-  // 3. Nothing at all -> the remedy has to fix what the claim covers. The claim names e-IPO, so a
-  //    remedy of ",trading" alone sends the user to edit a config file and restart for nothing.
-  const core = page("core");
-  assert.match(core, /ORDER ENTRY IS NOT REGISTERED/);
-  const remedy = core.slice(core.indexOf("ORDER ENTRY IS NOT REGISTERED"));
-  assert.ok(remedy.includes(",trading"), "equities remedy");
-  assert.ok(remedy.includes(",eipo"), "the claim covers e-IPO subscription, so the remedy must too");
+  assert.match(page("trading"), /LOCAL PAPER ORDERS USE TWO STEPS/);
+  assert.match(page("core,paper_order_buy"), /PAPER WRITES CANNOT BE USED WITHOUT/);
+  assert.doesNotMatch(page("core"), /LOCAL PAPER ORDERS USE TWO STEPS/);
 });
 
-test("every order-entry write is in the list the instructions page measures against", () => {
-  // `ORDER_ENTRY_TOOLS` is hand-written, inside the module whose own header argues that a
-  // hand-written enumeration of a growing set is a claim with an expiry date. It cannot be derived
-  // (that would make it agree with itself), so it is pinned against WRITES instead: a new order
-  // tool added to the trading or eipo family reddens this rather than silently falling outside the
-  // page's idea of order entry.
-  const orderish = describeSurface()
-    .writes.filter((n) => /^(order_|eipo_order)/.test(n))
-    .sort();
-  // Spelled out, so a sixth one reddens this instead of being quietly absorbed by a regex.
-  assert.deepEqual(orderish, ["eipo_order", "order_amend", "order_buy", "order_cancel", "order_sell"]);
-
-  const all = buildInstructions(describeSurface());
-  for (const name of orderish) {
-    assert.ok(all.includes(name), `${name} is an order-entry write the instructions never name`);
+test("no real-money execution tool can be registered, including explicit profiles", () => {
+  const surface = describeSurface();
+  const names = new Set(surface.tools.map(t => t.name));
+  for (const removed of ["order_preview", "order_buy", "order_sell", "order_amend", "order_cancel", "eipo_order", "eipo_order_preview"]) {
+    assert.ok(!names.has(removed), removed);
+    assert.throws(() => resolveToolProfile(removed, names), /unknown/);
   }
+  assert.ok(names.has("portfolio"));
+  assert.ok(names.has("paper_portfolio"));
+  assert.ok(names.has("virtual_portfolio"));
 });
 
 
@@ -360,6 +329,9 @@ test("every order-entry write is in the list the instructions page measures agai
  * ------------------------------------------------------------------ */
 
 const OBSERVED = [
+  "virtual_portfolio", "virtual_position", "virtual_orders", "virtual_config",
+  "stream_post_detail", "watchlist_search", "screener_run",
+
   // Promoted 2026-09-01 by live calls after the ~18:00 WIB broker release. Each earned it on the
   // repo's own bar — rows came back AND every field the tool names was read out of them — not on
   // "the route answered". See docs/PENDING-VERIFICATION.md, "Probed live on 2026-09-01".
@@ -465,6 +437,9 @@ const OBSERVED = [
 ];
 
 const READ_BACK = [
+  // 2026-09-25: virtual sell -> price amendment -> WITHDRAWN, with unchanged holdings/cash.
+  // Later that day, full sell and buy fills matched position/cash changes; partial fills remain unverified.
+  "virtual_order", "virtual_order_amend", "virtual_order_cancel",
   "watchlist_create",
   "watchlist_rename",
   "watchlist_delete",
@@ -477,8 +452,10 @@ const READ_BACK = [
 ];
 
 const PROJECTED = [
+  "paper_portfolio", "paper_position", "paper_cash_balance", "paper_orders",
+  "paper_order_detail", "paper_order_history", "paper_trade_performance",
+  "virtual_activate",
   "analyst_ratings",
-  "stream_post_detail",
   "stream_pinned",
   "research",
   "company_overview",
@@ -501,9 +478,7 @@ const PROJECTED = [
   "price_market",
   "stock_conversion",
   "underwriters",
-  "screener_run",
   "watchlist_symbols",
-  "watchlist_search",
   "portfolio",
   "position",
   "cash_balance",
@@ -515,11 +490,11 @@ const PROJECTED = [
   "stock_tradable",
   "account",
   "trading_status",
-  "order_preview",
-  "order_buy",
-  "order_sell",
-  "order_amend",
-  "order_cancel",
+  "paper_order_preview",
+  "paper_order_buy",
+  "paper_order_sell",
+  "paper_order_amend",
+  "paper_order_cancel",
   "trading_forget",
   "eipo_list",
   "eipo_detail",
@@ -528,8 +503,6 @@ const PROJECTED = [
   "eipo_price_groups",
   "eipo_rdn_balance",
   "eipo_unboxing",
-  "eipo_order_preview",
-  "eipo_order",
 ];
 
 test("every tool's evidence is exactly what this file says it is", () => {

@@ -242,10 +242,12 @@ test("WIRE: trending is a POST that always carries a date, and no key nobody sup
   assert.match(String(body.date), /^\d{4}-\d{2}-\d{2}$/);
 });
 
-test("WIRE: a post is fetched by numeric id with no query string", async () => {
+test("WIRE: post detail uses the website's read-only POST, without a message body or query", async () => {
   bodies.set(P.post, { data: PAGE.data.stream[0] });
   await getPost("15731234");
   assert.equal(last().url.pathname, P.post);
+  assert.equal(last().method, "POST");
+  assert.equal(last().body, undefined);
   assert.equal(last().url.search, "");
 });
 

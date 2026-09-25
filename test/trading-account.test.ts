@@ -14,7 +14,7 @@
  * downstream would catch it. So each is read only from a key whose name says which it is, and
  * anything computed is announced in `derived`.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 process.env.STOCKBIT_FORCE_FILE_STORE = "1";
@@ -46,6 +46,7 @@ import {
   maskIdentifier,
   maskName,
 } from "../src/trading/account.ts";
+import { defaultSettings, settingsPath } from "../src/settings.ts";
 import { registerTradingTools } from "../src/tools/trading.ts";
 import type { Definer, ToolHandler } from "../src/tools/_define.ts";
 
@@ -184,6 +185,7 @@ const ROUTE_BODIES: Array<[string, unknown, string]> = [
   ["/formula/v2", { data: { buy_fee: 0.0012, sell_fee: 0.0022 } }, "formula"],
   ["/stock/tradable", TRADABLE_BODY, "tradable"],
   ["/v2/sub-account/list", SUB_ACCOUNT_BODY, "subAccounts"],
+  ["/account/personal", { data: {} }, "personalAccount"],
   ["/account", ACCOUNT_BODY, "account"],
 ];
 
@@ -211,6 +213,7 @@ before(() => {
 });
 
 beforeEach(() => {
+  rmSync(settingsPath(), { force: true });
   clearCache();
   resetSession("securities");
   getStore("securities").set("SECURITIES-REFRESH");
@@ -311,7 +314,94 @@ test("owning none of a symbol is an answer, not an error", async () => {
   assert.equal(position.holding, null);
 });
 
+const NESTED_SUMMARY = {
+  trading: { balance: 2000000 },
+  amount: { invested: 3000000, allocated: 100000, credit_limit: 4000000 },
+  profit_loss: { net: 350000, unrealised: 300000, realised: 50000 },
+  gain: 0.1,
+  equity: 5400000,
+  debt: { total: 200000, ratio: 0.04, market_value: 3300000, buffer: { value: 500000, percentage: 20 } },
+};
+
+const NESTED_HOLDING = {
+  symbol: "BBRI",
+  qty: { balance: { lot: 10, share: 1000 }, available: { lot: 8, share: 800 }, private_note: SECRET_ACCOUNT },
+  price: { average: { price: 3000, fee: 0.1 }, latest: 3300 },
+  asset: { amount_invested: 3000000, unrealised: { market_value: 3300000, profit_loss: 300000, gain: 0.1 } },
+};
+
+test("current nested portfolio totals preserve their meanings and omit account identifiers", async () => {
+  overrides["/portfolio/v2/list"] = () => json({ data: { summary: NESTED_SUMMARY, results: [] } });
+  overrides["/portfolio/v2/summary"] = () => json({ data: {
+    aggregated_portfolio_summary: NESTED_SUMMARY,
+    summary_per_portfolios: [{ account_number: SECRET_ACCOUNT, portfolio_name: "Private", summary: NESTED_SUMMARY }],
+  } });
+  const result = await getPortfolio();
+  assert.deepEqual(result.holdings, []);
+  assert.equal(result.totals?.costIdr, 3000000);
+  assert.equal(result.totals?.tradingBalanceIdr, 2000000);
+  assert.equal(result.totals?.cashIdr, undefined, "trading balance is not cash");
+  assert.equal(result.totals?.netPnlIdr, 350000);
+  assert.equal(result.totals?.unrealizedPnlIdr, 300000);
+  assert.equal(result.totals?.gainRatio, 0.1, "a fraction is not mislabeled as a percentage");
+  assert.equal(result.totals?.unrealizedPnlPct, undefined);
+  assert.equal(result.totals?.debtBufferIdr, 500000);
+  assert.equal(result.totals?.readFrom.costIdr, "aggregated_portfolio_summary.amount.invested");
+  assert.equal(JSON.stringify(result).includes(SECRET_ACCOUNT), false);
+});
+
+test("a failed aggregate summary can still expose the list's clearly identified totals", async () => {
+  overrides["/portfolio/v2/list"] = () => json({ data: { summary: NESTED_SUMMARY, results: [] } });
+  overrides["/portfolio/v2/summary"] = () => json({ message: "Unavailable" }, 404);
+  const result = await getPortfolio();
+  assert.equal(result.totals?.readFrom.costIdr, "summary.amount.invested");
+  assert.match(result.totalsUnavailable ?? "", /Account-wide summary unavailable/);
+});
+
+test("nested holdings map explicit share and lot units and preserve unknown key names only", async () => {
+  overrides["/portfolio/v2/list"] = () => json({ data: { results: [NESTED_HOLDING] } });
+  const holding = (await getPortfolio()).holdings[0];
+  assert.equal(holding.lots, 10);
+  assert.equal(holding.shares, 1000);
+  assert.equal(holding.availableShares, 800);
+  assert.equal(holding.averagePrice, 3000);
+  assert.equal(holding.marketValueIdr, 3300000);
+  assert.equal(holding.unrealizedGainRatio, 0.1);
+  assert.equal(holding.readFrom.shares, "qty.balance.share");
+  assert.ok(holding.unmappedKeys.includes("qty.private_note"));
+  assert.equal(JSON.stringify(holding).includes(SECRET_ACCOUNT), false);
+});
+
+test("current detail null shells mean no position and never fabricate a zero holding", async () => {
+  const shell = { symbol: "BBRI", qty: null, price: null, asset: null, company: null, info: [] };
+  overrides["/portfolio/v2/detail"] = () => json({ data: { result: shell, day_trade: shell } });
+  const position = await getPosition("BBRI");
+  assert.equal(position.holding, null);
+  assert.equal(position.dayTradeHolding, null);
+  assert.equal(lastUrl("/portfolio/v2/detail").searchParams.get("stock_code"), "BBRI");
+});
+
+test("current detail unwraps the position and keeps day trading separate", async () => {
+  overrides["/portfolio/v2/detail"] = () => json({ data: { result: NESTED_HOLDING, day_trade: null } });
+  const position = await getPosition("BBRI");
+  assert.equal(position.holding?.lots, 10);
+  assert.equal(position.dayTradeHolding, null);
+});
+
 /* ----------------------------------- cash ----------------------------------- */
+
+test("current cash and trading balances map independently without claiming withdrawability", async () => {
+  overrides["/balance/cash"] = () => json({ data: { available_cash_on_hand: 2000000 } });
+  overrides["/balance/cash/info"] = () => json({ data: { trade_limit: 4000000, trade_balance: 2500000, day_trade_buying_power: 6000000 } });
+  const cash = await getCashBalance();
+  assert.equal(cash.cashIdr, 2000000);
+  assert.equal(cash.availableCashOnHandIdr, 2000000);
+  assert.equal(cash.buyingPowerIdr, 4000000);
+  assert.equal(cash.tradingBalanceIdr, 2500000);
+  assert.equal(cash.dayTradeBuyingPowerIdr, 6000000);
+  assert.equal(cash.withdrawableIdr, undefined);
+  assert.equal(cash.readFrom.buyingPowerIdr, "info.trade_limit");
+});
 
 test("cash and buying power are separate fields, because they are separate numbers", async () => {
   const cash = await getCashBalance();
@@ -400,11 +490,38 @@ test("a performance series must be one of the four, and an unknown one sends not
     const series = await getPortfolioPerformance(kind);
     assert.equal(series.kind, kind);
     assert.equal(series.count, 2);
-    clearCache();
+    rmSync(settingsPath(), { force: true });
+  clearCache();
   }
 });
 
 /* ------------------------------------ fees ------------------------------------ */
+
+test("nested fee rates are read while formula strings are never executed", async () => {
+  overrides["/formula/v2"] = () => json({ data: {
+    fee: { buy: 0.0012, sell: 0.0022 },
+    formula: { buy: { invested: "throw new Error('Do not execute server formulas')" } },
+  } });
+  const fees = await getFees();
+  assert.equal(fees.source, "formula");
+  assert.equal(fees.buyPct, 0.12);
+  assert.equal(fees.sellPct, 0.22);
+  assert.equal(fees.readFrom?.buy, "fee.buy");
+});
+
+test("trading information requests supported features and projects the reply without leaking unknown values", async () => {
+  overrides["/trading/info"] = () => json({ data: {
+    day_trade: { trading_open: "09:00", trading_close: "15:50", debt_ratio_rules: { force_sell: 0.8 }, customer: SECRET_ACCOUNT },
+    split_order: { max_order: 100, max_lot_per_order: 500 },
+    market_cycle: { market_cycle_allocation: { name: "Regular", start_at: "09:00", end_at: "16:00" } },
+  } });
+  const info = await getTradingInfo();
+  assert.deepEqual(lastUrl("/trading/info").searchParams.getAll("features"), ["FEATURE_DAY_TRADE", "FEATURE_SPLIT_ORDER", "FEATURE_MARKET_CYCLE"]);
+  assert.equal(info.features.day_trade?.tradingOpen, "09:00");
+  assert.equal(info.features.split_order?.maxLotsPerOrder, 500);
+  assert.equal(info.features.market_cycle?.allocationName, "Regular");
+  assert.equal(JSON.stringify(info).includes(SECRET_ACCOUNT), false);
+});
 
 test("a fee expressed as a fraction is read as a percentage, with the raw value kept", async () => {
   const fees = await getFees();
@@ -447,7 +564,27 @@ test("a symbol the response did not mention is unknown, not untradable", async (
   assert.equal(result.symbols[0].tradable, true);
   assert.equal(result.symbols[1].symbol, "GOTO");
   assert.equal(result.symbols[1].tradable, undefined, "'we could not tell' is not 'you may not'");
-  assert.equal(result.request.stock_codes, "BBRI,GOTO");
+  assert.deepEqual(result.request.stock_codes, ["BBRI", "GOTO"]);
+  assert.deepEqual(lastUrl("/stock/tradable").searchParams.getAll("stock_codes"), ["BBRI", "GOTO"]);
+});
+
+test("personal account fallback projects masked fields and drops personal addresses and identifiers", async () => {
+  overrides["/account"] = () => json({ message: "Unrecognized Command" }, 404);
+  overrides["/account/personal"] = () => json({ data: {
+    personal: { full_name: "Ayu Lestari", identity: SECRET_ACCOUNT, email: "private@example.test", street: "Private street" },
+    account: { number: "ACCT-7788", ksei: { sid: "SID-9911" }, bank: { rdn: { account: { number: "RDN-4455", name: "Ayu Lestari" } } } },
+    status: { description: "Active" },
+  } });
+  const account = await getAccount();
+  assert.equal(account.nameMasked, "A. L.");
+  assert.equal(account.accountNumberMasked, "••••7788");
+  assert.equal(account.rdnMasked, "••••4455");
+  assert.equal(account.sidMasked, "••••9911");
+  assert.equal(account.readFrom.name, "personal.full_name");
+  const serialized = JSON.stringify(account);
+  for (const privateValue of [SECRET_ACCOUNT, "private@example.test", "Private street", "Ayu Lestari", "ACCT-7788"]) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
 });
 
 test("an empty symbol list is refused before any request", async () => {
@@ -533,7 +670,14 @@ test("the reads and the writes are exactly these, and nothing drifts between the
       "cash_balance",
       "order_detail",
       "order_history",
-      "order_preview",
+      "paper_order_preview",
+      "paper_portfolio",
+      "paper_position",
+      "paper_cash_balance",
+      "paper_orders",
+      "paper_order_detail",
+      "paper_order_history",
+      "paper_trade_performance",
       "orders",
       "portfolio",
       "position",
@@ -541,7 +685,7 @@ test("the reads and the writes are exactly these, and nothing drifts between the
       "trade_performance",
       "trading_info",
       "trading_status",
-    ],
+    ].sort(),
   );
   // The four that move money, and only those four — plus `trading_forget`, which is a write for the
   // same structural reason and for no other: it changes process state, so it must not be reachable
@@ -551,7 +695,7 @@ test("the reads and the writes are exactly these, and nothing drifts between the
   // anything that places what it priced.
   assert.deepEqual(
     [...writes].sort(),
-    ["order_amend", "order_buy", "order_cancel", "order_sell", "trading_forget"],
+    ["paper_order_amend", "paper_order_buy", "paper_order_cancel", "paper_order_sell", "trading_forget"],
   );
 });
 
@@ -585,18 +729,19 @@ function descriptions(): { reads: Map<string, string>; writes: Map<string, strin
   return { reads, writes };
 }
 
-test("every account read tells the model its fields are not observed", () => {
+test("every account read distinguishes verified empty/account envelopes from projected nonempty rows", () => {
   const { reads } = descriptions();
   // The two exceptions are named rather than filtered by a pattern. `trading_status` reads local
   // configuration and makes no request; `order_preview` carries its own, longer warning about
   // checks that could not be verified, and repeating the projection note there would bury it.
   const exempt = new Set(["trading_status", "order_preview"]);
   for (const [name, description] of reads) {
-    if (exempt.has(name)) continue;
-    assert.match(description, /PENDING VERIFICATION/, name);
+    if (exempt.has(name) || name.startsWith("paper_")) continue;
+    assert.match(description, /Field mapping is partly verified/, name);
+    assert.match(description, /Nonempty holding, order and history rows remain projected/, name);
     assert.match(description, /trading-login/, `${name} must say how to get a session`);
   }
-  assert.equal(reads.size - exempt.size, 10);
+  assert.equal([...reads.keys()].filter((name) => !name.startsWith("paper_") && name !== "trading_status").length, 10);
 });
 
 test("every write description says there is no undo, and forbids a resend", () => {
@@ -613,9 +758,9 @@ test("every write description says there is no undo, and forbids a resend", () =
   const exempt = new Set(["trading_forget"]);
   for (const [name, description] of writes) {
     if (exempt.has(name)) continue;
-    assert.match(description, /no undo/i, `${name} must say the order cannot be taken back`);
+    assert.match(description, /LOCAL PAPER SIMULATION ONLY/i, `${name} must identify local simulation`);
     assert.match(description, /confirm: true/, `${name} must state the confirmation requirement`);
-    assert.match(description, /resend|RESEND/, `${name} must forbid resending on an uncertain outcome`);
+    assert.match(description, /No real money/, `${name} must rule out real-money execution`);
   }
   assert.equal(writes.size - exempt.size, 4, "the money-moving writes are still exactly four");
 });
@@ -629,4 +774,25 @@ test("trading_forget's description says it only ever tightens", () => {
   assert.match(description, /ask me again|ask the user directly|asks the user directly/i);
   assert.match(description, /never fewer|only ever/i, "it must say it cannot loosen anything");
   assert.match(description, /stockbit-auth trading-forget/, "and name the terminal command that crosses processes");
+});
+
+test("paper mode never substitutes a ledger for real portfolio and securities reads", async () => {
+  const settings = defaultSettings();
+  settings.trading.mode = "paper";
+  writeFileSync(settingsPath(), JSON.stringify(settings));
+  const { definer, reads } = fakeDefiner();
+  registerTradingTools(definer);
+  for (const [name, args, path] of [
+    ["portfolio", {}, "/portfolio/v2/list"],
+    ["position", { symbol: "BBRI" }, "/portfolio/v2/detail"],
+    ["cash_balance", {}, "/balance/cash"],
+    ["orders", {}, "/order/v2/list"],
+    ["order_detail", { order_id: "O1" }, "/order/v2/detail"],
+    ["order_history", {}, "/history/v3"],
+    ["trade_performance", {}, "/history/performance/trade"],
+  ] as const) {
+    const result = await reads.get(name)!(args);
+    assert.ok(seenUrls.some((url) => new URL(url).pathname === path), `${name} must read the securities account`);
+    assert.doesNotMatch(JSON.stringify(result), /PAPER ACCOUNT/);
+  }
 });

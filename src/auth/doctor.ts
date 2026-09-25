@@ -462,7 +462,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<Check[]> {
     detail: policy.corrupt
       ? `${policy.settingsPath} could not be parsed; treated as no permission`
       : `${policy.enabled ? "enabled" : "off"} (${policy.source})` +
-        (policy.autoConfirmIgnored ? " — autoConfirm set but ignored without a value cap" : ""),
+        " — real-money execution is unavailable",
   });
   checks.push({
     name: "Trading session",

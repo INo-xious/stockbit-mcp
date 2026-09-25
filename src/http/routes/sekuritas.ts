@@ -35,19 +35,5 @@ export const SEKURITAS_ROUTES = {
   eipoRdnBalance: { host: "sekuritas", method: "GET", template: "/eipo/rdn_balance", auth: "eipo" },
   eipoUnboxing: { host: "sekuritas", method: "GET", template: "/eipo/company/unboxing", auth: "eipo" },
 
-  /* --------------------------------- e-IPO orders --------------------------------- */
-
-  /**
-   * Stockbit's own dry run, and the commitment.
-   *
-   * `verify` is unusual and worth using: the server itself says whether the order would be accepted,
-   * which is a better check than anything this project could compute. It is called by
-   * `eipo_order_preview` and its answer goes into the ticket the user reads.
-   *
-   * `POST /eipo/order` is a real financial commitment under the same trading switch and the same
-   * ticket protocol as an exchange order — see ADR-0004. Its body has NOT been observed; see
-   * `docs/PENDING-VERIFICATION.md`.
-   */
-  eipoOrderVerify: { host: "sekuritas", method: "POST", template: "/eipo/order/verify", auth: "eipo" },
-  eipoOrderPlace: { host: "sekuritas", method: "POST", template: "/eipo/order", auth: "eipo" },
+  // Real-money order routes are intentionally absent. See ADR-0012.
 } as const satisfies Record<string, RouteSpec>;

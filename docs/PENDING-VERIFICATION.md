@@ -1,5 +1,10 @@
 # Pending live verification
 
+> Historical research log. For the current 2026-09-24 build, use [VERIFICATION.md](VERIFICATION.md).
+> Several failures below were fixed during that pass. Any references to enabling live trading or
+> testing real orders are superseded by [ADR-0012](adr/0012-no-real-money-execution.md): this build
+> has no real-money execution routes.
+
 **Most of this is now done.** Probed against a live account on 2026-08-09; results are recorded in
 `stockbit-api.md` §11 and in the code that consumes them.
 

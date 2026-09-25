@@ -8,11 +8,7 @@
  * `Authorization-Carina` header this project's own docs/stockbit-api.md claimed until it was checked
  * against the bundle.
  *
- * ## Why the write rows are separate from the read rows in review, if not in the file
- *
- * The reads describe the account. The writes move money. `test/transport.test.ts` names them as
- * distinct classes and cites the ADR each belongs to, so a new one cannot arrive as an ordinary
- * row: `ORDER_WRITES` is ADR-0004 and required an argument, not an edit.
+ * Only account reads and session authentication are allowed. No real-money order routes exist.
  */
 import type { RouteSpec } from "./_spec.js";
 
@@ -30,14 +26,10 @@ export const CARINA_ROUTES = {
   /**
    * Renew the securities session.
    *
-   * `auth: "refreshSecurities"` puts the refresh token in the BODY as `refresh_token` and sends no
-   * Authorization header — that is what Stockbit's own client does here, and it is the one thing
-   * about this chain that differs from the main session's refresh. Whether carina would also accept
-   * a bearer is unknown and deliberately untested from code: the documented form works.
+   * `auth: "refreshSecurities"` sends the refresh token in BOTH the `refresh_token` JSON body
+   * and Authorization bearer. Public frontend modules88216/94615 confirm both placements.
    */
   carinaAuthRefresh: { host: "carina", method: "POST", template: "/auth/refresh", auth: "refreshSecurities" },
-  /** Re-validate the PIN for an action that demands it again. Same PIN policy as the login. */
-  carinaAuthPinValidate: { host: "carina", method: "POST", template: "/auth/pin/validate", auth: "securities" },
   /** End the securities session server-side, so `trading-logout` is more than a local delete. */
   carinaAuthLogout: { host: "carina", method: "POST", template: "/auth/logout", auth: "securities" },
 
@@ -105,29 +97,9 @@ export const CARINA_ROUTES = {
 
   /** Who the account is. Masked before it leaves `src/trading/account.ts`. */
   account: { host: "carina", method: "GET", template: "/account", auth: "securities" },
+  /** Current frontend's separate personal-account reader (public module 56, 2026-09-24). */
+  accountPersonal: { host: "carina", method: "GET", template: "/account/personal", auth: "securities" },
   subAccountList: { host: "carina", method: "GET", template: "/v2/sub-account/list", auth: "securities" },
 
-  /* -------------------------------- orders -------------------------------- */
-
-  /**
-   * The four routes that move money. ADR-0004.
-   *
-   * Every other write in this project can be undone: a chart layout is snapshotted and restored, a
-   * watchlist entry is added back. An order cannot. Once the exchange has it, the only thing that
-   * exists is another order — which is why `src/trading/orders.ts` NEVER auto-cancels on a failed
-   * verification, and why an outcome it could not read is reported as unknown rather than guessed.
-   *
-   * Declaring them here does not enable them. `trading.enabled` in `~/.stockbit/settings.json` is
-   * off by default, `STOCKBIT_TRADING=off` overrides it in the one direction it can, and every one
-   * of these needs a per-order confirmation on top. The route table's job is only to say that the
-   * URL exists and which credential it takes.
-   *
-   * The four kept OUT are as deliberate as the four in: `/order/v2/amend/bulk`,
-   * `/order/v2/bulk-cancel` and the day-trade family have no tool, no argument for one, and
-   * therefore no row.
-   */
-  orderBuy: { host: "carina", method: "POST", template: "/order/v2/buy", auth: "securities" },
-  orderSell: { host: "carina", method: "POST", template: "/order/v2/sell", auth: "securities" },
-  orderAmend: { host: "carina", method: "POST", template: "/order/v2/amend", auth: "securities" },
-  orderCancel: { host: "carina", method: "POST", template: "/order/v2/cancel", auth: "securities" },
+  // Real-money order routes are intentionally absent. See ADR-0012.
 } as const satisfies Record<string, RouteSpec>;

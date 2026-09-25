@@ -6,10 +6,8 @@
  * character on the wire — and the only honest way to hold it is to read that character out of the
  * request that actually went out, for every input a caller could supply.
  *
- * None of these routes has been observed live. The response fixtures are therefore shaped like the
- * sibling endpoints that HAVE been (`data.calcs` from the saved-screen GET, `data.result` from the
- * watchlist detail), and the tests assert that a payload which does NOT match is reported as
- * unlocated rather than flattened into an empty answer.
+ * The screener request shape and data.calcs pagination were observed live on 2026-09-24.
+ * Unknown response shapes still report an unlocated list instead of a false empty result.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,7 +58,7 @@ const RUN = {
 const FAVORITES = { data: [{ id: "5951939", name: "Cari Akum", type: "TEMPLATE_TYPE_CUSTOM" }] };
 const FINITEMS = { data: { result: [{ id: "1010", name: "Total Revenue" }] } };
 const SYMBOLS = { data: { symbols: ["BBRI", "aadi", "not a ticker", { symbol: "ADRO" }] } };
-const SEARCH = { data: { result: [{ symbol: "BBRI", name: "Bank Rakyat Indonesia (Persero) Tbk." }] } };
+const SEARCH = { data: { companies: [{ name: "BBRI", desc: "Bank Rakyat Indonesia (Persero) Tbk.", is_exist: false }], has_more_companies: true } };
 
 /* ------------------------------- the fake wire ------------------------------- */
 
@@ -204,11 +202,14 @@ test("an empty or non-finite value is refused, because an empty value would scre
 
 test("values are stringified and rules keep the order they were given", async () => {
   await runScreen(RULES);
-  const body = only().body as { rules: Array<Record<string, unknown>> };
-  assert.deepEqual(body.rules, [
-    { metric: "1234", operator: ">", value: "10" },
-    { metric: "5678", operator: "<=", value: "2.5" },
+  const body = only().body as { filters: string; sequence: string; screenerid: string; type: string };
+  assert.deepEqual(JSON.parse(body.filters), [
+    { type: "basic", item1: "1234", item1name: "", operator: ">", item2: "10", multiplier: "" },
+    { type: "basic", item1: "5678", item1name: "", operator: "<=", item2: "2.5", multiplier: "" },
   ]);
+  assert.equal(body.sequence, "1234,5678");
+  assert.equal(body.screenerid, "0");
+  assert.equal(body.type, "TEMPLATE_TYPE_CUSTOM");
 });
 
 /* ================================== the scope ================================== */
@@ -217,16 +218,16 @@ test("a watchlist scope is the documented pair, and it replaces nothing else in 
   assert.deepEqual(watchlistScope("5455717"), { scope: "wl", scopeID: "5455717" });
   await runScreen(RULES, { scope: watchlistScope("5455717") });
   const body = only().body as Record<string, unknown>;
-  assert.equal(body.scope, "wl");
-  assert.equal(body.scopeID, "5455717");
+  assert.deepEqual(JSON.parse(body.universe as string), { scope: "wl", scopeID: "5455717", name: "" });
   assert.equal(body.save, "0");
 });
 
-test("an unscoped screen sends no scope keys at all rather than empty ones", async () => {
+test("an unscoped screen sends the frontend IHSG universe", async () => {
   await runScreen(RULES);
   const body = only().body as Record<string, unknown>;
   assert.equal("scope" in body, false);
   assert.equal("scopeID" in body, false);
+  assert.deepEqual(JSON.parse(body.universe as string), { scope: "IHSG", scopeID: "", name: "" });
 });
 
 test("a non-numeric watchlist id is refused before anything is sent", () => {
@@ -307,9 +308,10 @@ test("limit trims the answer without touching the request, and count stays the t
   assert.equal(sent.length, 1);
 });
 
-test("a limit below 1 is refused before the request rather than clamped", async () => {
+test("invalid limits are refused before the request rather than clamped", async () => {
   await assert.rejects(() => runScreen(RULES, { limit: 0 }), /Invalid limit/);
   await assert.rejects(() => runScreen(RULES, { limit: -5 }), /Invalid limit/);
+  await assert.rejects(() => runScreen(RULES, { limit: 1.5 }), /Invalid limit/);
   assert.equal(sent.length, 0);
 });
 
@@ -323,6 +325,32 @@ test("two different rule sets do not share a cached answer", async () => {
 
   await runScreen(RULES, { scope: watchlistScope("5455717") });
   assert.equal(sent.length, 3, "the same rules over a different universe is a different screen");
+});
+
+test("upstream pagination is separate from local trimming and included in the cache key", async () => {
+  runResponse = { data: { ...RUN.data, totalrows: "51", curpage: "2", perpage: "25" } };
+  const page = await runScreen(RULES, { page: 2, limit: 1 });
+  assert.equal(page.page, 2);
+  assert.equal(page.pageSize, 25);
+  assert.equal(page.totalMatches, 51);
+  assert.equal(page.hasMore, true);
+  assert.equal(page.count, 2);
+  assert.equal(page.matches?.length, 1);
+  assert.equal(page.truncated, true);
+  assert.equal((only().body as { page: number }).page, 2);
+  await runScreen(RULES, { page: 3 });
+  assert.equal(sent.length, 2);
+});
+
+test("missing or malformed totals remain unknown; invalid pages never reach the wire", async () => {
+  runResponse = { data: { ...RUN.data, totalrows: "", perpage: null } };
+  const page = await runScreen(RULES);
+  assert.equal(page.totalMatches, null);
+  assert.equal(page.pageSize, null);
+  assert.equal(page.hasMore, null);
+  sent = [];
+  for (const bad of [0, -1, 1.5, NaN]) await assert.rejects(() => runScreen(RULES, { page: bad }), /positive whole/);
+  assert.equal(sent.length, 0);
 });
 
 /* ================================ screener lists ================================ */
@@ -414,29 +442,46 @@ test("two watchlists do not share a cached symbol list", async () => {
   assert.deepEqual(sent.map(path), ["/watchlist/6252652/symbols", "/watchlist/14011590/symbols"]);
 });
 
-test("company search sends the keyword as the only query parameter", async () => {
-  const found = await searchCompanies("bank rakyat");
+test("company search sends the required watchlist id, keyword and one-based page", async () => {
+  const found = await searchCompanies("bank rakyat", "6252652");
   const request = only();
   assert.equal(request.method, "GET");
   assert.equal(path(request), "/watchlist/search/company");
-  assert.deepEqual([...new URL(request.url).searchParams], [["keyword", "bank rakyat"]]);
+  assert.deepEqual([...new URL(request.url).searchParams], [["keyword", "bank rakyat"], ["watchlist_id", "6252652"], ["page", "1"]]);
   assert.equal(found.keyword, "bank rakyat");
-  assert.equal(found.foundAt, "data.result");
-  assert.deepEqual(found.rows, SEARCH.data.result);
+  assert.equal(found.watchlistId, "6252652");
+  assert.equal(found.page, 1);
+  assert.equal(found.hasMore, true);
+  assert.equal(found.foundAt, "data.companies");
+  assert.deepEqual(found.rows, SEARCH.data.companies);
 });
 
 test("an empty keyword never reaches the wire", async () => {
-  await assert.rejects(() => searchCompanies("   "), /must not be empty/);
-  await assert.rejects(() => searchCompanies(""), /must not be empty/);
+  await assert.rejects(() => searchCompanies("   ", "6252652"), /must not be empty/);
+  await assert.rejects(() => searchCompanies("", "6252652"), /must not be empty/);
   assert.equal(sent.length, 0);
 });
 
-test("the search cache key is the keyword that was actually sent", async () => {
-  await searchCompanies("bbri");
-  await searchCompanies(" bbri ");
+test("search caches by keyword, watchlist and page without sharing membership flags", async () => {
+  await searchCompanies("bbri", "6252652");
+  await searchCompanies(" bbri ", "6252652");
   assert.equal(sent.length, 1, "the trimmed keyword is what was sent, so it is what is keyed on");
-  await searchCompanies("BBRI");
+  await searchCompanies("BBRI", "6252652");
   assert.equal(sent.length, 2, "case is preserved on the wire, so it must not be folded in the key");
+  await searchCompanies("BBRI", "14011590");
+  await searchCompanies("BBRI", "14011590", 2);
+  assert.equal(sent.length, 4);
+  assert.equal(new URL(sent[3].url).searchParams.get("page"), "2");
+});
+
+test("company search refuses invalid watchlist IDs and page numbers before any request", async () => {
+  for (const id of ["", "abc", "12/../34"]) {
+    await assert.rejects(() => searchCompanies("BBRI", id), /watchlist id/);
+  }
+  for (const page of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(() => searchCompanies("BBRI", "6252652", page), /page must/);
+  }
+  assert.equal(sent.length, 0);
 });
 
 /* ================================ the tool surface ================================ */
@@ -475,7 +520,7 @@ test("the family registers exactly five tools, all of them reads", () => {
 test("no tool exposes an argument that could reach the save flag", () => {
   const { reads } = registerAll();
   const run = reads.find((r) => r.name === "screener_run")!;
-  assert.deepEqual(Object.keys(run.shape).sort(), ["limit", "rules", "watchlist_id"]);
+  assert.deepEqual(Object.keys(run.shape).sort(), ["limit", "page", "rules", "watchlist_id"]);
   for (const tool of reads) {
     for (const argument of Object.keys(tool.shape)) {
       assert.equal(/save|persist|template_id/i.test(argument), false, `${tool.name}.${argument}`);
@@ -503,7 +548,7 @@ test("calling the tool end to end posts save 0", async () => {
   assert.notEqual(result.isError, true);
   const body = only().body as Record<string, unknown>;
   assert.equal(body.save, "0");
-  assert.equal(body.scopeID, "5455717");
+  assert.equal(JSON.parse(body.universe as string).scopeID, "5455717");
   const payload = JSON.parse(result.content[0].text) as { success: boolean; data: { request: { save: string } } };
   assert.equal(payload.success, true);
   assert.equal(payload.data.request.save, "0");

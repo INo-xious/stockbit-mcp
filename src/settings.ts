@@ -1,87 +1,30 @@
 /**
- * `~/.stockbit/settings.json` — the file that decides whether this server may place an order at all.
- *
- * ## Three switches, and why none is enough alone
- *
- * `trading.enabled` is the master. Off by default, and turning it on is a deliberate act at a
- * terminal (`stockbit-auth trading-enable`) rather than something a model can do. With it off,
- * every order tool still exists and still answers — with a refusal that names this file — because a
- * tool that vanishes when disabled teaches a caller that the feature is broken rather than off.
- *
- * `trading.autoConfirm` is the second, and it is the one that needed an argument. ADR-0003's rule
- * is that a per-call `confirm` is never satisfied by configuration: config gets set once and
- * forgotten, and the whole risk is a write nobody meant to make. `autoConfirm` is the account
- * owner's deliberate exception to that rule, and it is guard-railed rather than trusted — it is
- * honoured **only when `maxOrderValueIdr` is set**, so "I trust it for small orders" cannot silently
- * become "I trust it for any order". With no cap the policy reports itself as ignored and says why.
- *
- * `trading.elicitation` is the third, and it is about a different question from the other two: not
- * *may* an order be placed, but *who has to agree first*. ADR-0010. It is a tri-state rather than a
- * pair of booleans for the same reason `TradingMode` is — see the note on that type — and it
- * contradicts `autoConfirm` at one value, `required`, where the contradiction is resolved in favour
- * of the switch that produces a question and reported through `autoConfirmIgnored`.
- *
- * `trading.confirmationsRevokedAt` is not a switch at all but a moment: it is how a terminal reaches
- * into a server process that is already running, since the in-memory "don't ask again" grants a
- * person makes for themselves cannot be reached any other way.
- *
- * ## Precedence
- *
- * `STOCKBIT_TRADING=off` (environment) > this file > default-off. The environment can only turn
- * trading **off**, never on: a variable is the easiest thing in a process tree to set by accident,
- * and an accident that disables trading is harmless while the reverse is not.
- *
- * Read at call time rather than cached at start-up, so `trading-disable` takes effect on the next
- * order rather than the next restart.
- *
- * ## Who writes it
- *
- * `stockbit-auth trading-enable/disable/logout`, or the user by hand. Nothing under `src/tools/` or
- * `src/trading/` imports `saveSettings`, and `test/settings.test.ts` asserts that — a server that
- * can widen its own permissions has no permissions.
+ * Local paper-simulation settings. Real-money execution is not supported.
+ * ADR-0012 supersedes the former live-trading policy: stale live/enabled settings
+ * and all environment values fail closed. Only terminal-written paper mode enables
+ * the local ledger. Account reads remain available independently of this setting.
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { stockbitDir } from "./paths.js";
 
-/**
- * Three states, not two.
- *
- * `enabled: boolean` could not express paper trading without a second flag beside it, and the
- * combination "enabled but paper" is exactly the pair of fields that gets read wrong — one of them
- * on its own says the opposite of the truth. One value, three names, and every reader has to look
- * at all three.
- */
-export type TradingMode = "off" | "paper" | "live";
+export type TradingMode = "off" | "paper";
 
 export interface PaperSettings {
   /** What `paper-reset` starts a fresh ledger with. */
   startingCashIdr: number;
 }
 
-/**
- * How hard this account leans on being asked a question by a person. ADR-0010.
- *
- * Three values rather than two booleans, for the reason `TradingMode` is three values rather than
- * `enabled` plus a flag: "required" and "never" are opposite ends of one dial, and a pair of
- * booleans can be set to a combination that says nothing — or, worse, to a combination each half of
- * which reads as the opposite of the truth.
- *
- *  - `required` — refuse rather than send when no person can be reached. The strictest.
- *  - `when-available` — ask whenever the client can, and fall back to `confirm: true` when it
- *    cannot. The default, and the one that honours ADR-0004's rule that a client which cannot ask
- *    must not become a client that cannot trade.
- *  - `never` — do not ask, whatever the client supports. `confirm: true` is then the only gate.
- */
+/** Paper-order consent: require a human dialog, use it when available, or require caller confirmation. */
 export type ElicitationPolicy = "required" | "when-available" | "never";
 
 export interface TradingSettings {
   /** Master switch. `off` unless the account owner chose otherwise at a terminal. */
   mode: TradingMode;
-  /** Skip the per-order confirmation. Honoured ONLY when `maxOrderValueIdr` is set. */
+  /** Retained for settings compatibility, always false. */
   autoConfirm: boolean;
-  /** Ceiling on one order's gross value, in IDR. `null` means no cap — and no autoConfirm. */
+  /** Ceiling on one order's gross value, in IDR. `null` means no cap. */
   maxOrderValueIdr: number | null;
   /** When non-empty, only these symbols may be traded. */
   allowedSymbols: string[];
@@ -113,11 +56,8 @@ export interface Settings {
   chartbit: ChartbitSettings;
 }
 
-/**
- * 2 since paper trading. A v1 file is migrated on read: `enabled: true` becomes `live`, because
- * that is what it meant, and anything else becomes `off`.
- */
-const SETTINGS_VERSION = 2;
+/** Version 3 permanently removes the live mode. */
+const SETTINGS_VERSION = 3;
 
 /** A paper ledger's opening balance when nobody says otherwise: Rp 100 million. */
 export const DEFAULT_PAPER_CASH_IDR = 100_000_000;
@@ -154,18 +94,9 @@ function coerceNumberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-/**
- * Read the mode, migrating a v1 file on the way.
- *
- * v1 had `enabled: boolean`, and `true` there meant real orders with real money — so it becomes
- * `live` and nothing else would be honest. Every unrecognised value is `off`: a file that says
- * `mode: "papr"` is a file whose author's intent cannot be established, and the safe reading of an
- * ambiguous permission is no permission.
- */
-function readMode(trading: Partial<TradingSettings> & { enabled?: unknown }): TradingMode {
-  if (trading.mode === "live" || trading.mode === "paper" || trading.mode === "off") return trading.mode;
-  if (trading.mode === undefined && trading.enabled === true) return "live";
-  return "off";
+/** Old live permissions are revoked, never silently converted to a simulation. */
+function readMode(trading: { mode?: unknown; enabled?: unknown }): TradingMode {
+  return trading.mode === "paper" ? "paper" : "off";
 }
 
 /**
@@ -223,10 +154,10 @@ export function loadSettings(): Settings {
     const trading = (parsed.trading ?? {}) as Partial<TradingSettings>;
     const chartbit = (parsed.chartbit ?? {}) as Partial<ChartbitSettings>;
     return {
-      version: typeof parsed.version === "number" ? parsed.version : SETTINGS_VERSION,
+      version: SETTINGS_VERSION,
       trading: {
         mode: readMode(trading),
-        autoConfirm: trading.autoConfirm === true,
+        autoConfirm: false,
         maxOrderValueIdr: coerceNumberOrNull(trading.maxOrderValueIdr),
         allowedSymbols: Array.isArray(trading.allowedSymbols)
           ? trading.allowedSymbols.filter((s): s is string => typeof s === "string").map((s) => s.toUpperCase())
@@ -282,24 +213,23 @@ export function saveSettings(settings: Settings): void {
 /* ----------------------------------- the policy ----------------------------------- */
 
 export interface TradingPolicy {
-  /** `off`, `paper` or `live`. The one field that answers "what happens if I call order_buy". */
+  /** Local paper simulation is either off or enabled. */
   mode: TradingMode;
-  /** True only in `live`. Named separately because "is this real money" is the question that matters. */
-  live: boolean;
+  /** Always false: real-money execution is absent from this server. */
+  live: false;
   /** `mode !== "off"`. Kept so every existing gate reads the same, whichever mode it is in. */
   enabled: boolean;
   /** The paper ledger's opening balance. */
   paper: PaperSettings;
-  /** Whether a per-order `confirm` may be satisfied by configuration instead of by the caller. */
-  autoConfirm: boolean;
+  /** Always false: configuration cannot automatically confirm an order. */
+  autoConfirm: false;
   maxOrderValueIdr: number | null;
   allowedSymbols: string[];
   maxLotsPerOrder: number;
   /**
    * Whether a person must be asked, may be asked, or is never asked. ADR-0010.
    *
-   * Carried in every mode, including `off` and `paper`, because paper rehearses the live protocol
-   * and a rehearsal that skips the human rehearses the wrong thing.
+   * Applies only to local paper simulation. Real-money execution is unavailable.
    */
   elicitation: ElicitationPolicy;
   /**
@@ -315,129 +245,36 @@ export interface TradingPolicy {
   reason: string;
   /** Set when the settings file existed but could not be read. */
   corrupt?: true;
-  /** Set when `autoConfirm` was requested but is not being honoured, and why. */
-  autoConfirmIgnored?: string;
   settingsPath: string;
 }
 
-/**
- * The trading policy in force right now.
- *
- * Read at call time. Precedence is environment > file > default-off, and the environment can only
- * move DOWN the ladder: `live` → `paper` → `off`. `STOCKBIT_TRADING=live` on a file that says
- * `paper` is ignored entirely, because a variable is the easiest thing in a process tree to set by
- * accident and the accident must never be the expensive direction.
- */
+/** Read at call time. Environment variables can disable paper trading, never enable it. */
 export function tradingPolicy(env: NodeJS.ProcessEnv = process.env): TradingPolicy {
   const settings = loadSettings();
   const corrupt = settingsWereCorrupt();
-  const path = settingsPath();
   const t = settings.trading;
-
-  const shared = {
+  const path = settingsPath();
+  const envValue = (env.STOCKBIT_TRADING ?? "").trim().toLowerCase();
+  const envOff = ["off", "0", "false", "no"].includes(envValue);
+  const mode = envOff || corrupt ? "off" : t.mode;
+  return {
+    mode,
+    live: false,
+    enabled: mode === "paper",
     paper: t.paper,
+    autoConfirm: false,
     maxOrderValueIdr: t.maxOrderValueIdr,
     allowedSymbols: t.allowedSymbols,
     maxLotsPerOrder: t.maxLotsPerOrder,
-    // In `shared` rather than in each branch, so all four return sites carry them. A corrupt file
-    // has already been replaced wholesale by `defaultSettings()`, so these are the defaults there
-    // too — `when-available` and "never revoked", which is what a file nobody could read says.
     elicitation: t.elicitation,
     confirmationsRevokedAt: t.confirmationsRevokedAt,
+    source: envOff ? "env-off" : corrupt ? "default-off" : "settings",
     settingsPath: path,
     ...(corrupt ? { corrupt: true as const } : {}),
-  };
-
-  const envValue = (env.STOCKBIT_TRADING ?? "").trim().toLowerCase();
-  const envOff = envValue === "off" || envValue === "0" || envValue === "false" || envValue === "no";
-  const envPaper = envValue === "paper";
-
-  if (envOff) {
-    return {
-      ...shared,
-      mode: "off",
-      live: false,
-      enabled: false,
-      autoConfirm: false,
-      source: "env-off",
-      reason:
-        "Trading is off because STOCKBIT_TRADING is set to off in this process's environment. " +
-        "The environment can only lower the trading mode; unset it and use `stockbit-auth " +
-        "trading-enable --paper|--live` to raise it.",
-    };
-  }
-
-  // A corrupt file is no permission at all, whatever it half-said.
-  const fileMode: TradingMode = corrupt ? "off" : t.mode;
-  // Downgrade only. `paper` in the environment cannot raise `off`, and nothing raises `paper`.
-  const mode: TradingMode = envPaper && fileMode === "live" ? "paper" : fileMode;
-
-  if (mode === "off") {
-    return {
-      ...shared,
-      mode: "off",
-      live: false,
-      enabled: false,
-      autoConfirm: false,
-      source: corrupt ? "default-off" : "settings",
-      reason: corrupt
-        ? `Trading is off: ${path} could not be read, and an unreadable policy file is treated as no permission. ` +
-          "Fix or delete the file, then run `stockbit-auth trading-enable --paper` or `--live`."
-        : "Trading is off. Try it on paper first with `stockbit-auth trading-enable --paper`, or " +
-          `use \`--live\` for real orders (writes ${path}).`,
-    };
-  }
-
-  if (mode === "paper") {
-    return {
-      ...shared,
-      mode: "paper",
-      live: false,
-      enabled: true,
-      // Paper still asks. The whole point is that it is a rehearsal for the live protocol, and a
-      // rehearsal in which the confirmation step is skipped rehearses the wrong thing.
-      autoConfirm: false,
-      source: envPaper && fileMode === "live" ? "env-paper" : "settings",
-      reason:
-        envPaper && fileMode === "live"
-          ? "PAPER trading. The settings file says live, but STOCKBIT_TRADING=paper in this process's " +
-            "environment lowered it. No real order can be placed from this process."
-          : "PAPER trading — orders go to a local ledger, not to the exchange. No real money moves. " +
-            `Switch to real orders with \`stockbit-auth trading-enable --live\` (writes ${path}).`,
-    };
-  }
-
-  // autoConfirm is honoured only with a value cap, and only when it is real money — in paper it is
-  // pointless, and skipping the confirmation would rehearse the wrong habit.
-  const capMissing = t.autoConfirm && t.maxOrderValueIdr === null;
-  // ...and never against an owner who asked to be asked every time. Two switches that contradict
-  // each other are resolved in favour of the one that produces a question, and reported through the
-  // channel that already exists for "you set this and it is not doing anything" rather than through
-  // a new field nobody reads.
-  const contradicted = t.autoConfirm && t.elicitation === "required";
-  return {
-    ...shared,
-    mode: "live",
-    live: true,
-    enabled: true,
-    autoConfirm: t.autoConfirm && !capMissing && !contradicted,
-    source: "settings",
-    reason: `LIVE trading is enabled in ${path}. Orders reach the exchange and move real money.`,
-    ...(contradicted
-      ? {
-          autoConfirmIgnored:
-            "autoConfirm is set but is NOT in effect: trading.elicitation is `required`, which says a person " +
-            "must be asked directly about every order, and autoConfirm says nobody is asked. The ask wins. " +
-            "Orders proceed when the user accepts the dialog, and are refused — rather than auto-confirmed — " +
-            "on a client that cannot ask, whatever confirm: true says. Run `stockbit-auth trading-enable " +
-            "--live --elicitation when-available` if autoConfirm is what you actually want.",
-        }
-      : capMissing
-        ? {
-            autoConfirmIgnored:
-              "autoConfirm is set but is NOT in effect: it is honoured only when maxOrderValueIdr is also set. " +
-              "Every order still needs confirm: true. Set a cap with `stockbit-auth trading-enable --live --max-order-value N`.",
-          }
-        : {}),
+    reason: mode === "paper"
+      ? "PAPER trading is enabled. Orders are recorded only in the local ledger; no real money moves. Real-money execution is unavailable."
+      : (corrupt ? `Paper trading is off because ${path} could not be read. ` : envOff
+        ? "Paper trading is off because STOCKBIT_TRADING is set to off in the environment. " : "Paper trading is off. ") +
+        "Use `stockbit-auth trading-enable --paper` to enable the local simulation. Real-money execution is permanently unavailable.",
   };
 }

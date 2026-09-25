@@ -49,9 +49,8 @@ test("the registry name is the one the npm package claims", () => {
 
 /* ------------------------------- what each one points at ------------------------------- */
 
-test("the plugin's MCP config installs from npm, not from the checkout", () => {
-  // A plugin checkout has no `dist/`, because `dist/` is gitignored. Pointing the plugin at a
-  // relative entry point would give every installer a server that cannot start.
+test("the plugin runs this reviewed checkout, never the older npm build", () => {
+  // The checkout must be built before loading the plugin; keep execution inside that checkout.
   const plugin = read(".claude-plugin", "plugin.json") as { mcpServers: string; skills: string };
   assert.equal(plugin.mcpServers, "./.mcp.json");
 
@@ -59,8 +58,8 @@ test("the plugin's MCP config installs from npm, not from the checkout", () => {
     mcpServers: Record<string, { command: string; args: string[] }>;
   };
   const entry = mcp.mcpServers.stockbit;
-  assert.equal(entry.command, "npx");
-  assert.deepEqual(entry.args, ["-y", `${pkg.name}@^${pkg.version.split(".")[0]}`]);
+  assert.equal(entry.command, "node");
+  assert.deepEqual(entry.args, ["${CLAUDE_PLUGIN_ROOT}/dist/bin/stockbit-mcp.js"]);
 });
 
 test("the extension runs the built entry point that package.json also exposes", () => {
@@ -78,7 +77,8 @@ test("the extension runs the built entry point that package.json also exposes", 
   // Every variable the extension sets must be one the server actually reads. A typo here is a
   // setting that appears in the UI and does nothing.
   const declared = Object.keys(manifest.server.mcp_config.env);
-  assert.deepEqual(declared.sort(), ["STOCKBIT_NO_BROWSER", "STOCKBIT_TOOLS"]);
+  assert.deepEqual(declared.sort(), ["STOCKBIT_MCP_TRANSPORT", "STOCKBIT_NO_BROWSER", "STOCKBIT_TOOLS"]);
+  assert.equal(manifest.server.mcp_config.env.STOCKBIT_MCP_TRANSPORT, "stdio");
 });
 
 test("the extension's user settings are substituted into those variables", () => {
@@ -87,6 +87,7 @@ test("the extension's user settings are substituted into those variables", () =>
     user_config: Record<string, unknown>;
   };
   for (const [name, value] of Object.entries(manifest.server.mcp_config.env)) {
+    if (name === "STOCKBIT_MCP_TRANSPORT") continue; // Fixed by the extension's stdio protocol.
     const match = /^\$\{user_config\.([a-z_]+)\}$/.exec(value);
     assert.ok(match, `${name} must be substituted from a user_config key, got ${value}`);
     assert.ok(match[1] in manifest.user_config, `user_config has no key ${match[1]}`);
@@ -135,8 +136,8 @@ test("the plugin ships the nine skills, each named after its directory", () => {
   }
 });
 
-test("the money-touching skill states the rules that cannot be waived", () => {
-  // This is the one skill that can spend money. If a later edit smooths these away, the skill still
+test("the simulation skill states its account boundaries and confirmation rules", () => {
+  // This skill can change simulated accounts. If a later edit smooths these away, the skill still
   // loads and still reads well, and the guardrails are gone.
   const body = readFileSync(join(ROOT, "skills", "trade-with-guardrails", "SKILL.md"), "utf8");
   for (const rule of [
@@ -144,7 +145,9 @@ test("the money-touching skill states the rules that cannot be waived", () => {
     "Never ask for the PIN",
     "Never resend",
     "trading_status",
-    "order_preview",
+    "paper_order_preview",
+    "virtual_portfolio",
+    "cannot execute real-money trades",
     "verbatim",
   ]) {
     assert.ok(body.includes(rule), `trade-with-guardrails no longer says: ${rule}`);

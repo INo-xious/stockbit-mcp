@@ -45,8 +45,8 @@ export function registerFundamentalsTools(define: Definer): void {
       "There is NO symbol argument — this endpoint is not per-company. To narrow it to one issuer " +
       "use `search`, which is a text search over the listing, not a ticker lookup, so confirm the " +
       "row you get back is the company you meant.\n" +
-      "Every argument is optional and an omitted one is left off the request entirely, so the " +
-      "defaults you get are Stockbit's own — this tool does not choose a quarter or a year for you. " +
+      "All arguments are optional. Required API defaults are page=1, sort_column=1 and order=desc. " +
+      "Omitted quarter and year stay absent, so Stockbit chooses the reporting period. " +
       "`sort_column` is an integer column index whose vocabulary is unmapped; 1 is the value " +
       "Stockbit's own client sends, and other values are accepted but their effect is unknown. " +
       "`filter` is likewise a Stockbit token passed through verbatim.\n" +

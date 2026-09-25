@@ -210,11 +210,13 @@ async function writeJson<T = unknown>(
         throw new StockbitError("upstream", `Network error: ${String(err)}`);
       }
 
-      if (res.status === 401 && !refreshedOn401 && !isRefreshRoute(route)) {
-        // The token was rejected, so the handler never ran. Safe to present a fresh one.
+      const refreshable = isRefreshRoute(route) ? null : domainOf(route);
+      if (res.status === 401 && !refreshedOn401 && refreshable) {
+        // Retry only when a stored credential can actually change. A domainless
+        // grant/PIN login has nothing to refresh: repeating it repeats a rejected
+        // PIN submission and can consume another account-lockout attempt.
         refreshedOn401 = true;
-        const domain = domainOf(route);
-        if (domain) await forceRefresh(domain, token);
+        await forceRefresh(refreshable, token);
         continue;
       }
 

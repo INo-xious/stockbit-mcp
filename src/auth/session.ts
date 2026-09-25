@@ -7,7 +7,7 @@
  * There are now three independent sessions, on three hosts, with three refresh chains:
  *
  *   - `main`       — exodus market data. Refresh token in the Authorization header, empty body.
- *   - `securities` — carina, the trading account. Refresh token in the BODY as `refresh_token`.
+ *   - `securities` — carina, the trading account. Refresh token in BODY as `refresh_token` AND bearer.
  *   - `eipo`       — the e-IPO partner backend. Refresh token as a QUERY parameter.
  *
  * They are kept genuinely apart — own store slot, own in-memory token, own in-flight promise, own
@@ -791,8 +791,8 @@ export async function ensureFresh(domain: TokenDomain = "main"): Promise<string>
  *
  * It is optional, and absent means "refresh unconditionally". Every caller that omits it is a
  * LIVENESS PROOF — `status { live: true }`, `bootstrap --verify`, `login --verify`,
- * `trading-login`, `trading-check` — whose entire contract is that a request left the machine.
- * Reading absence as "assume the slot is current" would make all five report success for nothing.
+ * and explicit session refresh checks — whose contract is that a request left the machine.
+ * Securities login/check instead prove access with a read-only portfolio request.
  */
 export async function forceRefresh(domain: TokenDomain = "main", presented?: string): Promise<string> {
   // The slot has already moved past the token that failed: a peer refreshed while this request was

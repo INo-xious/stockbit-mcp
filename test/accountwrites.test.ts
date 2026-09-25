@@ -151,7 +151,8 @@ function applyWrite(method: string, path: string, body: Record<string, unknown> 
   }
   const favorite = /^\/watchlist\/favorite\/([^/]+)$/.exec(path);
   if (method === "PUT" && favorite) {
-    for (const list of lists) list.is_favorite = list.watchlist_id === favorite[1];
+    const list = lists.find((item) => item.watchlist_id === favorite[1]);
+    if (list) list.is_favorite = body?.is_favorite === true;
     return;
   }
   if (method === "POST" && path === "/screener/templates") {
@@ -163,10 +164,16 @@ function applyWrite(method: string, path: string, body: Record<string, unknown> 
     templates = templates.filter((t) => t.id !== deleteTemplate[1]);
     return;
   }
-  if (path === "/screener/favorites") {
-    const id = String(body?.template_id ?? "");
+  const unfavorite = /^\/screener\/favorites\/([^/]+)$/.exec(path);
+  if (method === "DELETE" && unfavorite) {
+    const template = templates.find((t) => t.id === unfavorite[1]);
+    if (template) template.favorite = "0";
+    return;
+  }
+  if (method === "POST" && path === "/screener/favorites") {
+    const id = String(body?.screenerid ?? "");
     const template = templates.find((t) => t.id === id);
-    if (template) template.favorite = method === "POST" ? "1" : "0";
+    if (template) template.favorite = "1";
   }
 }
 
@@ -272,11 +279,19 @@ test("the favourite flag is read back from the field the index actually carries"
   const result = await favoriteWatchlist({ watchlistId: "102", confirm: true });
   assert.equal(result.outcome, "ok");
   assert.equal(result.verified, true);
+  assert.deepEqual(sent.find((s) => s.method === "PUT")?.body, { is_favorite: true });
+  assert.equal(lists.find((l) => l.watchlist_id === "101")?.is_favorite, true, "other favorites stay unchanged");
+  const off = await favoriteWatchlist({ watchlistId: "102", favorite: false, confirm: true });
+  assert.equal(off.outcome, "ok");
+  assert.equal(off.detail?.favorite, false);
+  assert.equal(lists.find((l) => l.watchlist_id === "101")?.is_favorite, true);
 });
 
 test("a malformed id is refused before it reaches a path segment", async () => {
   await refuses(() => renameWatchlist({ watchlistId: "../../etc", name: "x", confirm: true }), /not a watchlist id/);
   await refuses(() => createWatchlist({ name: "   ", confirm: true }), /needs a name/);
+  await refuses(() => createWatchlist({ name: "x".repeat(26), confirm: true }), /limit is 25/);
+  await refuses(() => renameWatchlist({ watchlistId: "101", name: "x".repeat(26), confirm: true }), /limit is 25/);
 });
 
 /* ------------------------------------ outcomes ------------------------------------ */
@@ -325,6 +340,9 @@ test("the saved body carries save:\"1\" and the ad-hoc one still cannot", () => 
   const saved = buildSavedScreenBody("Cheap", RULES);
   assert.equal(saved.save, "1");
   assert.equal(saved.name, "Cheap");
+  assert.equal(saved.filters, buildScreenBody(RULES).filters);
+  assert.equal(saved.universe, buildScreenBody(RULES).universe);
+  assert.equal(saved.screenerid, "0");
   assert.equal(buildScreenBody(RULES).save, "0", "the read path's literal is untouched");
 });
 
@@ -371,6 +389,12 @@ test("the favourite flag is set and cleared, and each is read back", async () =>
   const off = await favoriteScreen({ templateId: "301", favorite: false, confirm: true });
   assert.equal(off.outcome, "ok");
   assert.equal(off.detail?.favorite, false);
+  const add = sent.find((s) => s.method === "POST" && s.url.includes("/screener/favorites"))!;
+  assert.deepEqual(add.body, { screenerid: "301", type: "TEMPLATE_TYPE_CUSTOM" });
+  const remove = sent.find((s) => s.method === "DELETE" && s.url.includes("/screener/favorites"))!;
+  assert.equal(new URL(remove.url).pathname, "/screener/favorites/301");
+  assert.equal(new URL(remove.url).searchParams.get("type"), "TEMPLATE_TYPE_CUSTOM");
+  assert.equal(remove.body, undefined);
 });
 
 test("every screener edit refuses without confirm", async () => {
@@ -451,7 +475,7 @@ test("the delete tool's description tells the model about the second flag", () =
   });
   assert.match(descriptions.get("watchlist_delete")!, /confirm_delete_members/);
   assert.match(descriptions.get("watchlist_delete")!, /HOW MANY/);
-  assert.match(descriptions.get("watchlist_favorite")!, /repoints/);
+  assert.match(descriptions.get("watchlist_favorite")!, /Multiple lists can be favorites/);
   for (const description of descriptions.values()) assert.match(description, /outcome/);
 });
 

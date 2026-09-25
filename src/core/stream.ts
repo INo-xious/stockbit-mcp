@@ -475,7 +475,7 @@ export interface PostDetail {
 export async function getPost(postId: string): Promise<PostDetail> {
   const id = String(postId).trim();
   return cached(requestKey("stream:post", {}, { postId: id }), CACHE.defaultTtlMs, async () => {
-    const body = await getJson("streamPost", { segments: { postId: id } });
+    const body = await postJson("streamPost", { segments: { postId: id } });
     const parsed = parseOr(Envelope, body, "stream post");
     const data = parsed.data;
 

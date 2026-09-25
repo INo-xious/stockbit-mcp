@@ -9,8 +9,8 @@ Security updates are currently provided for the following versions:
 | 1.x     | ✅        |
 | < 1.0   | ❌        |
 
-Users should run the latest available release and install dependencies using
-the committed lockfile.
+Use this checkout for the unreleased no-real-money build; older published versions may still
+contain live order tools. Install dependencies using the committed lockfile.
 
 ## Dependency Security
 
@@ -27,15 +27,13 @@ Project releases must resolve `@modelcontextprotocol/sdk` to version `1.26.0`
 or newer. `package.json` requires `^1.30.0` and the committed lockfile resolves
 `1.30.0`.
 
-The current server uses the stdio transport. It does not expose an HTTP or SSE
-listener by default.
+The server uses stdio by default. The optional Streamable HTTP transport binds only to loopback,
+requires a bearer secret, validates Host/Origin, and creates an isolated transport/server pair per
+request. It serves one local Stockbit account. It is not a multi-user service or a public OAuth
+deployment; see [client setup](docs/CLIENTS.md).
 
-`hono` appears in the lockfile as a transitive dependency of
-`@modelcontextprotocol/sdk`, which offers it to HTTP transports. Nothing under
-`src/` or `bin/` imports it, an HTTP framework, or an HTTP transport, so the
-CORS, language-middleware, `memo()` and Proxy Helper advisories against it are
-not reachable here. It is still kept current, and the lockfile resolves a
-version past all four.
+`hono` is a transitive SDK dependency. The optional HTTP entry point uses Node's HTTP server and
+the SDK's Streamable HTTP transport; it does not import Hono middleware.
 
 ## Fixed in
 
@@ -121,18 +119,13 @@ a vulnerability or why it is outside the project's scope.
 Most of it reads. Some of it writes, and the writes are what a security report
 should be aimed at:
 
-- **Order entry** (`order_buy`, `order_sell`, `order_amend`, `order_cancel`) and
-  **IPO subscription** (`eipo_order`) place real orders with real money. They
-  are **off by default**, require a preview ticket, and default to per-order
-  confirmation. Where the MCP client supports elicitation the user is asked
-  directly, **before** the caller's `confirm` is looked at, and their answer is
-  decisive — a declined dialog refuses the order whatever `confirm` said. Where
-  the client cannot ask, `confirm: true` is the only gate and both the result
-  and the audit line say no human was asked. The operator may deliberately
-  enable live autoconfirm only together with a maximum order value; a model
-  cannot enable it, widen that cap, or turn the ask off. Writes cannot be
-  reached from a saved workflow recipe. See `docs/adr/0004-order-entry.md` and
-  `docs/adr/0010-elicitation-is-decisive.md`.
+- **Real-money execution is removed**, including all real brokerage order mutations and e-IPO
+  subscriptions. Legacy live settings fail closed; profiles and environment variables cannot restore
+  those routes. Brokerage portfolio, balances and order history remain read-only.
+- **Local paper tools** mutate a separate simulated ledger and require preview tickets and
+  confirmation. **Stockbit virtual tools** use only fixed `/virtualtrading/` routes on the market-data
+  host, require per-action confirmation, and read back results without resending uncertain writes.
+  Neither simulation represents a real holding or exchange fill.
 - **Chart drawing** drives the browser the user logged in with, over the Chrome
   DevTools Protocol. It enables only the `Page` and `Runtime` CDP domains — never
   `Network` or `Fetch`, which can read response bodies. See
@@ -140,26 +133,14 @@ should be aimed at:
 - **Watchlist and screener edits** change what later answers are about. See
   `docs/adr/0006-account-writes.md`.
 
-Anything that lets one of those happen without the user's explicit per-action
-agreement or the exact capped-autoconfirm policy they enabled is a vulnerability
-in this project, whatever else it looks like. In particular:
+Any path to real-money execution, or to a simulation/account mutation that bypasses its documented
+confirmation, is in scope for security reports. In particular:
 
-- A path that turns trading on without the account owner running
-  `stockbit-auth trading-enable` themselves. `STOCKBIT_TRADING` can only move
-  a session **down** the ladder — `off` disables trading, `paper` demotes a
-  configured `live` to paper — and there is deliberately no value that raises
-  it. No module under `src/tools/`, `src/trading/` or `src/eipo/` may write the
-  settings file.
-- A path that satisfies a confirmation the user did not give, bypasses or widens
-  capped autoconfirm, or redeems an order ticket twice. **A caller-supplied
-  boolean is not a confirmation the user gave**: where a person can be reached,
-  anything that reaches an order route without asking them, or that proceeds
-  after they declined, is in scope — that is the class of defect ADR-0010
-  closed, and it is the first place to aim a report at.
-- A path that grants, widens or outlives a "don't ask again" without the person
-  ticking the box themselves: one that survives a restart, that covers an order
-  worth more than the one they approved, that outlives the policy it was granted
-  under or `stockbit-auth trading-forget`, or that a model can create.
+- A route outside the closed HTTP allowlist, a virtual route reaching a live brokerage host, or
+  stale settings reviving real-order execution.
+- A saved workflow reaching a write tool, a paper ticket redeemed twice, or an uncertain virtual
+  write automatically retried.
+- A tool writing its own settings or widening permissions.
 - A trading PIN reaching disk, a log, a tool result, or a model. The PIN is
   typed at a terminal, used for one request, and never stored; no MCP tool
   accepts one.

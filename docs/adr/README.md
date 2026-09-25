@@ -21,6 +21,10 @@ unassigned rather than back-filled.
 | [0010](0010-elicitation-is-decisive.md) | Elicitation is decisive: the human is asked first, and `confirm` cannot skip the ask | ACCEPTED and implemented 2026-08-28 — amends 0004, no new routes |
 | [0011](0011-automatic-login-recovery.md) | Automatic login recovery: one gated, unattended attempt to re-harvest a dead session | ACCEPTED and implemented 2026-09-01 — **never run against a live Stockbit session**; the gates are verified offline, the harvest end to end is Projected. Off by default, no new routes; first env var that RAISES a permission |
 
+| [0012](0012-no-real-money-execution.md) | Permanently remove real-money execution; retain securities reads and explicitly named local paper simulation | ACCEPTED 2026-09-24 — supersedes live order entry in 0004 and live mode in 0008 |
+| [0013](0013-stockbit-virtual-account.md) | Stockbit website virtual account and simulated orders | ACCEPTED 2026-09-24 — simulation endpoints only |
+| [0014](0014-stream-post-detail-read.md) | Read stream post detail using the website's POST endpoint | ACCEPTED 2026-09-24 — empty-body read only |
+
 ## Writing a new one
 
 Any change that adds a **non-GET route** to `src/http/routes/` needs an ADR before the code lands —

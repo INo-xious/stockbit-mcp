@@ -62,7 +62,7 @@ export function registerAccountWriteTools(define: Definer): void {
       "finding one with this name — the create response is not trusted for that.\n" +
       OUTCOME_NOTE,
     {
-      name: z.string().describe("The new list's name"),
+      name: z.string().max(25).describe("The new list's name, at most 25 characters"),
       description: z.string().optional().describe("Optional description"),
       confirm: CONFIRM,
     },
@@ -85,7 +85,7 @@ export function registerAccountWriteTools(define: Definer): void {
       OUTCOME_NOTE,
     {
       watchlist_id: z.string().describe("The list's id, from the `watchlists` tool"),
-      name: z.string().describe("The new name"),
+      name: z.string().max(25).describe("The new name, at most 25 characters"),
       confirm: CONFIRM,
     },
     async (a) =>
@@ -179,19 +179,19 @@ export function registerAccountWriteTools(define: Definer): void {
 
   define.write(
     "watchlist_favorite",
-    "Make a watchlist the favourite — the one Stockbit opens on, and the one THIS SERVER uses when " +
-      "a tool is asked for 'the user's watchlist' without an id.\n" +
-      "That second consequence is why it is confirmed rather than treated as a preference: it " +
-      "silently repoints every later scan at a different set of symbols. Say so when you ask.\n" +
+    "Set a watchlist's favorite flag. favorite defaults to true; pass false to remove the flag. " +
+      "Multiple lists can be favorites. Stockbit's built-in All Watchlist cannot be changed. " +
+      "Requires confirm:true and verifies the selected list's flag by reading it back.\n" +
       OUTCOME_NOTE,
-    { watchlist_id: z.string().describe("The list's id, from the `watchlists` tool"), confirm: CONFIRM },
+    { watchlist_id: z.string().describe("The list's id, from the watchlist tool"), favorite: z.boolean().optional(), confirm: CONFIRM },
     async (a) =>
       runTool(async () => {
         const result = await favoriteWatchlist({
           watchlistId: String(a.watchlist_id),
+          favorite: a.favorite as boolean | undefined,
           confirm: a.confirm === true,
         });
-        return describe(result, `Watchlist ${a.watchlist_id} is now the favourite`);
+        return describe(result, `Watchlist ${a.watchlist_id} favorite is ${a.favorite ?? true}`);
       }),
     { destructiveHint: false, idempotentHint: true },
   );

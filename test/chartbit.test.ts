@@ -27,6 +27,7 @@ import type { AddressInfo } from "node:net";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { runInNewContext } from "node:vm";
 import { CDP } from "../src/auth/cdp.ts";
 import { launchDebuggableBrowser } from "../src/auth/launch.ts";
 import { findBrowser } from "../src/auth/browsers.ts";
@@ -56,7 +57,7 @@ import {
   encodeLayoutContent,
   normalizeDrawingSymbol,
 } from "../src/chartbit/codec.ts";
-import { addOurDrawings, forgetOurDrawings, loadOurDrawings, setOurDrawings } from "../src/chartbit/store.ts";
+import { addOurDrawings, forgetOurDrawings, loadOurDrawings, selectOurDrawings, setOurDrawings } from "../src/chartbit/store.ts";
 import {
   DRIVER_LOCK_WAIT_MS,
   driverLockState,
@@ -761,6 +762,36 @@ test("substitution is anchored on word boundaries", () => {
   assert.ok(out.includes("SHAPE_IDS_EXTRA"), "a longer identifier must be left alone");
 });
 
+test("shape labels keep dollar replacement sequences literal in the page script", async () => {
+  const label = "Target $& $$ $' $`";
+  let receivedLabel: string | undefined;
+  const result = await runInNewContext(
+    substitute(CREATE_SHAPE, {
+      SHAPE_REQUEST: {
+        points: [{ time: 1_767_225_600, price: 3600 }],
+        options: { shape: "horizontal_line", text: label },
+      },
+    }),
+    {
+      window: {
+        tvWidget: {
+          main: {
+            activeChart: () => ({
+              createShape: (_point: unknown, options: { text: string }) => {
+                receivedLabel = options.text;
+                return "shape-dollar-label";
+              },
+            }),
+          },
+        },
+      },
+    },
+  );
+  assert.equal(result.ready, true);
+  assert.equal(result.id, "shape-dollar-label");
+  assert.equal(receivedLabel, label);
+});
+
 test("an undefined substitution becomes null, not the literal `undefined`", () => {
   // `undefined` is not valid JSON and would be a bare identifier in the page — a ReferenceError at
   // best and a shadowed variable at worst.
@@ -1268,4 +1299,16 @@ test("that guard is not vacuous (negative control)", () => {
   assert.ok(/\.notes\s*\.\s*(push|pop|splice|shift|unshift)\s*\(/.test(stripComments(bad)));
   const good = 'session.addNote("x");';
   assert.equal(/\.notes\s*\.\s*(push|pop|splice|shift|unshift)\s*\(/.test(stripComments(good)), false);
+});
+
+
+test("selected cleanup preserves older drawings and refuses unowned entities", () => {
+  setOurDrawings("ADRO", [
+    { tvEntityId: "older", kind: "level", shape: "horizontal_line", at: "now" },
+    { tvEntityId: "test-only", kind: "level", shape: "horizontal_line", at: "now" },
+  ]);
+  assert.deepEqual(selectOurDrawings("ADRO", ["test-only"]).map(d => d.tvEntityId), ["test-only"]);
+  assert.throws(() => selectOurDrawings("ADRO", ["hand-drawn"]), /must belong/);
+  assert.throws(() => selectOurDrawings("ADRO", []), /at least one/);
+  assert.equal(loadOurDrawings("ADRO").length, 2);
 });

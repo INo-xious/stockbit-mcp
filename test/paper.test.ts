@@ -46,7 +46,7 @@ function ledgerWith(cash: number): PaperLedger {
   return emptyLedger(cash, NOW);
 }
 
-function setMode(mode: "off" | "paper" | "live"): void {
+function setMode(mode: "off" | "paper"): void {
   const settings = defaultSettings();
   settings.trading.mode = mode;
   mkdirSync(STORE, { recursive: true });
@@ -308,16 +308,4 @@ test("a missing ledger is a new account; a corrupt one is an error, not a silent
   writeFileSync(paperLedgerPath(), "{ not json", "utf8");
   assert.throws(() => loadLedger(), /could not be read/);
   assert.throws(() => loadLedger(), /paper-reset/, "and it says how to start over deliberately");
-});
-
-/* --------------------------------------- e-IPO --------------------------------------- */
-
-test("e-IPO refuses in paper mode rather than simulating an allotment", async () => {
-  // An exchange fill is a function of price and a queue — approximable. An allotment is a function
-  // of national demand, which is not. A simulated one would be a number this project invented.
-  const { previewEipoOrder } = await import("../src/eipo/order.ts");
-  await assert.rejects(
-    () => previewEipoOrder({ emitenCode: "TEST", lots: 1, price: 1000 }),
-    /no paper e-IPO/i,
-  );
 });

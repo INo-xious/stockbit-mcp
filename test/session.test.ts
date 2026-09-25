@@ -108,10 +108,10 @@ test("a securities route presents the securities token, not the market-data one"
   assert.notEqual(main, securities, "two domains must not share an access token");
   assert.equal(securities, "SEC-ACCESS");
 
-  // The refresh for carina goes in the BODY with no bearer — the one thing that differs from exodus.
+  // Carina's refresh client sends the REFRESH token in both the body and bearer.
   const carinaRefresh = calls.find((c) => c.url.includes("carina.stockbit.com/auth/refresh"))!;
   assert.deepEqual(carinaRefresh.body, { refresh_token: "SEC-R" });
-  assert.equal(carinaRefresh.authorization, null);
+  assert.equal(carinaRefresh.authorization, "Bearer SEC-R");
 
   // And a carina call afterwards carries the securities access token.
   await logoutSecurities();
@@ -294,13 +294,13 @@ test("a Cloudflare challenge is reported as a challenge, not as a wrong PIN", as
     ["login/refresh", () => tokenResponse(jwt(3600), "MAIN-R")],
     ["carina.stockbit.com/auth/refresh", () => tokenResponse("SEC-A", "SEC-R")],
     [
-      "carina.stockbit.com/auth/pin/validate",
+      "carina.stockbit.com/portfolio/v2/list",
       () => new Response("", { status: 403, headers: { "cf-mitigated": "challenge" } }),
     ],
   ]);
 
   await assert.rejects(
-    () => getJson("carinaAuthPinValidate"),
+    () => getJson("portfolioList"),
     (err: unknown) => {
       assert.ok(err instanceof StockbitError);
       assert.equal(err.kind, "challenge", "a challenge is not an auth failure");

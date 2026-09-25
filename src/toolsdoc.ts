@@ -41,8 +41,9 @@ const FAMILY_COVERS: Record<Family, string> = {
   alerts: "Rules that fire while no client is open",
   pine: "TradingView Pine Script generation",
   workflows: "Saved multi-step recipes, also offered as prompts",
-  trading: "The brokerage account and order entry",
-  eipo: "The IPO pipeline and subscribing to one",
+  trading: "Read-only brokerage account and local paper simulation",
+  eipo: "Read-only IPO pipeline and existing subscriptions",
+  virtual: "Stockbit website virtual portfolio and simulated orders",
 };
 
 const EVIDENCE_LABEL: Record<Evidence, string> = {

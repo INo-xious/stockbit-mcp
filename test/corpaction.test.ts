@@ -19,6 +19,7 @@ process.env.STOCKBIT_STORE_DIR = mkdtempSync(join(tmpdir(), "stockbit-corpaction
 
 import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { StockbitError } from "../src/http/errors.ts";
 import { getStore } from "../src/auth/store.ts";
 import { resetSession } from "../src/auth/session.ts";
 import { clearCache } from "../src/core/_util.ts";
@@ -996,4 +997,17 @@ test("the underwriter cache key holds the code and the ordering", async () => {
   await getUnderwriterPerformance("CC");
   await getUnderwriterPerformance("YP", "GET_UNDERWRITER_IPO_PERFORMANCE_SORT_BY_ARA_STREAK");
   assert.equal(seen.length, 3);
+});
+
+test("an unavailable underwriter directory points to the working code-specific lookup", async () => {
+  reply = (pathname, params) => pathname === "/order-trade/underwriters" ? undefined : defaultReply(pathname, params);
+  await assert.rejects(() => getUnderwriters(), (error: unknown) => {
+    assert.ok(error instanceof StockbitError);
+    assert.equal(error.status, 404);
+    assert.match(error.message, /underwriter_code/);
+    assert.doesNotMatch(error.message, /run.*login/);
+    return true;
+  });
+  const performance = await getUnderwriterPerformance("YP");
+  assert.deepEqual(performance.rows, PERFORMANCE.data);
 });

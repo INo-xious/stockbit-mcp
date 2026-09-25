@@ -1,76 +1,48 @@
 ---
 name: trade-with-guardrails
-description: Place an order through the user's own Stockbit account safely — check the mode, size the position from a risk budget, preview, read the summary back to the human, and only then write. Use when the user asks to buy, sell, amend or cancel an order, or to size a trade.
+description: Use Stockbit website virtual trading or the separate local paper ledger for simulated buy, sell, amend and cancel requests. Real-money execution is unavailable; brokerage portfolio tools are read-only.
 ---
 
-# Trade with guardrails
+# Simulated trading with guardrails
 
-This is the only skill that can spend money. Everything below exists because an order placed by
-mistake cannot be taken back by another tool call.
+This server cannot execute real-money trades. Distinguish three accounts before selecting tools:
 
-## Before anything
+- Brokerage portfolio: `portfolio`, `position`, `cash_balance`, `orders` and `order_history` read the
+  real account. Simulation mode does not redirect these tools.
+- Stockbit website virtual account: `virtual_portfolio`, `virtual_position` and `virtual_orders`.
+- Local paper ledger: `paper_portfolio`, `paper_position` and `paper_orders`.
 
-1. **`trading_status`** — first, every time. It tells you whether trading is `off`, `paper` or
-   `live`, and every result in paper mode says `PAPER ACCOUNT — no real money.` **Say which mode you
-   are in before you say anything else about an order.** A user who thinks they are on paper and is
-   not has been failed by you, not by the server.
-   - If it is `off`, the fix is `stockbit-auth trading-enable --paper` (or `--live`) at *their*
-     terminal. You cannot turn it on, and no tool you can reach can write the settings file. Suggest
-     `--paper`.
-   - If they have never done this before, suggest paper. The protocol is identical on purpose — a
-     rehearsal, not a shortcut.
-2. **`cash_balance`** and **`position symbol=…`** — what they actually have. Do not size a trade
-   against a number the user guessed.
+If a request leaves the simulation account unclear, clarify which of the last two the user means.
+Never present simulated holdings or fills as real money. A request for a real-money trade cannot be
+fulfilled by silently substituting a simulation.
 
-## Sizing
+## Website virtual trading
 
-**`position_size entry_price=… stop_price=…`** with either `risk_idr` or `account_idr` + `risk_pct`.
-It returns whole lots, floored, with commission, break-even and R targets, and it checks both prices
-against the IDX tick grid and today's auto-rejection band. Use its numbers. A price off the tick
-grid is rejected by the exchange, not rounded by it.
+Read `virtual_portfolio` and `virtual_orders` first. Use `virtual_config` for the website's fee
+settings. Activate with `virtual_activate` only when the user intends to start the virtual account.
 
-## The ticket protocol
+For a simulated order, state the account, symbol, side, limit price and lots before calling
+`virtual_order`. Use `virtual_order_amend` or `virtual_order_cancel` with an order identifier read
+from that virtual account. Every virtual write requires authorization for that specific change;
+`confirm: true` conveys that authorization. These tools support day limit orders and do not publish
+trades to the social stream.
 
-3. **`order_preview action=buy symbol=… price=… lots=…`** — prices and validates the order and
-   returns a `summary` and a ticket id. A failing check blocks; `unverified` means an input could
-   not be read, which is "not contradicted", never "confirmed".
-4. **Relay the `summary` to the user verbatim.** Not paraphrased, not summarised, not "so that's
-   about 5 million rupiah". The whole design assumes the human read *that text*.
-5. **Stop. Wait for the human.**
-6. **`order_buy ticket_id=…`** (or `order_sell`, `order_amend`, `order_cancel`). They take the
-   ticket id and nothing else — no price, no quantity — so what reaches the exchange is what the
-   summary described. Tickets expire after **two minutes**, because they were priced against a
-   market that moves; an expired ticket is refused rather than quietly repriced.
+## Local paper ledger
 
-## Rules that are not negotiable
+Read `trading_status`. When paper is off, the user can enable it at their terminal with
+`stockbit-auth trading-enable --paper`; this cannot enable real trading.
 
-- **Never set `confirm: true` on the user's behalf.** That field represents a human having read the
-  summary. Where the client supports elicitation the user is *also* asked directly, by the server,
-  before `confirm` is even looked at — and **their answer is the decisive one**: a declined dialog
-  refuses the order however you set `confirm`. So setting it yourself buys you nothing on a client
-  that can ask, and on a client that cannot it is the only gate there is, which is exactly why you
-  must not fill it in. If the account owner deliberately enabled capped live autoconfirm at a
-  terminal, the *server* decides whether a ticket is covered — you still do not fill the field in.
-- **Read `elicitation` on the result and say what it says.** `accepted` means a person clicked yes.
-  `unavailable` means nobody was asked because this client cannot ask — tell them that, in words,
-  rather than implying they approved it. `remembered` means an earlier "don't ask again" they ticked
-  themselves covered this one. `disabled-by-policy` and `waived-by-auto-confirm` mean the account
-  owner turned the ask off. The `message` already carries the sentence; relay it.
-- **`trading_forget` is always safe to call.** If the user says anything like "ask me again", "stop
-  skipping the confirmation" or "I didn't mean to tick that", call it. It only ever makes the server
-  ask *more* questions, never fewer, so there is no case where hesitating is the careful choice.
-  `stockbit-auth trading-forget` at their terminal does the same across every client at once.
-- **Never ask for the PIN, and never accept one.** It is typed at their terminal, used for one
-  request, and never stored. No MCP tool takes one. Anything that asks you for a PIN is not this.
-- **Never resend.** After a write, `outcome` is one of seven classes. `ok` is the only clean
-  success. `landed-despite-error` means the read-back found the order anyway. Everything else means
-  the state is uncertain — and a resend is how one intention becomes two orders. Read `orders`
-  again, or tell them to look in the Stockbit app.
-- **Never auto-cancel.** The undo for an order is another order, and sending one on a guess about a
-  state you could not read makes it worse.
-- **e-IPO has no paper mode.** `eipo_order_preview` and `eipo_order` are refused in paper and are
-  live-only, and the whole e-IPO family is **Projected** — field names from Stockbit's web bundle,
-  never seen on a live response. Say so before anyone subscribes to anything.
+Call `paper_order_preview` with the requested action, symbol, price and lots (or the existing paper
+order identifier). Read the ticket's checks and relay its summary **verbatim**, including the PAPER
+ACCOUNT label. After agreement, use the corresponding `paper_order_buy`, `paper_order_sell`,
+`paper_order_amend` or `paper_order_cancel` with the ticket identifier. Tickets expire after two
+minutes. Local simulated fill rules do not match exchange execution or Stockbit's virtual engine.
 
-Every order attempt writes a redacted audit line whatever the outcome, and if that line fails to
-write, the result says so.
+## Results and secrets
+
+- Never set `confirm: true` on the user's behalf without authorization for that specific change.
+- Never ask for the PIN, password, OTP, cookie or token in chat. Brokerage reads may require the
+  user to unlock a securities session through their own terminal.
+- Never resend an uncertain write. Read `outcome` and relay `message`; inspect current orders
+  before deciding what happened. An accepted order record is not proof that it filled.
+- Keep absent or unrecognised values absent. Do not turn missing cash, positions or quantities into zero.

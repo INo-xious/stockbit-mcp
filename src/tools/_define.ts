@@ -78,6 +78,7 @@ export const FAMILIES = [
   "workflows",
   "trading",
   "eipo",
+  "virtual",
 ] as const;
 export type Family = (typeof FAMILIES)[number];
 

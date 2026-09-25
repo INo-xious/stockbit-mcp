@@ -1,23 +1,11 @@
 /**
- * Ad-hoc screener runs, and the two watchlist reads that scope and feed one.
+ * Ad-hoc screener runs and watchlist reads.
  *
- * Deliberately separate from `src/core/screener.ts`. That module holds the screener calls that were
- * observed live on 2026-08-09; everything here is either a request shape nobody has captured yet or a
- * route nobody has probed. Keeping them in different files means a reader can tell which half is
- * measured without reading either.
- *
- * ## The one invariant this file exists to hold
- *
- * Running a screen and saving one are the SAME endpoint. Stockbit's own client separates them with a
- * single body field: `save` of "0" evaluates the rules and persists nothing, `save` of "1" creates a
- * saved screen on the account — its reducer only adopts a new screener id in the second case (see the
- * screener section of `docs/research/2026-08-05-capability-research.md`). So the difference between a read and an account
- * write here is one character, and it must not be reachable from tool input.
- *
- * `buildScreenBody` hard-codes "0" and accepts no parameter that could change it. There is no
- * argument to any function in this module — and therefore none to any tool built on it — that turns
- * this into a write. The saving variant is a separate confirm-gated tool in a later increment and it
- * does not live in this file.
+ * Run and save use the same POST route. The public Stockbit screener frontend sets save:"0" and
+ * screenerid:"0" for an unsaved run, with JSON strings for filters and universe. The request shape
+ * and paged response were verified with the catalogue's Market Cap metric on 2026-09-24.
+ * buildScreenBody hard-codes the read flag. Saving uses a separate confirmation-gated function
+ * and route in src/account/screener.ts; no input to this module can enable saving.
  */
 import { z } from "zod";
 import { getJson, postJson, type GetOptions } from "../http/client.js";
@@ -68,12 +56,19 @@ export interface ScreenScope {
 /** The wire spelling for "screen only the members of this watchlist". */
 const WATCHLIST_SCOPE = "wl";
 
-/** The body as it goes out. `save` is typed as the literal "0" so a widening assignment fails to compile. */
+/** The frontend wire body. The unsaved flag is a literal, never caller-controlled. */
 export interface ScreenBody {
   save: "0";
-  rules: Array<{ metric: string; operator: ScreenOperator; value: string }>;
-  scope?: string;
-  scopeID?: string;
+  screenerid: "0";
+  name: string;
+  description: string;
+  ordertype: "asc";
+  ordercol: number;
+  page: number;
+  universe: string;
+  filters: string;
+  sequence: string;
+  type: "TEMPLATE_TYPE_CUSTOM";
 }
 
 function invalid(message: string): never {
@@ -97,24 +92,9 @@ export function watchlistScope(watchlistId: string): ScreenScope {
 }
 
 /**
- * Build the body for an ad-hoc run. Pure, exported, and the only place this shape exists.
- *
- * ## What is sourced and what is a hypothesis
- *
- * Sourced from the web bundle: `save` of "0" meaning run-and-persist-nothing, the operator list, the
- * implicit AND, and the watchlist scope pair. Everything else — the key that holds the rule list, the
- * spelling of the three rule fields, whether the scope pair sits at the top level or nested, and
- * whether values travel as strings or numbers — has NOT been observed. A HAR of the web UI running an
- * unsaved screen is what settles them, and when it is captured this function is the single edit:
- * nothing else in the codebase writes this shape, and `runScreen` returns the body it sent so a
- * mismatch is readable straight off a tool result rather than needing a proxy.
- *
- * Values are stringified because the one field known for certain, `save`, is a string on an API whose
- * ids arrive as strings too. That is an inference, not a measurement, and it is listed above.
- *
- * The validation below is not decoration. These rules are assembled from model-supplied arguments,
- * and a rule with an empty metric or an empty value is one the server would answer normally — with a
- * result set that quietly means something other than what was asked.
+ * Validate model-supplied rules, then serialize Stockbit's basic numeric comparisons.
+ * The frontend embeds these two structures as JSON strings inside the outer JSON request.
+ * Source: /_next/static/chunks/pages/screener-f6f3c6b38de0136b.js, module 18544.
  */
 export function buildScreenBody(rules: readonly ScreenRule[], scope?: ScreenScope): ScreenBody {
   if (rules.length === 0) {
@@ -142,14 +122,23 @@ export function buildScreenBody(rules: readonly ScreenRule[], scope?: ScreenScop
     } else {
       invalid(`${where}: value must be a number or a string`);
     }
-    return { metric, operator: rule.operator, value };
+    return { type: "basic", item1: metric, item1name: "", operator: rule.operator, item2: value, multiplier: "" };
   });
 
+  const universe = scope ? { ...watchlistScope(scope.scopeID), name: "" } : { scope: "IHSG", scopeID: "", name: "" };
+  if (scope && scope.scope !== WATCHLIST_SCOPE) invalid("Only watchlist scope is supported");
   return {
-    // Hard-coded, with no parameter above that can reach it. See the module note.
     save: "0",
-    rules: built,
-    ...(scope ? { scope: scope.scope, scopeID: scope.scopeID } : {}),
+    screenerid: "0",
+    name: "TEMPLATE_BUILD_MCP",
+    description: "",
+    ordertype: "asc",
+    ordercol: 2,
+    page: 1,
+    universe: JSON.stringify(universe),
+    filters: JSON.stringify(built),
+    sequence: [...new Set(built.map((rule) => rule.item1))].join(","),
+    type: "TEMPLATE_TYPE_CUSTOM",
   };
 }
 
@@ -163,7 +152,7 @@ export function buildScreenBody(rules: readonly ScreenRule[], scope?: ScreenScop
  * guessing a field name is not — a miss is reported as a miss, with the payload attached, instead of
  * being flattened into an empty list that reads like "nothing matched".
  */
-const ROW_KEYS = ["calcs", "result", "results", "list", "items", "symbols"] as const;
+const ROW_KEYS = ["calcs", "result", "results", "list", "items", "symbols", "companies"] as const;
 
 /** Where a row array was found, and the rows. `rows: null` means "not found", never "none". */
 export function findRows(data: unknown): { rows: unknown[] | null; foundAt: string | null } {
@@ -246,10 +235,15 @@ export interface ScreenRunResult {
    * still a hypothesis.
    */
   matches: ScreenMatch[] | null;
-  /** How many rows matched in total, BEFORE `limit` truncated the list. `null` alongside `matches`. */
+  /** Projected matches in this page before the local `limit`. `null` alongside `matches`. */
   count: number | null;
-  /** True when `matches` holds fewer rows than `count`. */
+  /** True when the local limit omitted matches from this page. */
   truncated: boolean;
+  /** Upstream pagination metadata. Missing totals stay null, never zero. */
+  page: number;
+  pageSize: number | null;
+  totalMatches: number | null;
+  hasMore: boolean | null;
   foundAt: string | null;
   /** Rows that were present but carried no ticker in either place one is looked for. */
   unprojected: number;
@@ -278,36 +272,47 @@ function projectMatch(row: unknown): ScreenMatch | null {
 
 function checkLimit(limit: number | undefined): number | undefined {
   if (limit === undefined) return undefined;
-  if (!Number.isFinite(limit) || Math.floor(limit) < 1) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
     invalid(`Invalid limit ${JSON.stringify(limit)}: expected a whole number of 1 or more`);
   }
-  return Math.floor(limit);
+  return limit;
 }
 
 /**
- * Run an ad-hoc screen. Creates nothing — see the module note on `save`.
- *
- * `limit` truncates the returned matches HERE, after the response, and never appears on the wire. The
- * saved-screen GET takes `page`/`limit` query parameters but nothing has confirmed this POST honours
- * them, and a paging parameter the server ignores is the worst kind: the caller believes the answer
- * was narrowed on purpose. `count` therefore stays the true total and `truncated` says the list was
- * cut. It also means the cache is keyed on the request alone: two limits over the same rules are one
- * upstream call, correctly, because they ARE one request.
+ * Run one upstream page without saving. `limit` trims only that page locally; `totalMatches`
+ * and `hasMore` report upstream pagination separately. Page is part of the request/cache key.
  */
 export async function runScreen(
   rules: readonly ScreenRule[],
-  options: { scope?: ScreenScope; limit?: number } = {},
+  options: { scope?: ScreenScope; limit?: number; page?: number } = {},
 ): Promise<ScreenRunResult> {
   const limit = checkLimit(options.limit);
-  const body = buildScreenBody(rules, options.scope);
+  const page = options.page ?? 1;
+  if (!Number.isSafeInteger(page) || page < 1) invalid("page must be a positive whole number");
+  const body = { ...buildScreenBody(rules, options.scope), page };
   // Every field that changes the answer is in the body, so the serialized body IS the cache key.
   const full = await cached(`screen:run:${JSON.stringify(body)}`, CACHE.defaultTtlMs, async () => {
     const payload = await postJson("screenerRun", { body });
     const parsed = parseOr(Envelope, payload, "screener run");
     const { rows, foundAt } = findRows(parsed.data);
+    const data = parsed.data && typeof parsed.data === "object" ? parsed.data as Record<string, unknown> : {};
+    const integer = (value: unknown): number | null => {
+      if (typeof value !== "number" && (typeof value !== "string" || !/^\d+$/.test(value))) return null;
+      const n = Number(value);
+      return Number.isSafeInteger(n) && n >= 0 ? n : null;
+    };
+    const totalMatches = integer(data.totalrows);
+    const pageSize = integer(data.perpage);
+    const current = integer(data.curpage);
+    const actualPage = current && current > 0 ? current : page;
+    const pagination = {
+      page: actualPage, pageSize, totalMatches,
+      hasMore: totalMatches !== null && pageSize !== null && pageSize > 0 ? actualPage * pageSize < totalMatches : null,
+    };
     if (rows === null) {
       return {
         request: body,
+        ...pagination,
         matches: null,
         count: null,
         truncated: false,
@@ -329,6 +334,7 @@ export async function runScreen(
     }
     return {
       request: body,
+      ...pagination,
       matches,
       count: matches.length,
       truncated: false,
@@ -451,25 +457,38 @@ export async function getWatchlistSymbolList(watchlistId: string): Promise<Watch
 
 export interface CompanySearchResult extends RowList {
   keyword: string;
+  watchlistId: string;
+  page: number;
+  hasMore: boolean | null;
 }
 
 /**
  * Search Stockbit's company directory by keyword — the lookup behind the watchlist's add-a-stock box.
  *
- * The rows are returned unprojected: which key holds the ticker on this route has not been observed,
- * and naming one now would ship a key that is always undefined.
+ * The endpoint requires a watchlist id and one-based page in addition to the keyword. Membership
+ * flags in its suggestions are relative to that watchlist, so it is part of the cache identity.
+ * Response rows and has_more_companies were observed on 2026-09-24; rows remain unprojected.
  */
-export async function searchCompanies(keyword: string): Promise<CompanySearchResult> {
+export async function searchCompanies(keyword: string, watchlistId: string, page = 1): Promise<CompanySearchResult> {
   const trimmed = typeof keyword === "string" ? keyword.trim() : "";
   // An empty keyword is refused rather than sent: the endpoint would answer it with either everything
   // or nothing, and both read like a real answer to a search nobody actually performed.
   if (!trimmed) invalid("Search keyword must not be empty");
+  const id = watchlistScope(watchlistId).scopeID;
+  if (!Number.isSafeInteger(page) || page < 1) invalid("Search page must be a positive integer (first page is 1)");
   // The key uses the exact string that goes on the wire. A key normalized differently from the
   // request is how two different searches come to share one cached answer.
-  return cached(`watchlist:search:${trimmed}`, CACHE.keystatsTtlMs, async () => {
-    const list = await readRowList("watchlistSearchCompany", "company search", {
-      params: { keyword: trimmed },
+  return cached(`watchlist:search:${JSON.stringify([id, page, trimmed])}`, CACHE.keystatsTtlMs, async () => {
+    const body = await getJson("watchlistSearchCompany", {
+      params: { keyword: trimmed, watchlist_id: id, page },
     });
-    return { keyword: trimmed, ...list };
+    const { data } = parseOr(Envelope, body, "company search");
+    const { rows, foundAt } = findRows(data);
+    const more = data && typeof data === "object" ? (data as Record<string, unknown>).has_more_companies : undefined;
+    return {
+      keyword: trimmed, watchlistId: id, page, hasMore: typeof more === "boolean" ? more : null,
+      rows, foundAt, count: rows === null ? null : rows.length,
+      ...(rows === null ? { raw: body } : {}),
+    };
   });
 }

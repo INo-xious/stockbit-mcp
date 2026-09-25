@@ -13,7 +13,7 @@ export type Host = "exodus" | "carina" | "sekuritas";
  *
  * The three `refresh*` kinds exist because a refresh route does not carry the session token; it
  * carries the token that *mints* one, and the three domains do not agree on where to put it.
- * Stockbit's main refresh takes it as a bearer, carina's takes it in the body, and the e-IPO
+ * Stockbit's main refresh takes it as a bearer, carina's takes it in the body AND bearer, and the e-IPO
  * partner refresh takes it as a query parameter. Naming the kind rather than the placement means a
  * call site says what it needs and `transport.ts` decides how to present it, in one place.
  *

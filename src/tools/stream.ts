@@ -169,12 +169,12 @@ export function registerStreamTools(define: Definer): void {
       "replies, attachments and engagement counts are not mapped by name.\n" +
       "`post: null` with `source: null` means the response held nothing this code could read as a " +
       "post; `raw` shows what came back. A deleted or private post is answered upstream as an error, " +
-      "not as an empty success.\n" +
-      PENDING_NOTE,
+      "not as an empty success. The website reads this endpoint using a POST with no message body.",
     {
       post_id: z.string().describe("Numeric stream post id, from a row's `id`."),
     },
     async (a) => runTool(() => stream.getPost(a.post_id as string)),
+    { evidence: "observed" },
   );
 
   define.read(

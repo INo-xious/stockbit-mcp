@@ -1,83 +1,167 @@
-# Verification status
+# Verification status — 2026-09-25
 
-What is known about this server's field mappings, how it became known, and how to settle what is
-still a guess. Every tool carries one of three words; they are defined once in
-[`CONTEXT.md`](../CONTEXT.md) and repeated here because this is the page people arrive at.
+This records checks of the unreleased build on `codex/stockbit-safe-tools`, based on upstream
+`194d429`. Use this checkout or its locally built extension; the published 1.3.1 package does not
+contain these changes. This is a technical test record, not regulatory approval or a guarantee of
+complete Stockbit website coverage.
 
-## The evidence ladder
+## What the evidence means
 
-| Word | Meaning |
-|---|---|
-| **Observed** | A real response from a live account was seen and the code was written against it. |
-| **Read-back** | A write whose effect is verified by re-reading the account afterwards. The request body shape may still be a guess — but a wrong guess shows up as `not-visible`, never as a false success. |
-| **Projected** | Field names taken from Stockbit's web bundle, never seen on a live response. `readFrom` names the wire key each value came from, and an absent field means "not recognised", not zero. |
+A successful MCP call establishes that the tested arguments worked for this account at this time.
+It does not establish every optional filter, every account entitlement, or the meaning of an empty
+response. Tool metadata distinguishes **observed** mappings, writes verified by **read-back**, and
+**projected** mappings. Some previously observed tools still contain unverified optional fields;
+their descriptions state that limitation. The generated [tool reference](TOOLS.md) is the current
+inventory; historical research in `PENDING-VERIFICATION.md` is not the current status.
 
-Projected is not a warning that a tool is broken. It is a statement that nobody has checked it, and
-that the code is built so an unchecked guess fails loudly rather than quietly.
+## Safety boundary
 
-## By family
+- Real buy, sell, amend, cancel and e-IPO subscription tools and transport routes are removed.
+  Legacy live settings and environment variables cannot restore them.
+- Brokerage portfolio, cash, orders and history remain reads. They never switch to paper data.
+- `paper_*` operates on the local simulation ledger. `virtual_*` operates only on Stockbit's
+  `/virtualtrading/*` API using the ordinary market-data session.
+- Credentials stay in the local credential store. No MCP tool accepts a PIN. Verification reports
+  retain controlled test parameters, statuses, counts and comparisons, not account balances,
+  identity records, tokens, or raw responses.
 
-Counts are read off the running server — the same `_meta` a client sees and the same numbers
-[`TOOLS.md`](TOOLS.md) is generated from, so this table cannot drift from the code.
+The offline suite checks the route boundary, legacy-setting refusal, simulation confirmation,
+ambiguous write outcomes, account masking, cache separation, chart persistence verification, and
+transport isolation. Tests never submit real orders.
 
-| Family | Tools | Evidence | What was compared against what |
-|---|---|---|---|
-| system | 3 | 3 Observed | `status`, `login` and `logout` read local state only; nothing to project. |
-| market | 18 | 9 Observed, 9 Projected | `quote`, `orderbook`, `price_bands`, `top_movers` and daily bars were read from live responses; the ARA/ARB shape and the `topgainer` casing were both corrected against them (2026-08-09). `broker_flow_intraday` joined them on 2026-09-01 — 335 one-minute points, 09:00–16:14, with `TYPE_CHART_VALUE` and `TYPE_CHART_VOLUME` series per broker — after a docstring that had disclaimed knowing its own shape. `trade_book` was called successfully the same day once `group_by` existed, but its `mode`/`data_modes` enums have still never been exercised, so it stays Projected. The rest of the internals — `running_trade`, `order_queue`, `prices_batch`, `chart_series`, `market_prices` — are real routes with projected field names. |
-| bandarmology | 6 | 3 Observed, 3 Projected | NET vs GROSS, the four boards and the six period windows confirmed live 2026-08-09; `broker_distribution` cross-checked against Stockbit's own screens. `broker_activity`, `bandar_detector` and the broker directory are projected. |
-| analysis | 9 | 9 Observed | Local mathematics over observed bars. Indicators, patterns, backtests and `position_size` are computed here, not read. |
-| company | 9 | 1 Observed, 8 Projected | Routes read off the web bundle. `shareholders` is the exception, settled 2026-09-01: it had never once answered, because it sent its one-shot token as a query parameter the endpoint does not read. Capturing Stockbit's own request over CDP showed the token belongs in a raw `Authorization` header, and the chart it then returned is where its `series`, points and `timeframes` were read from. |
-| fundamentals | 10 | 4 Observed, 6 Projected | `keystats`, `ratios`, `financials` and `sentiment_stream` were read live; seasonality and the rest are projected. |
-| insider | 4 | 4 Projected | |
-| corpaction | 7 | 7 Projected | |
-| stream | 7 | 7 Projected | The per-symbol feed is the closest to settled; none has been observed from this server. |
-| screener | 5 | 5 Projected | The *route* is settled — running a saved screen is a plain GET, confirmed 2026-08-09 — but the request bodies and row shapes are not. |
-| account | 11 | 2 Observed, 9 Read-back | The watchlist index/detail split and the screener GET were confirmed live 2026-08-09. Every edit re-reads the account and reports what it found (ADR-0006). |
-| chartbit | 17 | 17 Observed | Layout persistence confirmed 2026-08-24 on `/chartbit/charts`; the retired per-symbol routes accept a valid body and store nothing (ADR-0003 Amendment 2). |
-| alerts | 4 | 4 Observed | Live end-to-end run 2026-08-05: rules fired, notifications delivered. |
-| pine | 1 | 1 Observed | Generated locally from observed series. |
-| workflows | 2 | 2 Observed | Every built-in ran end to end on live data 2026-08-05. |
-| **trading** | 16 | **16 Projected** | **Nothing on `carina.stockbit.com` has been observed.** Reading it needs a securities session, which needs the account owner's PIN at their own terminal. |
-| **e-IPO** | 9 | **9 Projected** | Same reason, on `api-sekuritas.stockbit.com`. |
+## Authenticated checks
 
-Paper mode is Observed by construction: the ledger is local, so there is no wire shape to guess. It
-proves the *protocol*, not the field mappings — turning paper on changes nothing about the rows
-above.
-
-## Checks that were run
-
-Recorded when they were run; each is a specific comparison, not a claim that a feature "works".
-
-| Check | Result | Evidence |
+| Area | What was exercised | Result / limit |
 |---|---|---|
-| Volume unit is LOTS, not shares | pass | BBRI value/volume = 303,668 against an average price of 3,037 — exactly price × 100. |
-| Support/resistance labelled correctly | pass | BBRI, TLKM, GOTO: zero levels labelled support above the close or resistance below it. Was broken; fixed in `1c4e52c`. |
-| Quote matches Stockbit | pass | BBRI 3020, −40 (−1.31%), best bid 3020 / offer 3030. |
-| Bars reach back far enough | pass | 220 sessions (2025-09-03 to 2026-08-05) in 19 requests, not truncated. |
-| The write boundary is enumerated, not assumed | pass | Every non-GET route is sorted into a named class citing the ADR that admitted it: session refresh, Chartbit persistence (ADR-0003), the four order routes plus the e-IPO pair (ADR-0004), and watchlist/screener edits (ADR-0006), with a fifth class for POSTs that read. `test/transport.test.ts` asserts nothing else mutates; `test/tools.test.ts` asserts on a real server exactly which tools can change anything and that none of them is reachable from a saved workflow recipe. |
-| Broker distribution against live data | pass | BBRI 2026-08-05, REGULER board, IDR: 8 brokers charted, returned in 156 ms as part of the `deep_dive` workflow. |
-| Workflows run end to end on live data | pass | `deep_dive` on BBRI: quote 388 ms, technicals 2542 ms, chart 630 ms, brokers 156 ms — no step failed. |
-| Alert daemon fires and delivers on live data | pass | BBRI: `close > 2000` fired at 3020 and `rsi14 < 70` at 56.18; desktop notifications delivered, both logged; a second pass fired 0. |
+| Ordinary login | Browser login and separate API process reads | Passed. The browser remains usable for charts. |
+| Securities login | One-shot PIN exchange, read-only portfolio proof, then separate MCP process | Passed after fixing the grant envelope, storage-backend reporting, and encrypted access-cache handoff. The PIN is never saved by the client. |
+| Securities renewal | Public frontend refresh headers/body checked; live renewal attempted | Renewal remains unverified: the refresh endpoint returned 401. Fresh login and cached access work. Re-run local `trading-login` when the securities session expires. Login/check use portfolio reads instead of unnecessarily rotating a new session. |
+| Market, analysis and company data | Representative calls across the registered read tools | Reusable sweep covers quotes, books, broker flow, fundamentals, insider data, news, calendars, screeners, local calculations and renderers. See coverage below. |
+| Real portfolio | Portfolio, absent position, cash, orders, history, performance, fees, tradability and masked account metadata | Actual nested response shapes were inspected without recording account values. Empty holdings/orders do not prove nonempty position/order mappings; synthetic regressions cover those branches. |
+| Stockbit virtual account | Portfolio, held/absent position, orders and configuration | Reads passed against the website simulation account. |
+| Stockbit virtual order lifecycle | Controlled simulated sell, amend and cancel through actual MCP calls on 2026-09-25 | Passed by read-back: a one-lot SUPA sell at 610 IDR became `OPEN`, amendment to 605 IDR produced a replacement `OPEN` order, and cancellation produced `WITHDRAWN`; the original order remained `AMENDED`. No open test orders remained. Holding quantities, costs and reservations, and virtual trading balance were unchanged by this scenario. |
+| Stockbit virtual fills | User-authorized one-lot SUPA sell and one-lot GOTO buy through actual MCP calls on 2026-09-25 | Both orders reached `MATCH` with `total: 1`, `done: 1`, `open: 0`. Portfolio quantities and cash changed accordingly; unrelated holdings and preexisting orders were unchanged, with no open orders left. Activation and partial fills remain unverified. Raw `price_average` and `amount.matched` were fee-adjusted in these responses; see below. |
+| Chart browser | Open, inspect shapes, analyze without drawing, draw one level, screenshot, save, REST read-back and selective cleanup | Passed. The created entity was found in saved drawings. Cleanup removed only that entity; the original two drawings remained and the saved count returned to two. |
+| Watchlist edits | Temporary list: create, rename, add/remove BBRI, favorite/unfavorite, delete | Controlled scenario checks each write by reading it back and verifies existing lists remain unchanged. |
+| Screener edits | Temporary screen: save, favorite/unfavorite, delete | Controlled scenario verifies the current frontend request shape and removes the test screen afterward. |
+| Client protocols | stdio smoke, SDK initialize/list/call, loopback Streamable HTTP | Local protocol checks passed. Real Claude/ChatGPT account installation is a separate setup step; see [CLIENTS.md](CLIENTS.md). |
 
-Route-level probes settled on 2026-08-09 — `top_movers` casing, `broker_summary` transaction types
-and market boards, the `period` catalogue, the ARA/ARB shape, the watchlist index/detail split, the
-`/charts/{SYM}/daily` timeframe spelling and the screener GET — are recorded with their exact
-evidence in [`PENDING-VERIFICATION.md`](PENDING-VERIFICATION.md). Refresh-token rotation was
-observed on 2026-08-03; Chartbit persistence on 2026-08-24.
+## Corrections driven by the live checks
 
-## How to settle a projection
+- Securities grants now accept the observed `data.token` with target `2`; unsupported targets are
+  refused before a PIN request. An unsuccessful PIN exchange is never retried automatically.
+- Earnings supplies the required page, sort and order defaults. Trade-book probes supply both
+  symbol and `group_by`. One-week chart series preserves hourly Jakarta timestamps instead of
+  pretending it is daily data.
+- `price_market` explicitly reads current orderbook market data because the old price endpoint
+  rejects the documented request. Unsupported historical-date requests fail explicitly.
+- Stream post detail uses the website's empty-body POST. Watchlist search includes the required
+  watchlist ID and one-based page; cache keys retain those filters.
+- Chart drawing reads supply both symbol and chart ID, deriving them only from unambiguous layout
+  metadata. Drawing-template reads specify their line-tool type. Save verification bypasses stale
+  cache; REST drawing writes check changed values and deleted keys, not just key presence.
+- Chart labels preserve literal JavaScript replacement characters. Selective cleanup can name
+  specific server-owned shape IDs and refuses IDs the server does not own.
+- Watchlist names respect Stockbit's 25-character limit; favorite changes send `is_favorite`
+  explicitly and preserve other favorites. Ad-hoc screener runs use the observed encoded filter
+  and universe payload and expose pagination.
 
-It takes one live call per tool, and it is the same four steps every time.
+## Virtual lifecycle follow-up — 2026-09-25
 
-1. Call the tool once against a live session.
-2. Read `unmapped.sampleKeys` (market data) or `unmappedKeys` (account data) on the result. Those
-   are the wire keys the code did not recognise.
-3. Make one edit to the candidate key list in the relevant `src/` module, so the value is read from
-   the real name.
-4. Re-tag the tool's evidence from `projected` to `observed`, regenerate `docs/TOOLS.md`
-   (`npm run docs:tools`), and record the comparison in the table above.
+At 11:09:59 WIB, the controlled virtual sell lifecycle ran while Stockbit accepted virtual orders.
+The one-lot SUPA limit sell was placed at 610 IDR and amended to 605 IDR, above the observed
+484 IDR bid and 486 IDR offer. The sell acknowledgement carried `order_ids: [string]`; amendment
+carried `order_id: string` and `command: string`. Fresh reads verified the exact symbol, side,
+price, total lots and good-for-day setting, then the replacement order's `WITHDRAWN` status.
+The test did not fill. Final account comparisons confirmed unchanged holdings and virtual cash,
+with zero open orders. No order IDs or account values are recorded here.
 
-The trading and e-IPO families are the whole outstanding set, and
-[`PENDING-VERIFICATION.md`](PENDING-VERIFICATION.md) lists them in the order of what goes wrong if
-the guess is wrong. Order entry itself is a **live gate**, not a test run: the first real order is
-placed by the account owner, with their own money, watching it.
+An earlier one-lot BBCA buy at 5,300 IDR was refused with HTTP 400 for insufficient virtual cash,
+without creating an order. Together with the previous day's market-closed refusal, this verifies
+buy rejection handling but does not establish the successful buy path. Neither refusal was
+automatically retried. Virtual activation was not repeated on an already active account.
+
+At 11:22:40 WIB, a separate, explicitly authorized test sold one virtual SUPA lot with a
+484 IDR limit, then used part of the proceeds to buy one virtual GOTO lot with a 50 IDR limit.
+Both were read back as `MATCH`, with `total: 1`, `done: 1` and `open: 0`. The SUPA
+`balance_lot` decreased by one and GOTO `balance_lot` increased by one. Virtual cash increased
+by 48,255 IDR after the sell and decreased by 5,010 IDR after the buy, a net test change of
+43,245 IDR. Unlike the earlier cancellation scenario, these authorized fills intentionally changed
+the two simulated holdings. All unrelated holdings and preexisting orders were unchanged, and
+no open orders remained. This verifies successful buy and sell submission and full fills by
+order, position and cash read-back. Activation and partial fills were not exercised.
+
+The raw order fields require care: the sell returned `price_average: 482.548`,
+`amount.matched: 48254.8` and `amount.fee: 145.2`; the buy returned `price_average: 50.1`,
+`amount.matched: 5010` and `amount.fee: 10`. For these orders, `price_average` and
+`amount.matched` included the fee adjustment: the sell matched amount was the 48,400 IDR
+limit notional minus the fee, and the buy matched amount was the 5,000 IDR limit notional plus
+the fee. Do not label raw `price_average` as the exchange execution price. The sell's cash
+credit exceeded its raw matched amount by 0.2 IDR; this observation does not establish a general
+rounding rule. The buy cash debit matched exactly.
+
+The configuration endpoint's formula strings contained buy/sell rates of 0.0015/0.0025, while
+the observed fees for these orders were 0.002/0.003 of their limit notionals. Those strings are
+returned as upstream data, never executed, and must not be assumed to predict the actual fee.
+The observed rates are evidence for these two orders, not a guarantee for other orders or accounts.
+
+## Coverage and reproducibility
+
+Run these from the checkout:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+npm run docs:tools
+npm run smoke
+npm run check:pack
+npm run build:mcpb
+```
+
+The generated inventory currently contains **152 tools** with the `all` profile; the default `core`
+profile contains **41**. The read-only live sweep inventories every registered tool:
+
+```bash
+npm run verify:tools -- --live
+npm run verify:tools -- --live --only quote,portfolio --output .stockbit/verification-subset.json
+```
+
+Its private, ignored report is `.stockbit/verification.json`. A `passed` row means the MCP call
+returned successfully, not that all optional variants were tested. `blocked` means a prerequisite
+was unavailable. `not-run` includes mutations, browser effects and local paper tools that can settle
+a ledger; those need isolated tests or the separate controlled scenarios above. The sweep does not
+place virtual orders or modify watchlists, saved screens or charts.
+
+On 2026-09-25, the full integration suite passed **1,978 tests** with no failures or skips.
+Typecheck, generated tool docs, build, stdio smoke and npm package checks passed after the virtual
+evidence update. A real-browser fixture timed out during an earlier run on 2026-09-24; it passed
+in isolation and in the subsequent complete runs.
+
+The final authenticated read sweep inventoried all **152 tools**: **101 passed**, **43 were
+deliberately excluded from the read-only sweep**, and **8 were blocked**. The blocked set is one
+real `order_detail` without an available order ID and seven e-IPO tools whose handoff/prerequisite
+is unavailable. There were **zero failed calls** in that final sweep. Watchlist/screener mutations
+and chart browser checks were verified separately as described above.
+
+## Remaining limitations
+
+- Stockbit's virtual buy, sell, full fills, sell-price amendment and cancellation have live
+  read-back evidence. Activation and partial fills remain unverified. Offline tests cover request
+  construction, confirmation, rejection, ambiguous outcomes and exact read-back matching.
+- Virtual fee formula strings disagreed with the fees observed on the two filled test orders.
+  Raw `price_average` and `amount.matched` were fee-adjusted; they must not be presented as
+  an execution price and gross consideration without checking their meaning.
+- No order detail was called with a fabricated ID when the real account had no orders.
+- The authenticated e-IPO handoff endpoint returns 404. Dependent e-IPO reads remain unavailable;
+  public `ipo_pipeline` information works. Real-money subscription capability is removed entirely.
+- The underwriters directory endpoint returns 404; the explicitly scoped underwriter-code read
+  works. These are different capabilities, and the server reports the directory failure plainly.
+- Existing chart layouts/studies were not destructively replaced merely to exercise those tools.
+  Browser study addition and low-level layout replacement remain covered by isolated fixtures;
+  the controlled live check covers additive drawing, persistence and exact cleanup.
+- ChatGPT needs its supported Secure MCP Tunnel or a properly secured remote deployment. The
+  optional bearer-protected loopback HTTP endpoint is not a public OAuth deployment. Neither a
+  ChatGPT tunnel nor a Claude account connection was installed during these tests.
+- Private upstream APIs and account permissions can change. This build exposes its supported
+  tools; it does not implement every Stockbit website action.
