@@ -1,9 +1,10 @@
 # Verification status — 2026-09-25
 
-This records checks of the unreleased build on `codex/stockbit-safe-tools`, based on upstream
-`194d429`. Use this checkout or its locally built extension; the published 1.3.1 package does not
-contain these changes. This is a technical test record, not regulatory approval or a guarantee of
-complete Stockbit website coverage.
+This records checks of the implementation developed on `codex/stockbit-safe-tools`, based on
+upstream `194d429`, and prepared for version 1.4.1. Use this checkout or verified 1.4.1-or-later
+release artifacts; the published 1.3.1 package does not contain these changes. The public `v1.4.0`
+tag points to a 1.3.1 package manifest, so its release job stopped before publishing. This is a
+technical test record, not regulatory approval or a guarantee of complete Stockbit website coverage.
 
 ## What the evidence means
 

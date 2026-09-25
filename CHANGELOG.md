@@ -10,6 +10,8 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-09-25
+
 ### Removed
 
 - Real-money order submission, amendment, cancellation and e-IPO subscriptions, including their
@@ -31,6 +33,11 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- Windows CI now runs the complete verification CLI test without requiring POSIX permission
+  bits that Windows cannot represent. The owner-only report check still runs on macOS and Linux.
+- Prepared 1.4.1 consistently across npm, the MCP Registry and Claude manifests. The public
+  `v1.4.0` tag points to package version 1.3.1 and its release job stopped before publishing;
+  this recovery uses a new version rather than rewriting that tag.
 - Securities grant parsing, one-shot PIN submission, portfolio login proof, accurate credential
   backend reporting, and encrypted access-token handoff from the CLI to a separate MCP process.
 - Observed portfolio/cash/fee/account response mapping, repeated-symbol tradability queries,

@@ -13,8 +13,8 @@ boundary, not a claim of OJK approval or a legal compliance certification.
 
 ## Build and sign in
 
-Use **this checkout** until these changes are released. Installing the existing npm release does
-not install the changes described here.
+Use **this checkout** or verified **1.4.1 or later** release artifacts. The 1.3.1 npm package does
+not contain these changes; the earlier `v1.4.0` GitHub tag also points to a 1.3.1 package manifest.
 
 ```bash
 npm ci

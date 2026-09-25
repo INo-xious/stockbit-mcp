@@ -79,7 +79,10 @@ test("CLI verification preserves user artifacts, skips paper state, and removes 
     assert.deepEqual(readdirSync(pine), ["BBRI-price.pine"]);
     // tsx may maintain its own cache here; only this tool's private render directory must be gone.
     assert.deepEqual(readdirSync(localTmp).filter((name) => name.startsWith("stockbit-verification-")), []);
-    assert.equal(statSync(report).mode & 0o777, 0o600);
+    // Windows does not expose POSIX owner-only permission bits through stat.
+    if (process.platform !== "win32") {
+      assert.equal(statSync(report).mode & 0o777, 0o600);
+    }
     assert.ok(!result.stdout.includes(original));
   } finally { rmSync(store, { recursive: true, force: true }); }
 });
