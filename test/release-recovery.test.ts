@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -187,6 +187,10 @@ test("manual recovery cannot authorize a new npm publish, while tag pushes retai
   const lookup = "node scripts/npm-version-state.mjs";
   assert.ok(source.includes(lookup), "replace only the registry lookup, keeping the real shell policy");
   const script = source.replace(lookup, 'printf "%s" "$FIXTURE_NPM_STATE"');
+  // GITHUB_OUTPUT is a file, and `/dev/stdout` is not portable: it is absent in Git Bash on
+  // Windows and may not be an openable device in hosted Linux shells. A relative path works in
+  // both shells and keeps the fixture's output isolated from the checkout.
+  mkdirSync(join(ROOT, ".stockbit"), { recursive: true });
   for (const [event, state, expected, needed] of [
     ["workflow_dispatch", "absent", 1, undefined],
     ["workflow_dispatch", "present", 0, "false"],
@@ -194,14 +198,18 @@ test("manual recovery cannot authorize a new npm publish, while tag pushes retai
     ["push", "present", 0, "false"],
     ["workflow_dispatch", "unexpected", 1, undefined],
   ] as const) {
+    const outputPath = `.stockbit/release-recovery-output-${process.pid}-${event}-${state}.txt`;
     const result = runReleaseShell(script, {
       RELEASE_EVENT: event,
       FIXTURE_NPM_STATE: state,
       VERSION: fixturePackage.version,
-      GITHUB_OUTPUT: "/dev/stdout",
+      GITHUB_OUTPUT: outputPath,
     });
+    const outputFile = join(ROOT, outputPath);
+    const output = existsSync(outputFile) ? readFileSync(outputFile, "utf8") : "";
+    rmSync(outputFile, { force: true });
     assert.equal(result.status, expected, `${event}/${state}: ${result.stderr}`);
-    const output = /^needed=(true|false)$/m.exec(result.stdout)?.[1];
-    assert.equal(output, needed, `${event}/${state} must not authorize the wrong action`);
+    const neededOutput = /^needed=(true|false)$/m.exec(output)?.[1];
+    assert.equal(neededOutput, needed, `${event}/${state} must not authorize the wrong action`);
   }
 });
