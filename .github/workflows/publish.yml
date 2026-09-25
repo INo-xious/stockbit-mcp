@@ -260,21 +260,23 @@ jobs:
           fi
 
       - name: Confirm the registry actually has it
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           name="$(node -p "require('./package.json').name")"
           # npm serves reads through a CDN, so a fresh publish is not visible instantly. Poll rather
           # than assert once — and fail if it never appears, because "published" that cannot be
           # installed is not published.
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -sf --max-time 30 "https://registry.npmjs.org/${name}/${VERSION}" >/dev/null; then
+          for attempt in $(seq 1 60); do
+            if curl -sf --max-time 10 "https://registry.npmjs.org/${name}/${VERSION}" -o /tmp/published-package.json &&
+               node -e 'const p = require("/tmp/published-package.json"); process.exit(p.name === process.argv[1] && p.version === process.env.VERSION ? 0 : 1)' "$name"; then
               echo "::notice::verified $name@$VERSION is live on npm."
               exit 0
             fi
             echo "not visible yet (attempt $attempt); waiting…"
             sleep 10
           done
-          echo "::error::published $name@$VERSION but the registry never served it. Check https://www.npmjs.com/package/$name" >&2
+          echo "::error::npm accepted $name@$VERSION, but it is not visible yet. Once visible, run the Release workflow manually with tag v$VERSION to finish assets and MCP Registry publication. Do not rerun the npm publish job." >&2
           exit 1
 
       # A Release asset, not a publish prerequisite — so it runs after the publish. It does a

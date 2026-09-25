@@ -10,6 +10,12 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release recovery can finish GitHub assets and MCP Registry publication for an existing tag
+  after npm succeeds. It reuses npm's integrity-verified tarball and pins the registry job to the
+  same source commit. npm visibility polling now allows ten minutes for delayed processing.
+
 ## [1.4.1] — 2026-09-25
 
 ### Removed

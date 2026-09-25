@@ -1,8 +1,7 @@
 # Contributing
 
-Thanks for looking. This project reads and — under switches you turn on yourself — writes to a real
-brokerage account, so a few of the rules below are firmer than they would be elsewhere. Everything
-else is ordinary.
+This project reads brokerage accounts and supports explicitly confirmed simulated trading.
+Real-money execution routes are removed and must not be restored.
 
 ## Setup
 
@@ -17,7 +16,7 @@ is not enough.
 | Command | |
 |---|---|
 | `npm run typecheck` | `src/`, `bin/` and `scripts/`. |
-| `npm test` | ~1,160 tests. Offline. |
+| `npm test` | The complete offline test suite. |
 | `npm run build` | Cleans `dist/` first, so an orphan cannot survive a rename. |
 | `npm run smoke` | Starts the built binary over stdio and asks it what it registered. |
 | `npm run check:pack` | Asserts `npm publish` would ship the build and nothing else. |
@@ -29,6 +28,19 @@ is not enough.
 
 CI runs typecheck, test, build, smoke, check:pack and a `docs/TOOLS.md` freshness check on Ubuntu,
 macOS and Windows against Node 22 and 24.
+
+### Recovering an interrupted release
+
+If npm accepts a version but the Publish workflow fails while waiting for registry visibility or
+building release assets, do not rerun its npm publish job. Once the exact version is available on
+npm and its existing `v<version>` tag matches `package.json`, open **Actions → Release → Run
+workflow**, use the workflow from `main`, and enter that tag (for example, `v1.4.1`).
+
+The recovery checks out the existing tag, skips an already completed npm publish, downloads the
+original tarball and verifies its SHA-512 integrity, then builds the extension and finishes the
+GitHub release and MCP Registry entry. The registry job uses the same resolved source commit.
+No tag needs to be deleted or moved. Manual recovery refuses a version missing from npm; new
+versions still use the normal Publish workflow or tag-push release path.
 
 ### `npx stockbit-mcp` does not work *inside this checkout*
 
