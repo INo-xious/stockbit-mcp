@@ -7,8 +7,8 @@ untuk Claude, ChatGPT, serta klien MCP lainnya. Proyek tidak resmi dan tidak ber
 amend, cancel order riil, pemesanan e-IPO, deposit, atau penarikan. Pengaturan `live` lama ditolak.
 Batasan teknis ini bukan pernyataan persetujuan atau sertifikasi kepatuhan OJK.
 
-Gunakan checkout ini sampai perubahannya dirilis; paket npm yang sudah terbit tidak memuat perubahan
-yang belum dirilis ini dan dapat masih memiliki tool transaksi uang riil.
+Gunakan checkout ini atau artefak rilis **1.4.1 atau lebih baru** yang telah terverifikasi. Paket npm
+1.3.1 belum memuat perubahan ini; tag GitHub `v1.4.0` juga masih menunjuk ke manifest versi 1.3.1.
 
 ```bash
 npm ci

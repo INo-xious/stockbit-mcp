@@ -1,6 +1,7 @@
 # Connect Claude and ChatGPT
 
-Use the build from this checkout. An older npm release may still contain real-money tools that have been removed here.
+Use the build from this checkout or verified 1.4.1-or-later release artifacts. The 1.3.1 npm release
+contains real-money tools that have been removed here; the `v1.4.0` GitHub tag is not a 1.4.0 package build.
 
 ## Build and sign in
 
@@ -44,7 +45,8 @@ Local Desktop configuration runs on your machine. A remote connector configured 
 
 After `npm ci`, run `npm run build:mcpb`. It rebuilds the source and creates
 `stockbit-mcp-<version>.mcpb` in the repository directory with the runtime dependencies included.
-This is a local build of the unreleased changes, even if its version number matches an older release.
+This is a local build of the current checkout. A version number alone does not confirm that the
+matching package and extension have been published; check the release assets before distributing it.
 
 In Claude Desktop, open **Settings → Extensions → Advanced settings → Install Extension…** and
 select that file. Set **Tool profile** to `core,chartbit,virtual` to enable chart drawing and website

@@ -1,7 +1,8 @@
 # Documentation
 
 Start with the [README](../README.md) or [Bahasa Indonesia guide](../README.id.md).
-Use this checkout until these changes are released; an older npm build may still expose real-money tools.
+Use this checkout or verified 1.4.1-or-later release artifacts; the 1.3.1 npm build still exposes
+real-money tools. The `v1.4.0` GitHub tag points to a 1.3.1 package manifest and has no built assets.
 
 | Guide | Contents |
 | --- | --- |
