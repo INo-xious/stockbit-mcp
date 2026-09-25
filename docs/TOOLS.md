@@ -313,9 +313,9 @@ Stockbit website virtual portfolio and simulated orders.
 | `virtual_orders` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | — |
 | `virtual_config` | read | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Observed | — |
 | `virtual_activate` | write | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | confirm |
-| `virtual_order` | write | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | symbol*, action*, price*, lots*, confirm |
-| `virtual_order_amend` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | order_id*, symbol*, price*, lots*, confirm |
-| `virtual_order_cancel` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Projected | order_id*, confirm |
+| `virtual_order` | write | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Read-back | symbol*, action*, price*, lots*, confirm |
+| `virtual_order_amend` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Read-back | order_id*, symbol*, price*, lots*, confirm |
+| `virtual_order_cancel` | write, destructive | Stockbit WEBSITE virtual account: simulated money, separate from the local paper ledger and real brokerage portfolio. | Read-back | order_id*, confirm |
 
 ## Prompts
 

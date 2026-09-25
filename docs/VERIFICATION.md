@@ -1,4 +1,4 @@
-# Verification status — 2026-09-24
+# Verification status — 2026-09-25
 
 This records checks of the unreleased build on `codex/stockbit-safe-tools`, based on upstream
 `194d429`. Use this checkout or its locally built extension; the published 1.3.1 package does not
@@ -38,7 +38,7 @@ transport isolation. Tests never submit real orders.
 | Market, analysis and company data | Representative calls across the registered read tools | Reusable sweep covers quotes, books, broker flow, fundamentals, insider data, news, calendars, screeners, local calculations and renderers. See coverage below. |
 | Real portfolio | Portfolio, absent position, cash, orders, history, performance, fees, tradability and masked account metadata | Actual nested response shapes were inspected without recording account values. Empty holdings/orders do not prove nonempty position/order mappings; synthetic regressions cover those branches. |
 | Stockbit virtual account | Portfolio, held/absent position, orders and configuration | Reads passed against the website simulation account. |
-| Stockbit virtual order lifecycle | One controlled simulated buy, followed by account read-back | Stockbit rejected the order because the market was closed. No order ID was created; holdings and order list stayed unchanged. Successful submit, amend and cancel still need a market-hours check. No blind retry was made. |
+| Stockbit virtual order lifecycle | Controlled simulated sell, amend and cancel through actual MCP calls on 2026-09-25 | Passed by read-back: a one-lot SUPA sell at 610 IDR became `OPEN`, amendment to 605 IDR produced a replacement `OPEN` order, and cancellation produced `WITHDRAWN`; the original order remained `AMENDED`. No open test orders remained. Holding quantities, costs and reservations, and virtual trading balance were unchanged. Successful buy submission, activation and fills remain unverified. |
 | Chart browser | Open, inspect shapes, analyze without drawing, draw one level, screenshot, save, REST read-back and selective cleanup | Passed. The created entity was found in saved drawings. Cleanup removed only that entity; the original two drawings remained and the saved count returned to two. |
 | Watchlist edits | Temporary list: create, rename, add/remove BBRI, favorite/unfavorite, delete | Controlled scenario checks each write by reading it back and verifies existing lists remain unchanged. |
 | Screener edits | Temporary screen: save, favorite/unfavorite, delete | Controlled scenario verifies the current frontend request shape and removes the test screen afterward. |
@@ -63,6 +63,21 @@ transport isolation. Tests never submit real orders.
 - Watchlist names respect Stockbit's 25-character limit; favorite changes send `is_favorite`
   explicitly and preserve other favorites. Ad-hoc screener runs use the observed encoded filter
   and universe payload and expose pagination.
+
+## Virtual lifecycle follow-up — 2026-09-25
+
+At 11:09:59 WIB, the controlled virtual sell lifecycle ran while Stockbit accepted virtual orders.
+The one-lot SUPA limit sell was placed at 610 IDR and amended to 605 IDR, above the observed
+484 IDR bid and 486 IDR offer. The sell acknowledgement carried `order_ids: [string]`; amendment
+carried `order_id: string` and `command: string`. Fresh reads verified the exact symbol, side,
+price, total lots and good-for-day setting, then the replacement order's `WITHDRAWN` status.
+The test did not fill. Final account comparisons confirmed unchanged holdings and virtual cash,
+with zero open orders. No order IDs or account values are recorded here.
+
+An earlier one-lot BBCA buy at 5,300 IDR was refused with HTTP 400 for insufficient virtual cash,
+without creating an order. Together with the previous day's market-closed refusal, this verifies
+buy rejection handling but does not establish the successful buy path. Neither refusal was
+automatically retried. Virtual activation was not repeated on an already active account.
 
 ## Coverage and reproducibility
 
@@ -92,9 +107,10 @@ was unavailable. `not-run` includes mutations, browser effects and local paper t
 a ledger; those need isolated tests or the separate controlled scenarios above. The sweep does not
 place virtual orders or modify watchlists, saved screens or charts.
 
-The full integration suite passed **1,978 tests** with no failures. Typecheck, generated tool docs,
-stdio smoke and npm package checks passed. A real-browser fixture timed out during an earlier
-parallel run; it passed in isolation and in the subsequent complete run.
+On 2026-09-25, the full integration suite passed **1,978 tests** with no failures or skips.
+Typecheck, generated tool docs, build, stdio smoke and npm package checks passed after the virtual
+evidence update. A real-browser fixture timed out during an earlier run on 2026-09-24; it passed
+in isolation and in the subsequent complete runs.
 
 The final authenticated read sweep inventoried all **152 tools**: **101 passed**, **43 were
 deliberately excluded from the read-only sweep**, and **8 were blocked**. The blocked set is one
@@ -104,9 +120,9 @@ and chart browser checks were verified separately as described above.
 
 ## Remaining limitations
 
-- Stockbit's virtual submit/amend/cancel success path needs a market-hours check. Activation was
-  not repeated on an already active virtual account. Offline tests cover request construction,
-  confirmation, rejection, ambiguous outcomes and exact read-back matching.
+- Stockbit's virtual sell, amend and cancel success paths have live read-back evidence. Successful
+  buy submission, activation and full/partial fills remain unverified. Offline tests cover request
+  construction, confirmation, rejection, ambiguous outcomes and exact read-back matching.
 - No order detail was called with a fabricated ID when the real account had no orders.
 - The authenticated e-IPO handoff endpoint returns 404. Dependent e-IPO reads remain unavailable;
   public `ipo_pipeline` information works. Real-money subscription capability is removed entirely.

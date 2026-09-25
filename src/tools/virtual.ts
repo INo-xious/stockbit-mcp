@@ -36,16 +36,16 @@ export function registerVirtualTools(define: Definer): void {
   define.write("virtual_activate", NOTE + "Activate Stockbit's virtual account and verify portfolio access. " + WRITE_NOTE,
     { confirm }, (a) => runWrite(() => activateVirtualAccount(a.confirm === true)),
     { destructiveHint: false, idempotentHint: false });
-  define.write("virtual_order", NOTE + "Place a simulated buy or sell on Stockbit and read back the virtual order. " + WRITE_NOTE,
+  define.write("virtual_order", NOTE + "Place a simulated buy or sell on Stockbit and read back the virtual order. A sell order was verified live; successful buys and fills remain unverified. " + WRITE_NOTE,
     { symbol, action: z.enum(["buy", "sell"]), price, lots, confirm },
     (a) => runWrite(() => placeVirtualOrder({ ...a, confirm: a.confirm === true })),
-    { destructiveHint: false, idempotentHint: false });
-  define.write("virtual_order_amend", NOTE + "Change an open virtual order's limit price and total lots. " + WRITE_NOTE,
+    { evidence: "read-back", destructiveHint: false, idempotentHint: false });
+  define.write("virtual_order_amend", NOTE + "Change an open virtual order's limit price and total lots. Verified live for a price change on an unfilled sell order. " + WRITE_NOTE,
     { order_id: z.string(), symbol, price, lots, confirm },
     (a) => runWrite(() => amendVirtualOrder({ ...a, orderId: a.order_id, confirm: a.confirm === true })),
-    { destructiveHint: true, idempotentHint: false });
-  define.write("virtual_order_cancel", NOTE + "Cancel an open virtual order and verify WITHDRAWN status. " + WRITE_NOTE,
+    { evidence: "read-back", destructiveHint: true, idempotentHint: false });
+  define.write("virtual_order_cancel", NOTE + "Cancel an open virtual order and verify WITHDRAWN status. Verified live for an unfilled sell order. " + WRITE_NOTE,
     { order_id: z.string(), confirm },
     (a) => runWrite(() => cancelVirtualOrder({ orderId: a.order_id, confirm: a.confirm === true })),
-    { destructiveHint: true, idempotentHint: false });
+    { evidence: "read-back", destructiveHint: true, idempotentHint: false });
 }

@@ -1,6 +1,7 @@
 # ADR-0013 — Isolate Stockbit website virtual trading
 
-Date: 2026-09-24. Status: accepted; authenticated reads observed, mutations pending live validation.
+Date: 2026-09-24. Updated: 2026-09-25. Status: accepted; authenticated reads observed;
+virtual sell, amend and cancel verified by read-back.
 
 The user requires Stockbit's own virtual trading and read-only access to the real
 portfolio. A local paper ledger does not satisfy the website virtual-account
@@ -37,8 +38,11 @@ HTTP 200 responses carrying an API error are never treated as successful data.
 The public Stockbit frontend was fetched on 2026-09-24, Next build
 `eCXUv0YjiEIhDng_Km-2W`, application commit marker `40f4d75e`. This is **frontend
 evidence**. Subsequently, authenticated portfolio, order-list, configuration, and
-position reads succeeded on 2026-09-24. These four tools are `observed`; mutation
-tools remain `projected` until live response/readback evidence is recorded.
+position reads succeeded on 2026-09-24. These four tools are `observed`. The
+`virtual_order`, `virtual_order_amend` and `virtual_order_cancel` tools have
+`read-back` evidence from the controlled sell lifecycle on 2026-09-25 described
+below. Successful buy submission has not been observed; `virtual_activate` remains
+`projected`.
 
 All chunks are under `https://stockbit.com/_next/static/chunks/`:
 
@@ -74,10 +78,24 @@ lot at 5,300 IDR, the lower band returned by Stockbit's price feed (quote: 6,225
 The service refused it outside market hours. The order list remained empty and a
 before/after holdings comparison was unchanged. No retry, amendment, cancellation,
 or activation followed. This establishes the service's market-hours refusal, not a
-successful order lifecycle. Mutations retain `projected` evidence.
+successful order lifecycle.
 
-Virtual account activation
-and an explicitly authorized virtual order/amend/cancel cycle should be observed
-in the website before upgrading evidence metadata. Support for GTC, virtual history,
-resetting balances, or other virtual features must wait for their own frontend and
-live contracts; no speculative paths are allowed.
+At 11:09:59 WIB on 2026-09-25, actual MCP calls completed an authorized virtual
+sell/amend/cancel lifecycle. A one-lot SUPA limit sell at 610 IDR returned
+`order_ids: [string]` and was read back as `OPEN`. Amendment to 605 IDR returned
+`order_id: string` and `command: string`; the new order was read back as `OPEN`
+and the original as `AMENDED`. Both prices were above the observed 484 IDR bid
+and 486 IDR offer. Cancellation was confirmed by reading the replacement order
+as `WITHDRAWN`. The symbol, action, limit price, total lots and good-for-day fields
+matched the requests. No fills occurred, no open orders remained, and final
+comparisons showed unchanged holding quantities, costs and reservations and
+unchanged virtual trading balance. No order IDs or account values are recorded here.
+
+Earlier on 2026-09-25, a one-lot BBCA buy at 5,300 IDR returned HTTP 400 for
+insufficient virtual cash and created no order. This is evidence of buy rejection
+handling, not of successful buy submission. No blind retry was made.
+
+Virtual activation, successful buy submission and full/partial fills remain
+unverified live. Support for GTC, virtual history, resetting balances, or other
+virtual features must wait for their own frontend and live contracts; no
+speculative paths are allowed.

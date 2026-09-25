@@ -18,7 +18,9 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 ### Added
 
 - Stockbit website virtual portfolio/orders and confirmation-gated simulated order tools, separate
-  from the local `paper_*` ledger. Virtual order success still needs market-hours verification.
+  from the local `paper_*` ledger. A controlled virtual sell/amend/cancel lifecycle was verified by
+  read-back during market hours on 2026-09-25, leaving holdings and virtual cash unchanged and no
+  open orders. Successful buy submission, activation and fills remain unverified.
 - Optional authenticated loopback Streamable HTTP transport, current Claude/ChatGPT setup guide,
   and a privacy-preserving live read sweep with explicit coverage gaps.
 - Selective cleanup of server-created chart drawings by entity ID.
