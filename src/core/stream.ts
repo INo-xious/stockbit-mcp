@@ -166,7 +166,7 @@ function projectItem(row: unknown): StreamItem {
  * five of these six routes have never been seen. The shape work happens in `locateStreamRows` instead,
  * where being wrong is reportable rather than fatal.
  */
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 /**
  * The three places a list of rows sits in this API, tried in order.

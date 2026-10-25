@@ -42,7 +42,7 @@ import type { MarketMoverView, QueryParams, RouteName } from "../http/transport.
  * `z.unknown()` rather than `z.array(...)`: a required inner shape that was guessed wrong turns a
  * working endpoint into a `schema_drift` error, and none of these have been seen.
  */
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 /** Fetch a route and return its `data` block verbatim. `null` when the response carried none. */
 async function readData(

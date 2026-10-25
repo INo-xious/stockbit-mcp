@@ -12,6 +12,12 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ### Fixed
 
+- The zod 4 upgrade broke `main`: typecheck failed and responses with a missing field were refused.
+  Zod 4 treats an object key typed `z.unknown()` as required, so a bars row without `average`, a
+  null `data` block or a broker party without `amount` threw `schema_drift` instead of reading as
+  absent. Those keys are `.optional()` again, `z.record` takes its key schema, tool handlers are
+  typed with `output<ZodObject<S>>`, and optional prompt arguments keep their descriptions. A
+  non-finite chart coordinate is now refused by the argument schema itself.
 - Release recovery can finish GitHub assets and MCP Registry publication for an existing tag
   after npm succeeds. It reuses npm's integrity-verified tarball and pins the registry job to the
   same source commit. npm visibility polling now allows ten minutes for delayed processing.

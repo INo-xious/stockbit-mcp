@@ -145,7 +145,7 @@ export async function getPricePerformance(symbol: string): Promise<PerformancePo
 /* --------------------------------- orderbook --------------------------------- */
 
 // Full depth ladder shape not exhaustively mapped; validate envelope, return data as-is.
-const OrderbookResponse = z.object({ data: z.unknown() }).passthrough();
+const OrderbookResponse = z.object({ data: z.unknown().optional() }).passthrough();
 
 export async function getOrderbook(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);

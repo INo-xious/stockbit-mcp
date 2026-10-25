@@ -265,7 +265,7 @@ function projectTransaction(row: Record<string, unknown>): InsiderTransaction {
   return out as InsiderTransaction;
 }
 
-const RowArray = z.array(z.record(z.unknown())).nullable().optional();
+const RowArray = z.array(z.record(z.string(), z.unknown())).nullable().optional();
 
 /* -------------------------- shared request validation -------------------------- */
 

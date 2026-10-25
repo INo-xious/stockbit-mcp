@@ -42,7 +42,7 @@ import { StockbitError } from "../http/errors.js";
  * The weakest envelope that still catches a non-JSON body: `data` may be anything, including
  * absent. Everything downstream inspects the value instead of trusting a schema for it.
  */
-const RawEnvelope = z.object({ data: z.unknown() }).passthrough();
+const RawEnvelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 /** A body's `data`, or null when the endpoint sent none. Never `undefined`: absence must be visible. */
 function dataOf(body: unknown, context: string): unknown {
@@ -865,7 +865,7 @@ const OVERVIEW_FIELDS = ["indexes", "catalogs", "uma", "notation", "corp_action"
 const ELIGIBILITY_KEY_RE = /margin|day[\s_-]?trade|daytrade/i;
 
 const OverviewResponse = z
-  .object({ data: z.record(z.unknown()).nullable().optional() })
+  .object({ data: z.record(z.string(), z.unknown()).nullable().optional() })
   .passthrough();
 
 export interface CompanyOverview {

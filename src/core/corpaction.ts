@@ -45,7 +45,7 @@ export type { CorpactionType } from "../http/transport.js";
  * `unknown` because these payloads have not been measured, and a required inner field guessed wrong
  * would turn a working endpoint into a schema_drift error.
  */
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 export interface RowSet {
   /** The rows, exactly as Stockbit sent them. */
