@@ -235,8 +235,8 @@ const ROW_CONTAINERS = [
   "data",
 ] as const;
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
-const RowArray = z.array(z.record(z.unknown()));
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
+const RowArray = z.array(z.record(z.string(), z.unknown()));
 
 function readRows(body: unknown, context: string): Rowset {
   const { data } = parseOr(Envelope, body, context);

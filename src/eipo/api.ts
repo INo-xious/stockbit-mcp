@@ -28,7 +28,7 @@ const TTL = { offerings: 300_000, account: 10_000 } as const;
 
 type Row = Record<string, unknown>;
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 /** Peel `{data}` and, when it is there, the second `{data}` inside it. */
 function payloadOf(body: unknown, context: string): unknown {

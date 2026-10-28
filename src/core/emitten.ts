@@ -75,7 +75,7 @@ export async function resolveCompanyId(symbol: string): Promise<string | undefin
 
 /* ---------------------------------- trending ---------------------------------- */
 
-const ListResponse = z.object({ data: z.array(z.record(z.unknown())) }).passthrough();
+const ListResponse = z.object({ data: z.array(z.record(z.string(), z.unknown())) }).passthrough();
 
 export async function getTrending(): Promise<Array<Record<string, unknown>>> {
   return cached("trending", CACHE.defaultTtlMs, async () => {

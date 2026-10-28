@@ -136,20 +136,20 @@ export async function runScreenerTemplate(
 export async function getScreenerMetrics(): Promise<unknown> {
   return cached("screener:metrics", CACHE.keystatsTtlMs, async () => {
     const body = await getJson("screenerMetrics");
-    return parseOr(z.object({ data: z.unknown() }).passthrough(), body, "screener metrics").data;
+    return parseOr(z.object({ data: z.unknown().optional() }).passthrough(), body, "screener metrics").data;
   });
 }
 
 export async function getScreenerPresets(): Promise<unknown> {
   return cached("screener:presets", CACHE.keystatsTtlMs, async () => {
     const body = await getJson("screenerPresets");
-    return parseOr(z.object({ data: z.unknown() }).passthrough(), body, "screener presets").data;
+    return parseOr(z.object({ data: z.unknown().optional() }).passthrough(), body, "screener presets").data;
   });
 }
 
 export async function getScreenerUniverse(): Promise<unknown> {
   return cached("screener:universe", CACHE.keystatsTtlMs, async () => {
     const body = await getJson("screenerUniverse");
-    return parseOr(z.object({ data: z.unknown() }).passthrough(), body, "screener universe").data;
+    return parseOr(z.object({ data: z.unknown().optional() }).passthrough(), body, "screener universe").data;
   });
 }

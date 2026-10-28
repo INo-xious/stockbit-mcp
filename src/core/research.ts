@@ -20,7 +20,7 @@ import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 import { locateStreamRows } from "./stream.js";
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 export interface ResearchCategories {
   /**

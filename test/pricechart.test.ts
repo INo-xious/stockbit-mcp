@@ -250,36 +250,39 @@ test("a malformed annotation is named instead of vanishing", async () => {
   assert.match(summary.annotationsNotDrawn[0].reason, /to_price/);
 });
 
-test("a non-finite coordinate is refused rather than drawn as NaN", async () => {
-  // `z.coerce.number()` lets 1e999 through as Infinity, and one Infinity in the price scale turns
-  // every coordinate on the chart into NaN — a blank SVG that still reports success.
-  const { summary, svg } = await chart({ show_levels: false, annotations: [{ kind: "level", price: 1e999 }] });
-  assert.equal(summary.annotationsDrawn.level, 0);
-  assert.equal(summary.annotationsNotDrawn.length, 1);
-  assert.ok(!svg.includes("NaN"), "and no NaN reaches the emitted SVG");
+/** The argument schema alone, as the SDK applies it before the handler runs. */
+function parseChartArgs(args: Record<string, unknown>) {
+  const entry = tools.get("price_chart");
+  assert.ok(entry, "price_chart is not registered");
+  return z.object(entry.shape).safeParse({ symbol: "BBRI", open_in_stockbit: false, ...args });
+}
+
+test("a non-finite coordinate is refused rather than drawn as NaN", () => {
+  // One Infinity in the price scale turns every coordinate on the chart into NaN — a blank SVG that
+  // still reports success. Since zod 4, `z.coerce.number()` itself rejects a non-finite number, so
+  // 1e999 is refused by the argument schema and never reaches the price scale.
+  const parsed = parseChartArgs({ show_levels: false, annotations: [{ kind: "level", price: 1e999 }] });
+  assert.equal(parsed.success, false);
 });
 
 test("a marker's price is a coordinate too: a non-finite one is refused, an absent one is fine", async () => {
   // `price` is OPTIONAL on a marker, so this arm cannot simply demand a number — but it is still a
-  // coordinate, and the arm used to test only `date` and `label`. An Infinity therefore reached
-  // `yOf` and the marker was counted as drawn while its arrow was emitted as
-  // `<polygon points="521,-Infinity ...">`, in the returned image and in the file at `savedTo`.
+  // coordinate. An Infinity once reached `yOf` and the marker was counted as drawn while its arrow
+  // was emitted as `<polygon points="521,-Infinity ...">`. The argument schema refuses it now.
+  const refused = parseChartArgs({
+    show_levels: false,
+    annotations: [{ kind: "marker", date: "2026-03-04", label: "X", price: 1e999 }],
+  });
+  assert.equal(refused.success, false, "the non-finite price is refused");
+
   const { summary, svg } = await chart({
     show_levels: false,
-    annotations: [
-      { kind: "marker", date: "2026-03-04", label: "X", price: 1e999 },
-      { kind: "marker", date: "2026-03-04", label: "ok" },
-    ],
+    annotations: [{ kind: "marker", date: "2026-03-04", label: "ok" }],
   });
   assert.equal(summary.annotationsDrawn.marker, 1, "the one with no price at all still lands");
-  assert.deepEqual(
-    summary.annotationsNotDrawn.map((n) => [n.index, n.kind]),
-    [[0, "marker"]],
-    "and the non-finite one is reported rather than drawn",
-  );
-  assert.match(summary.annotationsNotDrawn[0].reason, /finite `price`/);
+  assert.deepEqual(summary.annotationsNotDrawn, []);
   assert.ok(!/Infinity|NaN/.test(svg), "no non-finite coordinate reaches the emitted SVG");
-  assert.ok(svg.includes(">ok<"), "the rest of the chart still renders");
+  assert.ok(svg.includes(">ok<"), "the chart renders");
 });
 
 test("an empty window counts nothing drawn, because the card it renders holds nothing", async () => {
