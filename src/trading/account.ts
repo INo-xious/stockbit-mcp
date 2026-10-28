@@ -71,7 +71,7 @@ const TTL = {
 
 type Row = Record<string, unknown>;
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 /** Where the payload was found, so a shape change is visible in the result rather than inferred. */
 export type EnvelopePath = "data" | "data.data";
@@ -120,7 +120,7 @@ interface Rowset {
   payloadKeys: string[];
 }
 
-const RowArray = z.array(z.record(z.unknown()));
+const RowArray = z.array(z.record(z.string(), z.unknown()));
 
 function rowsOf(payload: unknown, context: string): Rowset {
   if (payload === null || payload === undefined) return { rows: [], from: null, payloadKeys: [] };

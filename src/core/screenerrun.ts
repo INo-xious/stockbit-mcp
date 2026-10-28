@@ -179,7 +179,7 @@ export interface RowList {
   raw?: unknown;
 }
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 async function readRowList(route: RouteName, context: string, opts: GetOptions = {}): Promise<RowList> {
   const body = await getJson(route, opts);

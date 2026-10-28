@@ -28,7 +28,7 @@ import { StockbitError, type ErrorKind } from "../http/errors.js";
 
 /* --------------------------------- shared plumbing --------------------------------- */
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 function hasDataMember(body: unknown): body is { data: unknown } {
   return typeof body === "object" && body !== null && !Array.isArray(body) && "data" in body;

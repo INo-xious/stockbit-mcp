@@ -113,24 +113,24 @@ const Row = z
     // 0, and a PRICE of 0 is far worse than a statistic of 0: an alert rule `close < 100` fires on
     // it, `backtest` divides by an entry price of zero, and the chart collapses its axis. A row
     // that cannot yield a price is refused in `toBar`.
-    open: z.unknown(),
-    high: z.unknown(),
-    low: z.unknown(),
-    close: z.unknown(),
+    open: z.unknown().optional(),
+    high: z.unknown().optional(),
+    low: z.unknown().optional(),
+    close: z.unknown().optional(),
     // Deliberately NOT `z.coerce.number().optional()`. `z.coerce.number()` is `Number()`, and
     // `Number("")`, `Number(null)`, `Number("  ")`, `Number(false)` and `Number([])` are every one
     // of them 0 — so an empty field would reach `toBar` as the FIGURE ZERO and the absence would be
     // destroyed one layer before anything could report it, making `number | null` on `Bar` pure
     // decoration. The value is carried through untouched and read by `optionalNumber` below.
-    average: z.unknown(),
-    volume: z.unknown(),
-    value: z.unknown(),
-    frequency: z.unknown(),
-    change: z.unknown(),
-    change_percentage: z.unknown(),
-    foreign_buy: z.unknown(),
-    foreign_sell: z.unknown(),
-    net_foreign: z.unknown(),
+    average: z.unknown().optional(),
+    volume: z.unknown().optional(),
+    value: z.unknown().optional(),
+    frequency: z.unknown().optional(),
+    change: z.unknown().optional(),
+    change_percentage: z.unknown().optional(),
+    foreign_buy: z.unknown().optional(),
+    foreign_sell: z.unknown().optional(),
+    net_foreign: z.unknown().optional(),
   })
   .passthrough();
 
