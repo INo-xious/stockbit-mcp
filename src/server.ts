@@ -14,6 +14,10 @@ import { VERSION } from "./version.js";
 import { registerWorkflowPrompts } from "./prompts.js";
 import type { ToolProfile } from "./tools/_define.js";
 
+// Bound collection validation before Zod traverses tool arguments (GHSA-46jr-4wx8-v453).
+// The HTTP byte cap alone still permits hundreds of thousands of small elements.
+export const MAX_TOOL_INPUT_ELEMENTS = 10_000;
+
 export interface CreateServerOptions {
   /** Which families and tools to register. Omitted means all of them. */
   profile?: ToolProfile;
@@ -31,7 +35,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
 
   const server = new McpServer(
     { name: "stockbit", version: VERSION },
-    { instructions: buildInstructions(surface) },
+    { instructions: buildInstructions(surface), maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS },
   );
 
   registerTools(server, {

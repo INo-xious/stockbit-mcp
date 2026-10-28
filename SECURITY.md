@@ -9,28 +9,27 @@ Security updates are currently provided for the following versions:
 | 1.x     | ✅        |
 | < 1.0   | ❌        |
 
-Use this checkout for the unreleased no-real-money build; older published versions may still
-contain live order tools. Install dependencies using the committed lockfile.
+Use 1.4.1 or later for the build without real-money execution; older published versions may still
+contain live order tools. Contributors should install dependencies using the committed lockfile.
 
 ## Dependency Security
 
-This project requires a patched version of `@modelcontextprotocol/sdk`.
+The runtime dependency floors are `@modelcontextprotocol/sdk ^1.32.1` and `zod ^4.6.7`,
+and the committed lockfile resolves those versions. These include fixes for SDK OAuth credential
+binding, cross-origin redirects, task isolation, bearer-token audience validation, and oversized
+collection validation. The lockfile also updates vulnerable transitive packages, including
+`hono`, `proxy-addr`, `body-parser`, `fast-uri`, `ip-address`, and `qs`.
 
-Versions older than `1.26.0` are affected by one or more high-severity
-vulnerabilities, including:
-
-- Cross-client data leakage through shared server or transport reuse
-- Regular expression denial of service in URI templates
-- Missing default DNS-rebinding protection for HTTP-based servers
-
-Project releases must resolve `@modelcontextprotocol/sdk` to version `1.26.0`
-or newer. `package.json` requires `^1.30.0` and the committed lockfile resolves
-`1.30.0`.
+The SDK's collection guard is opt-in: upgrading alone does not enable it. Every production server
+sets `maxToolInputElements: 10000`, bounding the total array elements and object members in a tool
+call before Zod validation. HTTP requests are also limited to 1 MiB by our body reader and transport.
+Calls exceeding either limit are refused. The CI audit job fails on high or critical findings.
 
 The server uses stdio by default. The optional Streamable HTTP transport binds only to loopback,
 requires a bearer secret, validates Host/Origin, and creates an isolated transport/server pair per
-request. It serves one local Stockbit account. It is not a multi-user service or a public OAuth
-deployment; see [client setup](docs/CLIENTS.md).
+request. It serves one local Stockbit account. The bearer secret is compared directly; the adapter
+does not use the SDK's OAuth `requireBearerAuth` or `verifyBearerToken` middleware, and no
+experimental task store is configured. See [client setup](docs/CLIENTS.md).
 
 `hono` is a transitive SDK dependency. The optional HTTP entry point uses Node's HTTP server and
 the SDK's Streamable HTTP transport; it does not import Hono middleware.
@@ -42,8 +41,9 @@ on `main` and in [`CHANGELOG.md`](CHANGELOG.md) but has not been tagged yet.
 
 | Reported | Fixed in | |
 |---|---|---|
-| Order entry | Unreleased | **`confirm: true` could skip the human entirely.** The confirmation gate was seeded from the caller's boolean and every later gate — including MCP elicitation, the only channel that reaches a person — was guarded behind it, so a model could place an order the account holder never saw by asserting that they had already agreed. The audit log recorded `via: "explicit"` for both cases, so afterwards the two could not be told apart. The ask now runs **before** the `confirm` check and behind no such guard; a declined dialog refuses the order whatever `confirm` said; and the log's `via` vocabulary distinguishes all five ways the gate can be satisfied. Applied to `eipo_order` and to paper mode by the same shared gate. See [`docs/adr/0010-elicitation-is-decisive.md`](docs/adr/0010-elicitation-is-decisive.md). |
-| Dependencies | Unreleased | Four moderate GHSAs against `hono 4.12.33`, none of them reachable from this server — see **Dependency Security** above. Hygiene, not an exploitable fix. |
+| Order entry | 1.2.2; real-money execution removed in 1.4.0 | **`confirm: true` could skip the human entirely.** The confirmation gate trusted the caller's boolean before attempting MCP elicitation. The shared gate now asks first and refuses a declined dialog regardless of `confirm`. Clients without elicitation remain a documented weaker mode; `trading.elicitation: required` refuses that fallback. See [the published advisory](https://github.com/INo-xious/stockbit-mcp/security/advisories/GHSA-m78m-g6g8-4455), [ADR-0010](docs/adr/0010-elicitation-is-decisive.md), and [ADR-0012](docs/adr/0012-no-real-money-execution.md). |
+| Dependencies | 1.2.2 | Four moderate GHSAs against `hono 4.12.33`; the affected middleware was not imported by this server. |
+| Dependencies and MCP input limits | Unreleased | Patched SDK, Zod and transitive dependencies; enabled the SDK's collection limit alongside the existing HTTP body cap. See **Dependency Security** above. |
 
 ## Where credentials are stored
 

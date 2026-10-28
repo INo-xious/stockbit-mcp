@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { MAX_MCP_BODY_BYTES, resolveMcpTransport, startHttpMcpServer, type HttpMcpOptions } from "../src/mcp/http.ts";
-import { createServer } from "../src/server.ts";
+import { createServer, MAX_TOOL_INPUT_ELEMENTS } from "../src/server.ts";
 import { parseToolProfile } from "../src/tools/_profile.ts";
 
 const TOKEN = "test-token-that-is-only-for-offline-tests-0123456789";
@@ -102,6 +102,46 @@ test("the Stockbit server publishes its actual tools and prompts over HTTP", asy
     await client.close();
     await listener.close();
   }
+});
+
+test("collection limits reject small HTTP bodies before schema validation or tool execution", async () => {
+  let parsed = 0;
+  let called = 0;
+  const listener = await startHttpMcpServer(() => {
+    const server = createServer({ profile: parseToolProfile("core") });
+    server.registerTool("collection_probe", {
+      inputSchema: { value: z.preprocess((value) => { parsed++; return value; }, z.unknown()) },
+    }, async () => {
+      called++;
+      return { content: [{ type: "text", text: "accepted" }] };
+    });
+    return server;
+  }, OPTIONS);
+  try {
+    // One root member plus the array elements exactly fills the budget.
+    const values: unknown[] = [
+      Array(MAX_TOOL_INPUT_ELEMENTS - 1).fill(0),
+      Array(MAX_TOOL_INPUT_ELEMENTS).fill(0),
+      { nested: Object.fromEntries(Array.from({ length: MAX_TOOL_INPUT_ELEMENTS }, (_, i) => [String(i), 0])) },
+    ];
+    for (const [index, value] of values.entries()) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: 42, method: "tools/call",
+        params: { name: "collection_probe", arguments: { value } } });
+      assert.ok(Buffer.byteLength(body) < MAX_MCP_BODY_BYTES, "the byte cap does not stop this input");
+      const response = await send(listener.url, { headers: { "mcp-protocol-version": "2025-11-25" }, body });
+      assert.equal(response.status, 200);
+      const result = JSON.parse(response.text).result;
+      if (index === 0) {
+        assert.notEqual(result.isError, true);
+        assert.equal(result.content[0].text, "accepted");
+      } else {
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /maximum of 10000 elements/);
+      }
+    }
+    assert.equal(parsed, 1, "oversized arguments never reach Zod preprocessing");
+    assert.equal(called, 1, "oversized arguments never execute the handler");
+  } finally { await listener.close(); }
 });
 
 test("auth, DNS rebinding, origin, routing, and body guards run before tool creation", async () => {
