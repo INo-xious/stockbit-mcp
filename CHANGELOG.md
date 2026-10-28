@@ -10,6 +10,17 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Security
+
+- Require MCP SDK 1.32.1 and Zod 4.6.7 or newer within their current major versions, and update
+  vulnerable transitive dependencies (`hono`, `proxy-addr`, `body-parser`, `fast-uri`, `ip-address`,
+  and `qs`). The lockfile passes `npm audit` with zero vulnerabilities.
+- Enable the SDK's opt-in 10,000-element tool-input limit before Zod validation, alongside the
+  existing 1 MiB HTTP body limit. Requests with many small collection members are refused before
+  validation or tool execution. The CI audit job now blocks high/critical dependency findings.
+- Correct the security policy's historical confirmation-gate fix version to 1.2.2 and document
+  real-money execution removal in 1.4.0; the published advisory now records the patched version.
+
 ### Fixed
 
 - The zod 4 upgrade broke `main`: typecheck failed and responses with a missing field were refused.

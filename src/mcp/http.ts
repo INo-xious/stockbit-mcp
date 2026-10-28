@@ -166,7 +166,11 @@ export async function startHttpMcpServer(
       if (res.destroyed) return;
       server = factory();
       active.add(server);
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+        maxRequestBodySize: MAX_MCP_BODY_BYTES,
+      });
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (err) {
