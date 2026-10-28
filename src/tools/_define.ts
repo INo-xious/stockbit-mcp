@@ -52,7 +52,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodRawShape, ZodTypeAny, objectOutputType } from "zod";
+import type { ZodObject, ZodRawShape, output } from "zod";
 
 /**
  * One registration module = one section of the Stockbit UI.
@@ -113,7 +113,7 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
 
 /** The handler a caller writes: its argument is typed from the shape, exactly as the SDK types it. */
 export type TypedHandler<S extends ZodRawShape> = (
-  args: objectOutputType<S, ZodTypeAny>,
+  args: output<ZodObject<S>>,
 ) => Promise<unknown>;
 
 /** Per-tool overrides. `evidence` overrides the family default; the rest are MCP annotations. */

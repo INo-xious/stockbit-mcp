@@ -1881,7 +1881,7 @@ export function registerTools(
     {
       name: z.string().describe("Workflow name from workflow_list, e.g. deep_dive"),
       input: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe("Inputs for the workflow, e.g. { \"symbol\": \"BBRI\" }"),
     },
