@@ -119,7 +119,7 @@ const Party = z
     // NOT `z.coerce.number()`. `Number("")` and `Number(null)` are 0, so coercing here would
     // destroy the absence before `mapParty` could report it — the same defect this project fixed
     // in `src/core/bars.ts`. The raw value is read by `wireNumber` instead.
-    amount: z.unknown(),
+    amount: z.unknown().optional(),
   })
   .passthrough();
 

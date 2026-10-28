@@ -173,7 +173,7 @@ const Response = z
             brokers_sell: z.array(BrokerRow),
           })
           .passthrough(),
-        bandar_detector: z.record(z.unknown()).optional(),
+        bandar_detector: z.record(z.string(), z.unknown()).optional(),
         from: z.string().optional(),
         to: z.string().optional(),
       })

@@ -145,8 +145,10 @@ export function registerWorkflowPrompts(server: McpServer, surface: Surface): nu
     for (const input of workflow.inputs) {
       // MCP prompt arguments are strings on the wire — there is no number type in the protocol —
       // so a numeric input like `bars` arrives as "200" and `workflow_run`'s own schema coerces it.
-      const field = z.string().describe(input.description);
-      argsSchema[input.name] = input.required ? field : field.optional();
+      // Describe the outermost schema: since zod 4, `.optional()` returns a new schema that does not
+      // carry the inner one's description, and the SDK reads the argument's description from it.
+      const field = input.required ? z.string() : z.string().optional();
+      argsSchema[input.name] = field.describe(input.description);
     }
 
     server.registerPrompt(

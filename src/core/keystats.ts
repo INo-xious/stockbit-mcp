@@ -11,7 +11,7 @@ import { cached, parseOr } from "./_util.js";
 import { CACHE } from "../config.js";
 import { normalizeSymbol } from "../symbol.js";
 
-const Envelope = z.object({ data: z.unknown() }).passthrough();
+const Envelope = z.object({ data: z.unknown().optional() }).passthrough();
 
 export async function getKeystats(symbol: string): Promise<unknown> {
   const sym = normalizeSymbol(symbol);

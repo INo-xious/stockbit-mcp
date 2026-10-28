@@ -129,7 +129,7 @@ export function registerChartbitTools(define: Definer): void {
       "tell the user plainly rather than reporting success.",
     {
       layout_id: z.string().describe("Layout id whose content will be REPLACED"),
-      layout: z.unknown().describe("The layout object to persist, normally from chartbit_layout"),
+      layout: z.unknown().optional().describe("The layout object to persist, normally from chartbit_layout"),
       confirm: z.boolean().describe("Must be true. The user must have agreed to this specific write."),
       allow_lossy: z
         .boolean()
@@ -161,7 +161,7 @@ export function registerChartbitTools(define: Definer): void {
       chart_id: z.string().describe("Chart id within the layout"),
       symbol: z.string().optional().describe("IDX ticker, for the read-back"),
       sources: z
-        .array(z.object({ key: z.string(), value: z.unknown() }))
+        .array(z.object({ key: z.string(), value: z.unknown().optional() }))
         .describe("Line-tool states, exactly as read from chartbit_drawings"),
       deleted_keys: z.array(z.string()).optional().describe("Keys of drawings to remove server-side"),
       confirm: z.boolean().describe("Must be true. The user must have agreed to this specific write."),
@@ -253,7 +253,7 @@ export function registerChartbitTools(define: Definer): void {
     {
       symbol: z.string().describe("IDX ticker, e.g. BBRI"),
       annotations: z
-        .array(z.record(z.unknown()))
+        .array(z.record(z.string(), z.unknown()))
         .describe(
           'Annotations: {kind:"level",price,label?} | {kind:"zone",from,to,label?} | ' +
             '{kind:"trend",from_date,from_price,to_date,to_price,label?} | ' +
