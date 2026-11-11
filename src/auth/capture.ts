@@ -20,10 +20,17 @@ export function looksLikeJwt(v: unknown): v is string {
  * refreshes into a token the API rejects — an auth failure hours later, far from its cause.
  */
 export function tokenUrlAllowed(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
   // Securities / e-IPO partner tokens. Different audience; never the main session.
   if (/api-sekuritas\.stockbit\.com|eipo|\/partner\//i.test(url)) return false;
-  if (/wssocial\.stockbit\.com/i.test(url)) return true;
-  if (!/exodus\.stockbit\.com/i.test(url)) return false;
+  if (hostname === "wssocial.stockbit.com") return true;
+  // Both Exodus hosts issue main sessions. Match the host itself, not text in a path or query.
+  if (hostname !== "exodus.stockbit.com" && hostname !== "exodus.api.stockbit.com") return false;
 
   // For email/password accounts with phone verification, this final verification response issues
   // the usable session token. No additional token response occurs after the logged-in page loads.

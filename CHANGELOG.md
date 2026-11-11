@@ -10,6 +10,12 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+### Fixed
+
+- Login capture and HAR import now accept main-session responses from `exodus.api.stockbit.com`,
+  including the final new-device phone verification response. Token sources use exact hostname
+  checks so unrelated URLs containing a Stockbit host name are rejected.
+
 ### Security
 
 - Require MCP SDK 1.32.1 and Zod 4.6.7 or newer within their current major versions, and update
