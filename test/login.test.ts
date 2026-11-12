@@ -60,6 +60,36 @@ test("tokenUrlAllowed rejects securities and E-IPO token sources", () => {
   assert.equal(tokenUrlAllowed("https://exodus.stockbit.com/login/v4/otp/verify"), false);
 });
 
+test("tokenUrlAllowed accepts session responses on the exodus API host", () => {
+  for (const path of [
+    "/login/v6/username",
+    "/login/v3/username/browser",
+    "/login/v6/social",
+    "/login/v4/new-device/prompt/verify",
+    "/login/v4/new-device/verify",
+    "/auth/v2/login",
+  ]) {
+    assert.equal(tokenUrlAllowed(`https://exodus.api.stockbit.com${path}`), true, path);
+  }
+  for (const path of ["/login/v4/otp/verify", "/login/v4/verification", "/partner/login/v6/username"]) {
+    assert.equal(tokenUrlAllowed(`https://exodus.api.stockbit.com${path}`), false, path);
+  }
+});
+
+test("tokenUrlAllowed checks the hostname rather than a matching URL substring", () => {
+  for (const host of ["exodus.stockbit.com", "exodus.api.stockbit.com", "wssocial.stockbit.com"]) {
+    for (const url of [
+      `https://${host}.evil.test/login/v6/username`,
+      `https://${host}@evil.test/login/v6/username`,
+      `https://evil.test/${host}/login/v6/username`,
+      `https://evil.test/login/v6/username?host=${host}`,
+    ]) {
+      assert.equal(tokenUrlAllowed(url), false, url);
+    }
+  }
+  assert.equal(tokenUrlAllowed("not a url"), false);
+});
+
 test("securitiesTokenUrlAllowed and tokenUrlAllowed never overlap", () => {
   // Two slots, two predicates, no overlap. A carina token stored in the market-data slot would
   // refresh into a token exodus does not accept, and the failure would arrive hours later as an

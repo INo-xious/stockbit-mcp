@@ -55,6 +55,27 @@ test("scanHar ignores token sources for other audiences", () => {
   assert.equal(r.candidateUrls.length, 0);
 });
 
+for (const encoding of ["plaintext", "base64"] as const) {
+  test(`scanHar captures the API host's final new-device session (${encoding})`, () => {
+    const url = "https://exodus.api.stockbit.com/login/v4/new-device/prompt/verify";
+    const body = JSON.stringify({
+      data: { access: { token: "access-token" }, refresh: { token: JWT } },
+    });
+    const r = scanHar(har(
+      entry("https://exodus.api.stockbit.com/login/v6/username", {
+        text: JSON.stringify({ data: { new_device: { trusted_device: { login_token: JWT } } } }),
+      }),
+      entry(url, {
+        text: encoding === "base64" ? Buffer.from(body).toString("base64") : body,
+        encoding,
+      }),
+    ));
+    assert.deepEqual(r.match, { refresh: JWT, url, entryIndex: 1 });
+    assert.equal(r.candidateUrls.length, 2);
+    assert.equal(r.candidatesWithoutBody, 0);
+  });
+}
+
 test("scanHar reports body-less candidates separately — the 'Copy all as HAR' mistake", () => {
   const r = scanHar(har(entry("https://exodus.stockbit.com/login/v6/username", null)));
   assert.equal(r.match, null);
