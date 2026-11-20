@@ -177,7 +177,10 @@ test("a window title must be the Stockbit SITE, not merely contain the word", ()
 test("only browser processes are considered, which is what makes the title rule safe", async () => {
   // The guard against non-browser windows is the process filter, not the title pattern.
   const presence = await detectStockbit();
-  const browserish = /^(chrome|msedge|firefox|brave|opera|vivaldi|arc|google chrome|microsoft edge|safari)$/i;
+  // macOS reports application names (`MAC_SCRIPT` in src/desktop/browser.ts), and Brave's is
+  // "Brave Browser" — so the bare "brave" alone failed this test on any Mac with Brave running.
+  const browserish =
+    /^(chrome|msedge|firefox|brave|brave browser|opera|vivaldi|arc|google chrome|microsoft edge|safari)$/i;
   for (const name of presence.browsers) {
     assert.ok(browserish.test(name), `${name} is not a browser and should not have been counted`);
   }
