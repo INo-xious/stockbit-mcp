@@ -26,6 +26,7 @@ import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   backendFor,
+  cachedBackendIsStale,
   clearBackendFallback,
   fallenBackSlots,
   recordBackendFallback,
@@ -63,6 +64,32 @@ test("an unrecognised marker value is ignored rather than obeyed", () => {
   // A corrupt or hand-edited marker must not be able to invent a third backend.
   assert.equal(backendFor("main", true, { main: "nonsense" }), "keychain");
   assert.equal(backendFor("main", false, { main: "nonsense" }), "file");
+});
+
+/* ------------------------- a fallback recorded by ANOTHER process ------------------------- */
+//
+// Field report, v1.4.1 on macOS: Claude Desktop's server started, resolved `securities` to the
+// Keychain and cached it. A `trading-login` in a terminal then had its Keychain write refused, stored
+// the credential in the file store and recorded the fallback. The running server kept reading the
+// Keychain and answered "Trading session not set up" until the client was restarted, while its own
+// `status` reported the credential as held in the file store.
+
+test("a cached Keychain choice is stale once another process records a fallback for that slot", () => {
+  assert.equal(cachedBackendIsStale("securities", "keychain", { securities: "file" }), true);
+});
+
+test("a cached Keychain choice stands while nothing has fallen back", () => {
+  assert.equal(cachedBackendIsStale("securities", "keychain", {}), false);
+  // Per slot: another slot's fallback says nothing about this one.
+  assert.equal(cachedBackendIsStale("securities", "keychain", { main: "file" }), false);
+  // And a corrupt value is not obeyed here either.
+  assert.equal(cachedBackendIsStale("securities", "keychain", { securities: "nonsense" }), false);
+});
+
+test("a cached file choice is never second-guessed by the marker", () => {
+  // Nothing moves a slot from the file store back to the Keychain behind a running process.
+  assert.equal(cachedBackendIsStale("main", "file", {}), false);
+  assert.equal(cachedBackendIsStale("main", "file", { main: "file" }), false);
 });
 
 /* ------------------------------ marker persistence ------------------------------ */
