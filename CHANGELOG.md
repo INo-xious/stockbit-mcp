@@ -10,40 +10,34 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-11-25
+
 ### Fixed
 
 - Login capture and HAR import now accept main-session responses from `exodus.api.stockbit.com`,
   including the final new-device phone verification response. Token sources use exact hostname
   checks so unrelated URLs containing a Stockbit host name are rejected.
-- A running server now notices a Keychain→file fallback recorded by another process. The backend
-  was chosen once per slot and cached for the life of the process, so on macOS a Claude Desktop
-  server started before a `trading-login` whose Keychain write was refused kept reading the
-  Keychain, reported "Trading session not set up", and needed a client restart — while its own
-  `status` said the credential was in the file store. A cached Keychain choice is now re-checked
-  against `backend.json`.
+- A running server now notices a Keychain→file fallback recorded by another process. A cached
+  Keychain choice is re-checked against `backend.json`, so portfolio reads find the stored
+  securities session without a client restart and agree with status reporting.
+- Zod 4 compatibility: optional response fields remain optional, `z.record` receives its key schema,
+  tool handlers use the schema output type, and optional prompt arguments keep their descriptions.
+  Non-finite chart coordinates are rejected by the argument schema.
+- Release recovery can finish GitHub assets and MCP Registry publication for an existing tag
+  after npm succeeds. It reuses npm's integrity-verified tarball and pins the registry job to the
+  same source commit. npm visibility polling allows ten minutes for delayed processing.
+- The macOS browser-presence test recognizes the `Brave Browser` application name.
 
 ### Security
 
-- Require MCP SDK 1.32.1 and Zod 4.6.7 or newer within their current major versions, and update
-  vulnerable transitive dependencies (`hono`, `proxy-addr`, `body-parser`, `fast-uri`, `ip-address`,
-  and `qs`). The lockfile passes `npm audit` with zero vulnerabilities.
+- Require MCP SDK 1.32.1 and Zod 4.6.7 or newer within their current major versions, and patch
+  transitive dependencies, including `hono` 4.13.22 and `@hono/node-server` 2.1.11. The release
+  lockfile passes `npm audit` with zero vulnerabilities.
 - Enable the SDK's opt-in 10,000-element tool-input limit before Zod validation, alongside the
   existing 1 MiB HTTP body limit. Requests with many small collection members are refused before
-  validation or tool execution. The CI audit job now blocks high/critical dependency findings.
+  validation or tool execution. CI blocks high/critical dependency findings.
 - Correct the security policy's historical confirmation-gate fix version to 1.2.2 and document
-  real-money execution removal in 1.4.0; the published advisory now records the patched version.
-
-### Fixed
-
-- The zod 4 upgrade broke `main`: typecheck failed and responses with a missing field were refused.
-  Zod 4 treats an object key typed `z.unknown()` as required, so a bars row without `average`, a
-  null `data` block or a broker party without `amount` threw `schema_drift` instead of reading as
-  absent. Those keys are `.optional()` again, `z.record` takes its key schema, tool handlers are
-  typed with `output<ZodObject<S>>`, and optional prompt arguments keep their descriptions. A
-  non-finite chart coordinate is now refused by the argument schema itself.
-- Release recovery can finish GitHub assets and MCP Registry publication for an existing tag
-  after npm succeeds. It reuses npm's integrity-verified tarball and pins the registry job to the
-  same source commit. npm visibility polling now allows ten minutes for delayed processing.
+  real-money execution removal in 1.4.0; the published advisory records the patched version.
 
 ## [1.4.1] — 2026-09-25
 
