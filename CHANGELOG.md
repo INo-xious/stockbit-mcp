@@ -15,6 +15,12 @@ name; see [`CONTEXT.md`](CONTEXT.md) for the rest of the evidence ladder.
 - Login capture and HAR import now accept main-session responses from `exodus.api.stockbit.com`,
   including the final new-device phone verification response. Token sources use exact hostname
   checks so unrelated URLs containing a Stockbit host name are rejected.
+- A running server now notices a Keychain→file fallback recorded by another process. The backend
+  was chosen once per slot and cached for the life of the process, so on macOS a Claude Desktop
+  server started before a `trading-login` whose Keychain write was refused kept reading the
+  Keychain, reported "Trading session not set up", and needed a client restart — while its own
+  `status` said the credential was in the file store. A cached Keychain choice is now re-checked
+  against `backend.json`.
 
 ### Security
 

@@ -674,13 +674,46 @@ function fallbackToFile(slot: StoreSlot, token: string, cause: unknown): void {
 const cached = new Map<StoreSlot, TokenStore>();
 
 /**
+ * Whether a cached backend choice has been overtaken by a fallback ANOTHER process recorded.
+ *
+ * The marker is read once per slot, at first use, and the choice is then cached for the life of
+ * the process. A long-lived server — the one Claude Desktop keeps running — can therefore pick the
+ * Keychain for `securities` at 15:08, and a `stockbit-auth trading-login` in a terminal at 15:16 can
+ * have the Keychain refuse its write, store the credential in the file store and record the
+ * fallback. The server never looks again: it keeps reading the Keychain, finds nothing, and tells
+ * the user the trading session is not set up while `status` — which re-reads the marker — says the
+ * credential is in the file store. Restarting the client was the only cure.
+ *
+ * Only a cached KEYCHAIN choice is re-checked. Recording a fallback is the one transition that
+ * happens behind a running server's back as a matter of course, and it is the one that strands a
+ * live credential. The reverse — clearing the marker to retry the Keychain — is a deliberate step
+ * whose next login writes the Keychain anyway; a process already on the file store keeps it, as
+ * before this check existed.
+ *
+ * Pure and exported so the rule can be tested off a Mac, the same reason `backendFor` is.
+ */
+export function cachedBackendIsStale(
+  slot: StoreSlot,
+  cachedBackend: StoreBackend,
+  overrides: Record<string, string>,
+): boolean {
+  return cachedBackend === "keychain" && overrides[slot] === "file";
+}
+
+/**
  * The best available store for this platform (Keychain on macOS, else file), for one slot.
  *
  * Defaults to `main` so every existing call site keeps meaning the market-data session.
+ *
+ * A cached Keychain choice is re-checked against the marker on every call. That costs a stat and,
+ * only when the marker exists, a read of a few dozen bytes — against a Keychain read that is itself
+ * a `security` subprocess. A cached file choice is returned as is.
  */
 export function getStore(slot: StoreSlot = "main"): TokenStore {
   const hit = cached.get(slot);
-  if (hit) return hit;
+  if (hit && !cachedBackendIsStale(slot, hit.backend, hit.backend === "keychain" ? readBackendOverrides() : {})) {
+    return hit;
+  }
   // A recorded fallback outranks platform detection. Without this the next process would build a
   // Keychain store over a slot whose live credential is in the file store, read the stale item,
   // and report it as present.
